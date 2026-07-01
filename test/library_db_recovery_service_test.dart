@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:sqlite3/sqlite3.dart' as sqlite3;
 import 'package:test/test.dart';
 import 'package:seforim_library_updater/src/services/library_db_recovery_service.dart';
 
@@ -29,6 +30,33 @@ void main() {
     expect(File('$dbPath.backup.tmp').existsSync(), isFalse);
   });
 
+  test('beginApply(createBackup: false) כותב סימון בלבד — בלי העתקת ה-DB',
+      () async {
+    await service.beginApply(
+      dbPath: dbPath,
+      fromVersion: 1,
+      toVersion: 2,
+      timestamp: 't',
+      createBackup: false,
+    );
+    expect(File(service.markerPathFor(dbPath)).existsSync(), isTrue);
+    expect(File(service.backupPathFor(dbPath)).existsSync(), isFalse);
+    expect(File('$dbPath.backup.tmp').existsSync(), isFalse);
+  });
+
+  test('rollback ללא גיבוי (מסלול דלתא) מנקה סימון בלי לגעת ב-DB', () async {
+    await service.beginApply(
+      dbPath: dbPath,
+      fromVersion: 1,
+      toVersion: 2,
+      timestamp: 't',
+      createBackup: false,
+    );
+    await service.rollback(dbPath);
+    expect(File(dbPath).readAsStringSync(), 'ORIGINAL');
+    expect(File(service.markerPathFor(dbPath)).existsSync(), isFalse);
+  });
+
   test('finishSuccess מנקה גיבוי וסימון', () async {
     await service.beginApply(
         dbPath: dbPath, fromVersion: 1, toVersion: 2, timestamp: 't');
@@ -45,6 +73,28 @@ void main() {
     expect(File(dbPath).readAsStringSync(), 'ORIGINAL');
     expect(File(service.backupPathFor(dbPath)).existsSync(), isFalse);
     expect(File(service.markerPathFor(dbPath)).existsSync(), isFalse);
+  });
+
+  group('checkDbHealthAfterCrash', () {
+    test('מגלגל hot journal (קריסה באמצע apply) ומחזיר true', () {
+      final crashed = _makeHotJournalDb(tmp.path);
+      // רגרסיה: פתיחת readOnly על hot journal נכשלת ב-"readonly database".
+      expect(
+        () => sqlite3.sqlite3
+            .open(crashed, mode: sqlite3.OpenMode.readOnly)
+            .select('PRAGMA quick_check'),
+        throwsA(isA<sqlite3.SqliteException>()),
+      );
+      // ה-RW של השירות מגלגל את ה-journal ומאמת תקינות.
+      expect(service.checkDbHealthAfterCrash(crashed), isTrue);
+      expect(File('$crashed-journal').existsSync(), isFalse);
+    });
+
+    test('DB פגום → false', () {
+      final broken = '${tmp.path}/broken.db';
+      File(broken).writeAsBytesSync(List.filled(4096, 0x7a));
+      expect(service.checkDbHealthAfterCrash(broken), isFalse);
+    });
   });
 
   group('recoverIfNeeded', () {
@@ -90,4 +140,36 @@ void main() {
       expect(File(dbPath).readAsStringSync(), 'ORIGINAL'); // ה-DB לא נגוע
     });
   });
+}
+
+/// בונה DB עם hot journal אמיתי (מדמה קריסה באמצע transaction) ומחזיר את נתיבו.
+/// cache_size זעיר מכריח דפים מלוכלכים להישפך ל-DB תוך כדי ה-transaction, כך
+/// שהעתקת הזוג (db+journal) לפני ה-COMMIT לוכדת מצב שדורש גלגול.
+String _makeHotJournalDb(String dir) {
+  final src = '$dir/live.db';
+  var c = sqlite3.sqlite3.open(src);
+  c.execute('PRAGMA journal_mode=DELETE');
+  c.execute('CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)');
+  c.execute('BEGIN');
+  final ins = c.prepare('INSERT INTO t VALUES (?,?)');
+  for (var i = 0; i < 20000; i++) {
+    ins.execute([i, 'A']);
+  }
+  ins.close();
+  c.execute('COMMIT');
+  c.close();
+
+  c = sqlite3.sqlite3.open(src);
+  c.execute('PRAGMA journal_mode=DELETE');
+  c.execute('PRAGMA cache_size=10');
+  c.execute('BEGIN IMMEDIATE');
+  c.execute("UPDATE t SET v='B'");
+
+  final crashed = '$dir/crashed.db';
+  File(src).copySync(crashed);
+  File('$src-journal').copySync('$crashed-journal');
+
+  c.execute('ROLLBACK');
+  c.close();
+  return crashed;
 }

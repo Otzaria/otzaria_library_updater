@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 
+import 'package:sqlite3/sqlite3.dart' as sqlite3;
+
 /// הפעולה שבוצעה (או נדרשת) בעת בדיקת התאוששות בעליית האפליקציה.
 enum RecoveryAction {
   /// אין עדכון שנקטע — שום דבר לא נדרש.
@@ -10,7 +12,8 @@ enum RecoveryAction {
   /// נמצא עדכון שנקטע וה-DB שוחזר מהגיבוי.
   restored,
 
-  /// נמצא סימון עדכון שנקטע אך ללא גיבוי — מצב לא תקין הדורש הורדה מלאה.
+  /// נמצא סימון עדכון שנקטע אך ללא גיבוי. במסלול דלתא זה תקין (ה-apply אטומי,
+  /// אין גיבוי לשחזר) — הקורא צריך לוודא תקינות (quick_check) ולנקות את הסימון.
   blockedMissingBackup,
 }
 
@@ -48,9 +51,9 @@ class LibraryDbRecoveryService {
 
   /// נקרא בעליית האפליקציה, **לפני** פתיחת ה-DB.
   ///
-  /// * marker + backup קיימים → שחזור מהגיבוי (העדכון נקטע).
-  /// * marker בלבד (ללא backup) → [RecoveryAction.blockedMissingBackup]; לא
-  ///   מוחקים בשקט — הקורא צריך להפעיל הורדה מלאה.
+  /// * marker + backup קיימים → שחזור מהגיבוי (הורדה מלאה שנקטעה).
+  /// * marker בלבד (ללא backup) → [RecoveryAction.blockedMissingBackup]; מסלול
+  ///   דלתא תקין — הקורא מריץ [checkDbHealthAfterCrash] ומנקה את הסימון.
   /// * backup/tmp יתומים (ללא marker) → שאריות; מוחקים אותם.
   Future<RecoveryResult> recoverIfNeeded(String dbPath) async {
     _deleteQuietly(_backupTmpFor(dbPath));
@@ -67,7 +70,7 @@ class LibraryDbRecoveryService {
     if (!backup.existsSync()) {
       return const RecoveryResult(
         RecoveryAction.blockedMissingBackup,
-        'נמצא סימון עדכון שלא הושלם ללא גיבוי — נדרשת הורדה מלאה',
+        'נמצא סימון עדכון שלא הושלם ללא גיבוי — יש לוודא תקינות ה-DB',
       );
     }
 
@@ -80,13 +83,40 @@ class LibraryDbRecoveryService {
     );
   }
 
-  /// נקרא לפני apply: יוצר גיבוי מאומת וסימון. מנקה שאריות קודמות תחילה.
-  /// ה-copy הכבד רץ ב-Isolate כדי לא לחסום את ה-UI.
+  /// בודק תקינות DB אחרי עדכון שנקטע ללא גיבוי (מסלול דלתא). מחזיר `true` אם
+  /// ה-DB תקין (עבר `quick_check`).
+  ///
+  /// חובה לפתוח RW: קריסה באמצע transaction משאירה hot journal, ו-SQLite חייב
+  /// גישת כתיבה כדי לגלגלו אחורה. פתיחת readOnly על hot journal נכשלת ב-"attempt
+  /// to write a readonly database". הפתיחה כאן מגלגלת ומנקה את ה-journal, כך
+  /// שפתיחת ה-read-only הראשית של האפליקציה אחריה מצליחה.
+  bool checkDbHealthAfterCrash(String dbPath) {
+    try {
+      final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readWrite);
+      try {
+        final result = db.select('PRAGMA quick_check');
+        return result.isNotEmpty &&
+            result.first.values.first?.toString() == 'ok';
+      } finally {
+        db.close();
+      }
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// נקרא לפני apply: יוצר סימון, ואם [createBackup] — גם גיבוי מאומת. מנקה
+  /// שאריות קודמות תחילה. ה-copy הכבד רץ ב-Isolate כדי לא לחסום את ה-UI.
+  ///
+  /// [createBackup] — יש להשאירו `true` במסלול החלפת קובץ (הורדה מלאה), שאינו
+  /// אטומי. במסלול patch דלתאי אפשר `false`: ה-apply עטוף ב-transaction יחיד,
+  /// אז קריסה מתגלגלת אחורה מעצמה — והגיבוי המלא (העתקת ה-DB כולו) מיותר.
   Future<void> beginApply({
     required String dbPath,
     required int fromVersion,
     required int toVersion,
     required String timestamp,
+    bool createBackup = true,
   }) async {
     _deleteQuietly(backupPathFor(dbPath));
     _deleteQuietly(markerPathFor(dbPath));
@@ -94,13 +124,15 @@ class LibraryDbRecoveryService {
     _deleteQuietly(tmp);
 
     // בכשל (disk full וכו') מנקים מיד את ה-tmp החלקי — לא משאירים לכלוך דיסק.
-    try {
-      await Isolate.run(() => cloneOrCopyFile(dbPath, tmp));
-      _verifySameSize(tmp, dbPath, 'גיבוי');
-      File(tmp).renameSync(backupPathFor(dbPath));
-    } catch (_) {
-      _deleteQuietly(tmp);
-      rethrow;
+    if (createBackup) {
+      try {
+        await Isolate.run(() => cloneOrCopyFile(dbPath, tmp));
+        _verifySameSize(tmp, dbPath, 'גיבוי');
+        File(tmp).renameSync(backupPathFor(dbPath));
+      } catch (_) {
+        _deleteQuietly(tmp);
+        rethrow;
+      }
     }
 
     File(markerPathFor(dbPath)).writeAsStringSync(
