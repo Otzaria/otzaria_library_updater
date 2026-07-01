@@ -18,28 +18,34 @@ import '../models/patch_table_spec.dart';
 /// * לכל תא: בית-סוג ואז הנתונים, ואז מפריד יחידה 0x1F.
 ///   null=0, blob=1+bytes, מספר=2+toString().utf8, טקסט=3+toString().utf8.
 /// * אחרי כל שורה: מפריד שורה 0xFF.
+///
+/// זרם הבתים מוזרם ל-SHA-256 דרך [_BufferedByteSink] שמקבץ ~1MB לפני כל
+/// עדכון — חוסך מיליוני קריאות זעירות. SHA-256 אינו תלוי בגודל ה-chunks,
+/// אז הקיבוץ אינו משנה את התוצאה.
 class LogicalContentHasher {
   const LogicalContentHasher();
 
-  static const List<int> _nullTag = [0x00];
-  static const List<int> _blobTag = [0x01];
-  static const List<int> _numberTag = [0x02];
-  static const List<int> _textTag = [0x03];
-  static const List<int> _unitSeparator = [0x1F];
-  static const List<int> _rowSeparator = [0xFF];
+  // בתים של תגי-סוג ומפרידים — זהים למימוש ה-Kotlin, אין לשנות.
+  static const int _nullTag = 0x00;
+  static const int _blobTag = 0x01;
+  static const int _numberTag = 0x02;
+  static const int _textTag = 0x03;
+  static const int _unitSeparator = 0x1F;
+  static const int _rowSeparator = 0xFF;
 
   /// מחשב את ה-hash על [db] ומחזיר אותו כ-hex. ניתן להריץ על חיבור read-only
   /// (preflight) או על חיבור כתיב בתוך transaction (אימות אחרי apply).
   String compute(sqlite3.Database db) {
-    final sink = _DigestSink();
-    final input = sha256.startChunkedConversion(sink);
+    final digestSink = _DigestSink();
+    final shaSink = sha256.startChunkedConversion(digestSink);
+    final out = _BufferedByteSink(shaSink);
 
     for (final table in kHashTableOrder) {
-      input.add(utf8.encode(' table:$table '));
+      out.addBytes(utf8.encode(' table:$table '));
       final cols = _readColumnsCanonical(db, table);
       if (cols == null) continue;
-      input.add(utf8.encode('cols:${cols.join(',')}'));
-      input.add(_nullTag);
+      out.addBytes(utf8.encode('cols:${cols.join(',')}'));
+      out.addByte(_nullTag);
 
       // ל-text קוראים את ה-bytes הגולמיים (CAST AS BLOB) כדי לא לאבד BOM
       // מוביל — ה-decoder של Dart מסיר U+FEFF, ולכן String רגיל היה משנה את
@@ -57,17 +63,18 @@ class LogicalContentHasher {
         while (cursor.moveNext()) {
           final values = cursor.current.values;
           for (var i = 0; i < values.length; i += 2) {
-            _encodeCell(input, values[i] as String, values[i + 1]);
+            _encodeCell(out, values[i] as String, values[i + 1]);
           }
-          input.add(_rowSeparator);
+          out.addByte(_rowSeparator);
         }
       } finally {
         stmt.close();
       }
     }
 
-    input.close();
-    return sink.digest.toString();
+    out.flush();
+    shaSink.close();
+    return digestSink.digest.toString();
   }
 
   /// קורא את שמות העמודות ממוינים אלפביתית, או null אם הטבלה אינה קיימת.
@@ -81,21 +88,59 @@ class LogicalContentHasher {
 
   /// [type] הוא תוצאת `typeof()` ('null'/'integer'/'real'/'text'/'blob').
   /// עבור 'text' ו-'blob', [value] הוא ה-bytes הגולמיים (Uint8List).
-  void _encodeCell(ByteConversionSink input, String type, Object? value) {
+  void _encodeCell(_BufferedByteSink out, String type, Object? value) {
     switch (type) {
       case 'null':
-        input.add(_nullTag);
+        out.addByte(_nullTag);
       case 'text':
-        input.add(_textTag);
-        input.add(value as Uint8List);
+        out.addByte(_textTag);
+        out.addBytes(value as Uint8List);
       case 'blob':
-        input.add(_blobTag);
-        input.add(value as Uint8List);
+        out.addByte(_blobTag);
+        out.addBytes(value as Uint8List);
       default: // 'integer' / 'real'
-        input.add(_numberTag);
-        input.add(utf8.encode(value.toString()));
+        out.addByte(_numberTag);
+        out.addBytes(utf8.encode(value.toString()));
     }
-    input.add(_unitSeparator);
+    out.addByte(_unitSeparator);
+  }
+}
+
+/// חוצץ בינארי שמצטבר ומוזרם ל-SHA-256 מדי ~1MB. מחליף מיליוני `add` זעירים
+/// (בית/תא) בעדכונים גדולים בודדים, בלי לשנות את זרם הבתים.
+class _BufferedByteSink {
+  _BufferedByteSink(this._sink);
+
+  final ByteConversionSink _sink;
+  static const int _capacity = 1 << 20; // 1MB
+  final Uint8List _buffer = Uint8List(_capacity);
+  int _length = 0;
+
+  void addByte(int byte) {
+    if (_length == _capacity) flush();
+    _buffer[_length++] = byte;
+  }
+
+  void addBytes(List<int> bytes) {
+    final len = bytes.length;
+    // ערך גדול מהחוצץ מוזרם ישירות אחרי flush — בלי העתקה מיותרת. ה-flush
+    // חובה לפני, אחרת סדר הבתים ישתבש.
+    if (len >= _capacity) {
+      flush();
+      _sink.add(bytes);
+      return;
+    }
+    if (_length + len > _capacity) flush();
+    _buffer.setRange(_length, _length + len, bytes);
+    _length += len;
+  }
+
+  /// מזרים את מה שהצטבר. הזרם הסינכרוני של SHA-256 לא מחזיק את ה-view, אז
+  /// ניתן לעשות שימוש חוזר ב-[_buffer] מיד אחרי.
+  void flush() {
+    if (_length == 0) return;
+    _sink.add(Uint8List.sublistView(_buffer, 0, _length));
+    _length = 0;
   }
 }
 
