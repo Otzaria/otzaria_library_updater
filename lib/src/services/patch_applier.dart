@@ -66,9 +66,10 @@ class PatchApplier {
   }) {
     // ללא hint (סך-הבתים מריצה קודמת), גודל הקובץ הוא הערכת-יתר — כולל
     // אינדקסים ו-overhead של דפים שאינם נכנסים ל-hash, והמד לא יגיע ל-100%.
-    final totalBytes = onVerifyProgress == null
-        ? 0
-        : (verifyTotalBytesHint ?? File(dbPath).lengthSync());
+    // נמדד מחדש לפני כל אימות, כי ה-patch משנה את גודל הקובץ.
+    var totalBytes = 0;
+    int refreshTotal() =>
+        totalBytes = verifyTotalBytesHint ?? File(dbPath).lengthSync();
     final void Function(int)? verifyProgress = onVerifyProgress == null
         ? null
         : (bytes) => onVerifyProgress(bytes, totalBytes);
@@ -103,6 +104,7 @@ class PatchApplier {
       // ── preflight: hash מקומי מול fromContentHash ──
       if (verifyFromHash) {
         onStage?.call('verifyFromHash');
+        if (verifyProgress != null) refreshTotal();
         final localHash = hasher.compute(db, onProgress: verifyProgress);
         if (localHash != manifest.fromContentHash) {
           throw PatchApplyException(
@@ -145,6 +147,7 @@ class PatchApplier {
       }
 
       onStage?.call('verifyToHash');
+      if (verifyProgress != null) refreshTotal();
       final resultHash = hasher.compute(db, onProgress: verifyProgress);
       if (resultHash != manifest.toContentHash) {
         throw PatchApplyException(
