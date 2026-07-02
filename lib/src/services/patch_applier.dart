@@ -64,9 +64,9 @@ class PatchApplier {
     void Function(int hashedBytes, int totalBytes)? onVerifyProgress,
     int? verifyTotalBytesHint,
   }) {
-    // ללא hint (סך-הבתים מריצה קודמת), גודל הקובץ הוא הערכת-יתר — כולל
-    // אינדקסים ו-overhead של דפים שאינם נכנסים ל-hash, והמד לא יגיע ל-100%.
-    // נמדד מחדש לפני כל אימות, כי ה-patch משנה את גודל הקובץ.
+    // עם hint (סך-הבתים מריצה קודמת) ה-total מדויק; בלעדיו נופלים לגודל
+    // הקובץ — הערכת-יתר (אינדקסים ודפים לא נכנסים ל-hash), שנמדדת מחדש לפני
+    // כל אימות כי ה-patch משנה את הגודל. בשני המסלולים זו הערכה למד בלבד.
     var totalBytes = 0;
     int refreshTotal() =>
         totalBytes = verifyTotalBytesHint ?? File(dbPath).lengthSync();
