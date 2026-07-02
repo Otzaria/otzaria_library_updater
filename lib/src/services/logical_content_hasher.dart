@@ -35,10 +35,14 @@ class LogicalContentHasher {
 
   /// מחשב את ה-hash על [db] ומחזיר אותו כ-hex. ניתן להריץ על חיבור read-only
   /// (preflight) או על חיבור כתיב בתוך transaction (אימות אחרי apply).
-  String compute(sqlite3.Database db) {
+  ///
+  /// [onProgress] מדווח את מספר הבתים המצטבר שהוזרם ל-SHA עד כה (מדוד כל
+  /// ~16MB), למד התקדמות במהלך האימות הארוך.
+  String compute(sqlite3.Database db,
+      {void Function(int bytesHashed)? onProgress}) {
     final digestSink = _DigestSink();
     final shaSink = sha256.startChunkedConversion(digestSink);
-    final out = _BufferedByteSink(shaSink);
+    final out = _BufferedByteSink(shaSink, onProgress: onProgress);
 
     for (final table in kHashTableOrder) {
       out.addBytes(utf8.encode(' table:$table '));
@@ -73,6 +77,8 @@ class LogicalContentHasher {
     }
 
     out.flush();
+    // דיווח סופי מדויק — מאפשר ל-caller לשמור את סך-הבתים האמיתי לריצה הבאה.
+    onProgress?.call(out.totalHashed);
     shaSink.close();
     return digestSink.digest.toString();
   }
@@ -109,16 +115,23 @@ class LogicalContentHasher {
 /// חוצץ בינארי שמצטבר ומוזרם ל-SHA-256 מדי ~1MB. מחליף מיליוני `add` זעירים
 /// (בית/תא) בעדכונים גדולים בודדים, בלי לשנות את זרם הבתים.
 class _BufferedByteSink {
-  _BufferedByteSink(this._sink);
+  _BufferedByteSink(this._sink, {this.onProgress});
 
   final ByteConversionSink _sink;
+  final void Function(int bytesHashed)? onProgress;
   static const int _capacity = 1 << 20; // 1MB
+  static const int _progressInterval = 16 << 20; // 16MB
   final Uint8List _buffer = Uint8List(_capacity);
   int _length = 0;
+  int _totalHashed = 0;
+  int _lastReported = 0;
+
+  int get totalHashed => _totalHashed;
 
   void addByte(int byte) {
     if (_length == _capacity) flush();
     _buffer[_length++] = byte;
+    _totalHashed++;
   }
 
   void addBytes(List<int> bytes) {
@@ -128,11 +141,14 @@ class _BufferedByteSink {
     if (len >= _capacity) {
       flush();
       _sink.add(bytes);
+      _totalHashed += len;
+      _reportIfDue();
       return;
     }
     if (_length + len > _capacity) flush();
     _buffer.setRange(_length, _length + len, bytes);
     _length += len;
+    _totalHashed += len;
   }
 
   /// מזרים את מה שהצטבר. הזרם הסינכרוני של SHA-256 לא מחזיק את ה-view, אז
@@ -141,6 +157,14 @@ class _BufferedByteSink {
     if (_length == 0) return;
     _sink.add(Uint8List.sublistView(_buffer, 0, _length));
     _length = 0;
+    _reportIfDue();
+  }
+
+  void _reportIfDue() {
+    if (onProgress == null) return;
+    if (_totalHashed - _lastReported < _progressInterval) return;
+    _lastReported = _totalHashed;
+    onProgress!(_totalHashed);
   }
 }
 
