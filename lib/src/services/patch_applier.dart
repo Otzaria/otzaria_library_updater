@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:sqlite3/sqlite3.dart' as sqlite3;
 
 import '../models/delta_manifest.dart';
@@ -59,7 +61,19 @@ class PatchApplier {
     bool verifyFromHash = true,
     bool checkForeignKeys = true,
     void Function(String stage)? onStage,
+    void Function(int hashedBytes, int totalBytes)? onVerifyProgress,
+    int? verifyTotalBytesHint,
   }) {
+    // עם hint (סך-הבתים מריצה קודמת) ה-total מדויק; בלעדיו נופלים לגודל
+    // הקובץ — הערכת-יתר (אינדקסים ודפים לא נכנסים ל-hash), שנמדדת מחדש לפני
+    // כל אימות כי ה-patch משנה את הגודל. בשני המסלולים זו הערכה למד בלבד.
+    var totalBytes = 0;
+    int refreshTotal() =>
+        totalBytes = verifyTotalBytesHint ?? File(dbPath).lengthSync();
+    final void Function(int)? verifyProgress = onVerifyProgress == null
+        ? null
+        : (bytes) => onVerifyProgress(bytes, totalBytes);
+
     final db = sqlite3.sqlite3.open(dbPath);
     var attached = false;
     var inTransaction = false;
@@ -90,7 +104,8 @@ class PatchApplier {
       // ── preflight: hash מקומי מול fromContentHash ──
       if (verifyFromHash) {
         onStage?.call('verifyFromHash');
-        final localHash = hasher.compute(db);
+        if (verifyProgress != null) refreshTotal();
+        final localHash = hasher.compute(db, onProgress: verifyProgress);
         if (localHash != manifest.fromContentHash) {
           throw PatchApplyException(
             'ה-DB המקומי שונה מהצפוי — hash לא תואם ל-fromContentHash. '
@@ -132,7 +147,8 @@ class PatchApplier {
       }
 
       onStage?.call('verifyToHash');
-      final resultHash = hasher.compute(db);
+      if (verifyProgress != null) refreshTotal();
+      final resultHash = hasher.compute(db, onProgress: verifyProgress);
       if (resultHash != manifest.toContentHash) {
         throw PatchApplyException(
           'ה-hash אחרי apply ($resultHash) אינו תואם ל-toContentHash '
