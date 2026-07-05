@@ -245,6 +245,163 @@ void main() {
       expect(_hashOf(base), beforeHash); // rollback שמר על המקור
     });
 
+    test('booksTouched נאסף מ-upserts ומ-deletes של book/line', () {
+      final base = buildBaseDb(version: 1, sourceRows: []);
+      final bdb = sqlite3.sqlite3.open(base);
+      bdb.execute('CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT)');
+      bdb.execute(
+          'CREATE TABLE line (id INTEGER PRIMARY KEY, bookId INTEGER, content TEXT)');
+      bdb.execute("INSERT INTO book VALUES (1,'א'),(2,'ב'),(3,'ג')");
+      bdb.execute("INSERT INTO line VALUES (10,1,'x'),(20,2,'y'),(30,3,'z')");
+      bdb.close();
+
+      final patch = buildPatchDb(from: 1, to: 2);
+      final pdb = sqlite3.sqlite3.open(patch);
+      pdb.execute(
+          'CREATE TABLE upsert_line (id INTEGER PRIMARY KEY, bookId INTEGER, content TEXT)');
+      pdb.execute("INSERT INTO upsert_line VALUES (10,1,'X2')"); // תוכן ספר 1
+      pdb.execute('CREATE TABLE delete_line (id INTEGER PRIMARY KEY)');
+      pdb.execute('INSERT INTO delete_line VALUES (20)'); // שורה של ספר 2
+      pdb.execute(
+          'CREATE TABLE upsert_book (id INTEGER PRIMARY KEY, title TEXT)');
+      pdb.execute("INSERT INTO upsert_book VALUES (3,'ג-חדש')"); // כותרת ספר 3
+      pdb.close();
+
+      final expected = buildBaseDb(version: 2, sourceRows: []);
+      final edb = sqlite3.sqlite3.open(expected);
+      edb.execute('CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT)');
+      edb.execute(
+          'CREATE TABLE line (id INTEGER PRIMARY KEY, bookId INTEGER, content TEXT)');
+      edb.execute("INSERT INTO book VALUES (1,'א'),(2,'ב'),(3,'ג-חדש')");
+      edb.execute("INSERT INTO line VALUES (10,1,'X2'),(30,3,'z')");
+      edb.close();
+
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: _hashOf(base),
+        toHash: _hashOf(expected),
+      );
+      final result =
+          _applier.apply(dbPath: base, patchPath: patch, manifest: manifest);
+      expect(result.booksTouched, {1, 2, 3});
+    });
+
+    test('booksTouched נאסף גם מ-patch חלקי בלי עמודת bookId', () {
+      final base = buildBaseDb(version: 1, sourceRows: []);
+      final bdb = sqlite3.sqlite3.open(base);
+      bdb.execute('CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT)');
+      bdb.execute(
+          'CREATE TABLE line (id INTEGER PRIMARY KEY, bookId INTEGER, content TEXT)');
+      bdb.execute("INSERT INTO book VALUES (1,'א')");
+      bdb.execute("INSERT INTO line VALUES (10,1,'x')");
+      bdb.close();
+
+      // upsert_line מעדכן רק content — בלי bookId; המיפוי חייב לעבור דרך main
+      final patch = buildPatchDb(from: 1, to: 2);
+      final pdb = sqlite3.sqlite3.open(patch);
+      pdb.execute(
+          'CREATE TABLE upsert_line (id INTEGER PRIMARY KEY, content TEXT)');
+      pdb.execute("INSERT INTO upsert_line VALUES (10,'X2')");
+      pdb.close();
+
+      final expected = buildBaseDb(version: 2, sourceRows: []);
+      final edb = sqlite3.sqlite3.open(expected);
+      edb.execute('CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT)');
+      edb.execute(
+          'CREATE TABLE line (id INTEGER PRIMARY KEY, bookId INTEGER, content TEXT)');
+      edb.execute("INSERT INTO book VALUES (1,'א')");
+      edb.execute("INSERT INTO line VALUES (10,1,'X2')");
+      edb.close();
+
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: _hashOf(base),
+        toHash: _hashOf(expected),
+      );
+      final result =
+          _applier.apply(dbPath: base, patchPath: patch, manifest: manifest);
+      expect(result.booksTouched, {1});
+      // רק line (מכוסה) ו-schema_meta השתנו — אין צורך ברענון מלא
+      expect(result.hasChangesOutsideBooksTouched, isFalse);
+    });
+
+    test('booksTouched ממפה tocText משותף ו-junction של מטא-דאטה לספרים', () {
+      final base = buildBaseDb(version: 1, sourceRows: []);
+      final bdb = sqlite3.sqlite3.open(base);
+      bdb.execute('CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT)');
+      bdb.execute('CREATE TABLE tocText (id INTEGER PRIMARY KEY, text TEXT)');
+      bdb.execute('CREATE TABLE tocEntry '
+          '(id INTEGER PRIMARY KEY, bookId INTEGER, textId INTEGER)');
+      bdb.execute('CREATE TABLE book_author '
+          '(bookId INTEGER, authorId INTEGER, PRIMARY KEY (bookId, authorId))');
+      bdb.execute("INSERT INTO book VALUES (1,'א'),(2,'ב'),(3,'ג')");
+      bdb.execute("INSERT INTO tocText VALUES (100,'פרק')");
+      // ספרים 1 ו-2 חולקים את אותו tocText
+      bdb.execute('INSERT INTO tocEntry VALUES (7,1,100),(8,2,100)');
+      bdb.execute('INSERT INTO book_author VALUES (3,50)');
+      bdb.close();
+
+      final patch = buildPatchDb(from: 1, to: 2);
+      final pdb = sqlite3.sqlite3.open(patch);
+      pdb.execute(
+          'CREATE TABLE upsert_tocText (id INTEGER PRIMARY KEY, text TEXT)');
+      pdb.execute("INSERT INTO upsert_tocText VALUES (100,'פרק-חדש')");
+      pdb.execute('CREATE TABLE delete_book_author '
+          '(bookId INTEGER, authorId INTEGER, PRIMARY KEY (bookId, authorId))');
+      pdb.execute('INSERT INTO delete_book_author VALUES (3,50)');
+      pdb.close();
+
+      final expected = buildBaseDb(version: 2, sourceRows: []);
+      final edb = sqlite3.sqlite3.open(expected);
+      edb.execute('CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT)');
+      edb.execute('CREATE TABLE tocText (id INTEGER PRIMARY KEY, text TEXT)');
+      edb.execute('CREATE TABLE tocEntry '
+          '(id INTEGER PRIMARY KEY, bookId INTEGER, textId INTEGER)');
+      edb.execute('CREATE TABLE book_author '
+          '(bookId INTEGER, authorId INTEGER, PRIMARY KEY (bookId, authorId))');
+      edb.execute("INSERT INTO book VALUES (1,'א'),(2,'ב'),(3,'ג')");
+      edb.execute("INSERT INTO tocText VALUES (100,'פרק-חדש')");
+      edb.execute('INSERT INTO tocEntry VALUES (7,1,100),(8,2,100)');
+      edb.close();
+
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: _hashOf(base),
+        toHash: _hashOf(expected),
+      );
+      final result =
+          _applier.apply(dbPath: base, patchPath: patch, manifest: manifest);
+      // 1+2 דרך ה-tocText המשותף, 3 דרך מחיקת book_author
+      expect(result.booksTouched, {1, 2, 3});
+    });
+
+    test('booksTouched ריק כשה-patch לא נוגע בטבלאות ספרים', () {
+      final base = buildBaseDb(version: 1, sourceRows: [
+        [1, 'a'],
+      ]);
+      final patch = buildPatchDb(from: 1, to: 2, upsertSource: [
+        [2, 'b'],
+      ]);
+      final expected = buildBaseDb(version: 2, sourceRows: [
+        [1, 'a'],
+        [2, 'b'],
+      ]);
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: _hashOf(base),
+        toHash: _hashOf(expected),
+      );
+      final result =
+          _applier.apply(dbPath: base, patchPath: patch, manifest: manifest);
+      expect(result.booksTouched, isEmpty);
+      // source אינה מכוסה ב-booksTouched — הצרכן צריך trigger לרענון מלא
+      expect(result.hasChangesOutsideBooksTouched, isTrue);
+    });
+
     test('verifyFromHash מזהה DB מקומי ששונה', () {
       final base = buildBaseDb(version: 1, sourceRows: [
         [1, 'a'],
