@@ -13,8 +13,13 @@ class PatchApplyResult {
   final Map<String, int> deletes;
   final String resultHash;
 
-  /// מזהי הספרים שתוכן האינדקס שלהם הושפע מה-patch (שינויי book/line/toc).
+  /// מזהי הספרים שתוכן האינדקס שלהם הושפע מה-patch: book/line/TOC (כולל
+  /// tocText ו-alt-TOC) ושיוכי מחבר/נושא/ראשי-תיבות של ספר.
   /// מאפשר לצרכן לרענן אינדקס חיפוש רק לספרים שהשתנו.
+  ///
+  /// לא מכוסים: טבלאות lookup גלובליות (source/author/topic/category וכו'),
+  /// link/book_has_links ו-default_commentator/targum — צרכן שהאינדקס שלו
+  /// תלוי בהן צריך לבדוק אותן בעצמו דרך [upserts]/[deletes].
   final Set<int> booksTouched;
 
   const PatchApplyResult({
@@ -138,8 +143,8 @@ class PatchApplier {
       onStage?.call('upserts');
       final upserts = _runUpserts(db);
 
-      // חייב לרוץ אחרי ה-upserts (שורות line חדשות כבר ב-main עבור JOIN של
-      // line_toc) ולפני ה-deletes (שורות שיימחקו עדיין קיימות למיפוי bookId).
+      // חייב לרוץ אחרי ה-upserts (שורות חדשות כבר ב-main עבור ה-JOINs)
+      // ולפני ה-deletes (שורות שיימחקו עדיין קיימות למיפוי bookId).
       final booksTouched = _collectBooksTouched(db);
 
       onStage?.call('deletes');
@@ -232,7 +237,7 @@ class PatchApplier {
     final counts = <String, int>{};
     for (final table in kPatchTablesInFkOrder) {
       final patchTable = 'upsert_${table.name}';
-      if (!_patchHasTable(db, patchTable)) continue;
+      if (!_hasTable(db, 'patch', patchTable)) continue;
       final cols = _patchTableColumns(db, patchTable);
       if (cols.isEmpty) continue;
 
@@ -264,7 +269,7 @@ class PatchApplier {
     final counts = <String, int>{};
     for (final table in kPatchTablesInFkOrder.reversed) {
       final patchTable = 'delete_${table.name}';
-      if (!_patchHasTable(db, patchTable)) continue;
+      if (!_hasTable(db, 'patch', patchTable)) continue;
       if (table.primaryKey.isEmpty) continue;
 
       final pkCsv = table.primaryKey.map((c) => '"$c"').join(',');
@@ -283,42 +288,79 @@ class PatchApplier {
     return counts;
   }
 
-  /// אוסף את מזהי הספרים שתוכן האינדקס שלהם (כותרת/טקסט/הפניות TOC)
+  /// אוסף את מזהי הספרים שתוכן האינדקס שלהם (כותרת/טקסט/הפניות TOC/מטא-דאטה)
   /// הושפע מה-patch.
+  ///
+  /// רץ אחרי ה-upserts ולפני ה-deletes, כך ששורות חדשות כבר ב-main ושורות
+  /// שיימחקו עדיין בו — וכל מיפוי JOIN דרך main רואה את כולן. המיפוי נשען
+  /// רק על עמודות ה-PK של טבלת ה-patch: עמודות אחרות (כמו bookId ב-line)
+  /// אינן מובטחות ב-patch שמעדכן רק תת-קבוצה של עמודות.
   Set<int> _collectBooksTouched(sqlite3.Database db) {
     final touched = <int>{};
-    void collect(String patchTable, String bookIdSql) {
-      if (!_patchHasTable(db, patchTable)) return;
+    // [joins] — טבלאות main שה-SQL עושה אליהן JOIN; אם אחת חסרה (סכמה ישנה
+    // או DB חלקי בבדיקות) מדלגים במקום להפיל את ה-apply.
+    void collect(String patchTable, String bookIdSql,
+        {List<String> joins = const []}) {
+      if (!_hasTable(db, 'patch', patchTable)) return;
+      if (joins.any((t) => !_hasTable(db, 'main', t))) return;
       for (final row in db.select(bookIdSql)) {
         final id = row.values.first;
         if (id is int) touched.add(id);
       }
     }
 
-    // upserts — bookId זמין ישירות בשורות ה-patch (או ב-main אחרי ה-upsert)
     collect('upsert_book', 'SELECT DISTINCT id FROM patch.upsert_book');
-    collect('upsert_line', 'SELECT DISTINCT bookId FROM patch.upsert_line');
-    collect(
-        'upsert_tocEntry', 'SELECT DISTINCT bookId FROM patch.upsert_tocEntry');
-    collect(
-        'upsert_line_toc',
-        'SELECT DISTINCT l.bookId FROM patch.upsert_line_toc p '
-            'JOIN main.line l ON l.id = p.lineId');
-
-    // deletes — השורות עדיין קיימות ב-main, ומהן ממופה ה-bookId
     collect('delete_book', 'SELECT DISTINCT id FROM patch.delete_book');
-    collect(
-        'delete_line',
-        'SELECT DISTINCT l.bookId FROM patch.delete_line p '
-            'JOIN main.line l ON l.id = p.id');
-    collect(
-        'delete_tocEntry',
-        'SELECT DISTINCT t.bookId FROM patch.delete_tocEntry p '
-            'JOIN main.tocEntry t ON t.id = p.id');
-    collect(
-        'delete_line_toc',
-        'SELECT DISTINCT l.bookId FROM patch.delete_line_toc p '
-            'JOIN main.line l ON l.id = p.lineId');
+
+    for (final op in const ['upsert', 'delete']) {
+      collect(
+          '${op}_line',
+          'SELECT DISTINCT l.bookId FROM patch.${op}_line p '
+              'JOIN main.line l ON l.id = p.id',
+          joins: const ['line']);
+      collect(
+          '${op}_tocEntry',
+          'SELECT DISTINCT t.bookId FROM patch.${op}_tocEntry p '
+              'JOIN main.tocEntry t ON t.id = p.id',
+          joins: const ['tocEntry']);
+      collect(
+          '${op}_line_toc',
+          'SELECT DISTINCT l.bookId FROM patch.${op}_line_toc p '
+              'JOIN main.line l ON l.id = p.lineId',
+          joins: const ['line']);
+      // טקסט TOC משותף בין ספרים — ממופה לכל מי שמפנה אליו, גם דרך alt-TOC
+      collect(
+          '${op}_tocText',
+          'SELECT DISTINCT t.bookId FROM patch.${op}_tocText p '
+              'JOIN main.tocEntry t ON t.textId = p.id',
+          joins: const ['tocEntry']);
+      collect(
+          '${op}_tocText',
+          'SELECT DISTINCT s.bookId FROM patch.${op}_tocText p '
+              'JOIN main.alt_toc_entry a ON a.textId = p.id '
+              'JOIN main.alt_toc_structure s ON s.id = a.structureId',
+          joins: const ['alt_toc_entry', 'alt_toc_structure']);
+      collect(
+          '${op}_alt_toc_structure',
+          'SELECT DISTINCT s.bookId FROM patch.${op}_alt_toc_structure p '
+              'JOIN main.alt_toc_structure s ON s.id = p.id',
+          joins: const ['alt_toc_structure']);
+      collect(
+          '${op}_alt_toc_entry',
+          'SELECT DISTINCT s.bookId FROM patch.${op}_alt_toc_entry p '
+              'JOIN main.alt_toc_entry a ON a.id = p.id '
+              'JOIN main.alt_toc_structure s ON s.id = a.structureId',
+          joins: const ['alt_toc_entry', 'alt_toc_structure']);
+      collect(
+          '${op}_line_alt_toc',
+          'SELECT DISTINCT l.bookId FROM patch.${op}_line_alt_toc p '
+              'JOIN main.line l ON l.id = p.lineId',
+          joins: const ['line']);
+      // כאן bookId הוא חלק מה-PK — מובטח בשורות ה-patch, אפשר לקרוא ישירות
+      for (final t in const ['book_author', 'book_topic', 'book_acronym']) {
+        collect('${op}_$t', 'SELECT DISTINCT bookId FROM patch.${op}_$t');
+      }
+    }
     return touched;
   }
 
@@ -326,9 +368,10 @@ class PatchApplier {
     return db.select('PRAGMA foreign_key_check').length;
   }
 
-  bool _patchHasTable(sqlite3.Database db, String name) {
+  bool _hasTable(sqlite3.Database db, String schema, String name) {
     final result = db.select(
-      "SELECT 1 FROM patch.sqlite_master WHERE type='table' AND name=? LIMIT 1",
+      "SELECT 1 FROM $schema.sqlite_master WHERE type='table' AND name=? "
+      'LIMIT 1',
       [name],
     );
     return result.isNotEmpty;
