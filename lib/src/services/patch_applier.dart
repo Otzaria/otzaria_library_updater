@@ -13,11 +13,16 @@ class PatchApplyResult {
   final Map<String, int> deletes;
   final String resultHash;
 
+  /// מזהי הספרים שתוכן האינדקס שלהם הושפע מה-patch (שינויי book/line/toc).
+  /// מאפשר לצרכן לרענן אינדקס חיפוש רק לספרים שהשתנו.
+  final Set<int> booksTouched;
+
   const PatchApplyResult({
     required this.migrations,
     required this.upserts,
     required this.deletes,
     required this.resultHash,
+    this.booksTouched = const {},
   });
 }
 
@@ -133,6 +138,10 @@ class PatchApplier {
       onStage?.call('upserts');
       final upserts = _runUpserts(db);
 
+      // חייב לרוץ אחרי ה-upserts (שורות line חדשות כבר ב-main עבור JOIN של
+      // line_toc) ולפני ה-deletes (שורות שיימחקו עדיין קיימות למיפוי bookId).
+      final booksTouched = _collectBooksTouched(db);
+
       onStage?.call('deletes');
       final deletes = _runDeletes(db);
 
@@ -168,6 +177,7 @@ class PatchApplier {
         upserts: upserts,
         deletes: deletes,
         resultHash: resultHash,
+        booksTouched: booksTouched,
       );
     } catch (_) {
       if (inTransaction) {
@@ -271,6 +281,45 @@ class PatchApplier {
       counts[table.name] = db.updatedRows;
     }
     return counts;
+  }
+
+  /// אוסף את מזהי הספרים שתוכן האינדקס שלהם (כותרת/טקסט/הפניות TOC)
+  /// הושפע מה-patch.
+  Set<int> _collectBooksTouched(sqlite3.Database db) {
+    final touched = <int>{};
+    void collect(String patchTable, String bookIdSql) {
+      if (!_patchHasTable(db, patchTable)) return;
+      for (final row in db.select(bookIdSql)) {
+        final id = row.values.first;
+        if (id is int) touched.add(id);
+      }
+    }
+
+    // upserts — bookId זמין ישירות בשורות ה-patch (או ב-main אחרי ה-upsert)
+    collect('upsert_book', 'SELECT DISTINCT id FROM patch.upsert_book');
+    collect('upsert_line', 'SELECT DISTINCT bookId FROM patch.upsert_line');
+    collect(
+        'upsert_tocEntry', 'SELECT DISTINCT bookId FROM patch.upsert_tocEntry');
+    collect(
+        'upsert_line_toc',
+        'SELECT DISTINCT l.bookId FROM patch.upsert_line_toc p '
+            'JOIN main.line l ON l.id = p.lineId');
+
+    // deletes — השורות עדיין קיימות ב-main, ומהן ממופה ה-bookId
+    collect('delete_book', 'SELECT DISTINCT id FROM patch.delete_book');
+    collect(
+        'delete_line',
+        'SELECT DISTINCT l.bookId FROM patch.delete_line p '
+            'JOIN main.line l ON l.id = p.id');
+    collect(
+        'delete_tocEntry',
+        'SELECT DISTINCT t.bookId FROM patch.delete_tocEntry p '
+            'JOIN main.tocEntry t ON t.id = p.id');
+    collect(
+        'delete_line_toc',
+        'SELECT DISTINCT l.bookId FROM patch.delete_line_toc p '
+            'JOIN main.line l ON l.id = p.lineId');
+    return touched;
   }
 
   int _countFkViolations(sqlite3.Database db) {

@@ -245,6 +245,70 @@ void main() {
       expect(_hashOf(base), beforeHash); // rollback שמר על המקור
     });
 
+    test('booksTouched נאסף מ-upserts ומ-deletes של book/line', () {
+      final base = buildBaseDb(version: 1, sourceRows: []);
+      final bdb = sqlite3.sqlite3.open(base);
+      bdb.execute('CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT)');
+      bdb.execute(
+          'CREATE TABLE line (id INTEGER PRIMARY KEY, bookId INTEGER, content TEXT)');
+      bdb.execute("INSERT INTO book VALUES (1,'א'),(2,'ב'),(3,'ג')");
+      bdb.execute("INSERT INTO line VALUES (10,1,'x'),(20,2,'y'),(30,3,'z')");
+      bdb.close();
+
+      final patch = buildPatchDb(from: 1, to: 2);
+      final pdb = sqlite3.sqlite3.open(patch);
+      pdb.execute(
+          'CREATE TABLE upsert_line (id INTEGER PRIMARY KEY, bookId INTEGER, content TEXT)');
+      pdb.execute("INSERT INTO upsert_line VALUES (10,1,'X2')"); // תוכן ספר 1
+      pdb.execute('CREATE TABLE delete_line (id INTEGER PRIMARY KEY)');
+      pdb.execute('INSERT INTO delete_line VALUES (20)'); // שורה של ספר 2
+      pdb.execute(
+          'CREATE TABLE upsert_book (id INTEGER PRIMARY KEY, title TEXT)');
+      pdb.execute("INSERT INTO upsert_book VALUES (3,'ג-חדש')"); // כותרת ספר 3
+      pdb.close();
+
+      final expected = buildBaseDb(version: 2, sourceRows: []);
+      final edb = sqlite3.sqlite3.open(expected);
+      edb.execute('CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT)');
+      edb.execute(
+          'CREATE TABLE line (id INTEGER PRIMARY KEY, bookId INTEGER, content TEXT)');
+      edb.execute("INSERT INTO book VALUES (1,'א'),(2,'ב'),(3,'ג-חדש')");
+      edb.execute("INSERT INTO line VALUES (10,1,'X2'),(30,3,'z')");
+      edb.close();
+
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: _hashOf(base),
+        toHash: _hashOf(expected),
+      );
+      final result =
+          _applier.apply(dbPath: base, patchPath: patch, manifest: manifest);
+      expect(result.booksTouched, {1, 2, 3});
+    });
+
+    test('booksTouched ריק כשה-patch לא נוגע בטבלאות ספרים', () {
+      final base = buildBaseDb(version: 1, sourceRows: [
+        [1, 'a'],
+      ]);
+      final patch = buildPatchDb(from: 1, to: 2, upsertSource: [
+        [2, 'b'],
+      ]);
+      final expected = buildBaseDb(version: 2, sourceRows: [
+        [1, 'a'],
+        [2, 'b'],
+      ]);
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: _hashOf(base),
+        toHash: _hashOf(expected),
+      );
+      final result =
+          _applier.apply(dbPath: base, patchPath: patch, manifest: manifest);
+      expect(result.booksTouched, isEmpty);
+    });
+
     test('verifyFromHash מזהה DB מקומי ששונה', () {
       final base = buildBaseDb(version: 1, sourceRows: [
         [1, 'a'],
