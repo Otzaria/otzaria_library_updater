@@ -323,6 +323,8 @@ void main() {
       final result =
           _applier.apply(dbPath: base, patchPath: patch, manifest: manifest);
       expect(result.booksTouched, {1});
+      // רק line (מכוסה) ו-schema_meta השתנו — אין צורך ברענון מלא
+      expect(result.hasChangesOutsideBooksTouched, isFalse);
     });
 
     test('booksTouched ממפה tocText משותף ו-junction של מטא-דאטה לספרים', () {
@@ -396,6 +398,8 @@ void main() {
       final result =
           _applier.apply(dbPath: base, patchPath: patch, manifest: manifest);
       expect(result.booksTouched, isEmpty);
+      // source אינה מכוסה ב-booksTouched — הצרכן צריך trigger לרענון מלא
+      expect(result.hasChangesOutsideBooksTouched, isTrue);
     });
 
     test('verifyFromHash מזהה DB מקומי ששונה', () {

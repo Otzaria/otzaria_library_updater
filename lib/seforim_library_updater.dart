@@ -29,6 +29,10 @@ export 'src/services/local_db_version_reader.dart'
     show LocalDbVersionReader, LocalDbVersion;
 export 'src/services/logical_content_hasher.dart' show LogicalContentHasher;
 export 'src/services/patch_applier.dart'
-    show PatchApplier, PatchApplyResult, PatchApplyException;
+    show
+        PatchApplier,
+        PatchApplyResult,
+        PatchApplyException,
+        kBooksTouchedTables;
 export 'src/services/patch_downloader.dart'
     show PatchDownloader, PatchDownloadException, PatchDownloadCancelled;

@@ -6,6 +6,22 @@ import '../models/delta_manifest.dart';
 import '../models/patch_table_spec.dart';
 import 'logical_content_hasher.dart';
 
+/// הטבלאות ששינוי בהן ממופה למזהי ספרים ב-[PatchApplyResult.booksTouched].
+/// חייב להישאר תואם ל-queries ב-`PatchApplier._collectBooksTouched`.
+const Set<String> kBooksTouchedTables = {
+  'book',
+  'line',
+  'tocEntry',
+  'line_toc',
+  'tocText',
+  'alt_toc_structure',
+  'alt_toc_entry',
+  'line_alt_toc',
+  'book_author',
+  'book_topic',
+  'book_acronym',
+};
+
 /// תוצאת החלת patch מוצלחת.
 class PatchApplyResult {
   final int migrations;
@@ -13,14 +29,27 @@ class PatchApplyResult {
   final Map<String, int> deletes;
   final String resultHash;
 
-  /// מזהי הספרים שתוכן האינדקס שלהם הושפע מה-patch: book/line/TOC (כולל
-  /// tocText ו-alt-TOC) ושיוכי מחבר/נושא/ראשי-תיבות של ספר.
-  /// מאפשר לצרכן לרענן אינדקס חיפוש רק לספרים שהשתנו.
+  /// מזהי הספרים שתוכן האינדקס שלהם הושפע מה-patch — שינויים בטבלאות
+  /// [kBooksTouchedTables] בלבד (book/line/TOC כולל tocText ו-alt-TOC,
+  /// ושיוכי מחבר/נושא/ראשי-תיבות). מאפשר רענון אינדקס לספרים שהשתנו בלבד.
   ///
-  /// לא מכוסים: טבלאות lookup גלובליות (source/author/topic/category וכו'),
-  /// link/book_has_links ו-default_commentator/targum — צרכן שהאינדקס שלו
-  /// תלוי בהן צריך לבדוק אותן בעצמו דרך [upserts]/[deletes].
+  /// זו לא רשימת "כל מה שמשפיע על חיפוש": שינוי בטבלה שאינה מכוסה (למשל
+  /// שינוי שם ב-author/topic/category) לא ממופה לספרים, ו-[upserts]/[deletes]
+  /// נותנים ספירות בלבד — אי אפשר לגזור מהם מזהים. צרכן שהאינדקס שלו תלוי
+  /// בטבלאות כאלה צריך להתייחס ל-[hasChangesOutsideBooksTouched] כ-trigger
+  /// לרענון מלא.
   final Set<int> booksTouched;
+
+  /// האם ה-patch שינה טבלאות שאינן מכוסות ב-[booksTouched] (מלבד schema_meta,
+  /// שמתעדכן בכל patch). כש-true, צרכן שהאינדקס שלו תלוי בטבלאות האלה צריך
+  /// רענון מלא — אין דרך לגזור מהן מזהי ספרים מדויקים.
+  bool get hasChangesOutsideBooksTouched {
+    bool changed(MapEntry<String, int> e) =>
+        e.value > 0 &&
+        e.key != 'schema_meta' &&
+        !kBooksTouchedTables.contains(e.key);
+    return upserts.entries.any(changed) || deletes.entries.any(changed);
+  }
 
   const PatchApplyResult({
     required this.migrations,
