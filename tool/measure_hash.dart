@@ -1,5 +1,6 @@
 // כלי אבחון זמני: מודד לכל טבלה ב-hash את תוכנית השאילתה (מיון?), מספר השורות,
 // הבתים והזמן — לזיהוי הטבלה שתוקעת את verifyToHash. אינו חלק מה-API.
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:sqlite3/sqlite3.dart';
@@ -10,6 +11,13 @@ void main(List<String> args) {
   final dbPath = args.isNotEmpty
       ? args[0]
       : r'C:\Users\User\AppData\Roaming\otzaria\Downloads\seforim.db';
+
+  if (!File(dbPath).existsSync()) {
+    print('שגיאה: קובץ ה-DB לא נמצא בנתיב: $dbPath');
+    print('שימוש: dart tool/measure_hash.dart <path_to_seforim.db>');
+    exitCode = 1;
+    return;
+  }
 
   final db = sqlite3.open(dbPath, mode: OpenMode.readOnly);
 

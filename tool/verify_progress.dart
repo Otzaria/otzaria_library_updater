@@ -1,5 +1,7 @@
 // אימות end-to-end של דיווח ההתקדמות ב-compute על DB אמיתי: מדפיס את זרם
 // הדיווחים ואת הסך הסופי (לזריעת verify_total_bytes.txt). כלי זמני.
+import 'dart:io';
+
 import 'package:sqlite3/sqlite3.dart';
 import 'package:seforim_library_updater/seforim_library_updater.dart'
     show LogicalContentHasher;
@@ -8,6 +10,14 @@ void main(List<String> args) {
   final dbPath = args.isNotEmpty
       ? args[0]
       : r'C:\Users\User\AppData\Roaming\otzaria\Downloads\seforim.db';
+
+  if (!File(dbPath).existsSync()) {
+    print('שגיאה: קובץ ה-DB לא נמצא בנתיב: $dbPath');
+    print('שימוש: dart tool/verify_progress.dart <path_to_seforim.db>');
+    exitCode = 1;
+    return;
+  }
+
   final db = sqlite3.open(dbPath, mode: OpenMode.readOnly);
 
   var reports = 0;
