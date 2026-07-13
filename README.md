@@ -29,7 +29,8 @@ await Isolate.run(() => const PatchApplier().apply(/* ... */));
 - **fixtures inline** — הבדיקות בונות DB זעירים בזיכרון (`openInMemory`), כולל golden hash
   קבוע ומקרה BOM; רצים תמיד ולוכדים רגרסיה בחוזה מול Kotlin.
 - **בדיקות מול הפצות אמיתיות** — אופציונליות, מופעלות כשמשתנה הסביבה
-  `SEFORIM_LIBRARY_RELEASES_DIR` מצביע לתיקייה עם `v1/`, `v2/`, `v3/`. אחרת מדלגות.
+  `SEFORIM_LIBRARY_RELEASES_DIR` מצביע לתיקייה עם `v14/seforim.db` ו‑
+  `v15/{seforim.db, patch-v14-v15.db, patch-v14-v15r.db}`. אחרת מדלגות.
 
 ```bash
 dart test                                   # fixtures בלבד

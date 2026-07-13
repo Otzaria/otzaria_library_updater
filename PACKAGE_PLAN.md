@@ -222,7 +222,7 @@ cd otzaria && flutter test test/library_update/
 1. **fixtures לחוזה (inline בזיכרון):** בדיקות הבונות DB זעירים ב‑`openInMemory`, כולל:
    מקרה BOM (עמודת טקסט שמתחילה ב‑U+FEFF), `golden hash` קבוע, ו‑apply מלא של patch אחד
    (כבר קיים ב‑`patch_applier_test`). ה‑golden נלקח מהרצת ה‑hasher המאומת (שכבר אומת מול
-   Kotlin על v1/v2/v3). שכבת ה‑fixtures לוכדת **רגרסיה** ב‑CI גם בלי גישה ל‑DB האמיתיים.
+   Kotlin על שרשרת v14/v15). שכבת ה‑fixtures לוכדת **רגרסיה** ב‑CI גם בלי גישה ל‑DB האמיתיים.
 2. **release DBs אמיתיים → env‑gated:** להמיר את הנתיב הקשיח
    `/Users/david/Downloads/releases` (ב‑`patch_applier_test.dart:271` ו‑
    `logical_content_hasher_test.dart:66`) למשתנה סביבה `SEFORIM_LIBRARY_RELEASES_DIR`;
