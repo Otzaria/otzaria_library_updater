@@ -439,20 +439,20 @@ void main() {
       return dst;
     }
 
-    test('apply v1→v2 מצליח ומגיע ל-db_version=2 ול-toContentHash', () {
-      final dbPath = cloneDb('$dir/v1/seforim.db');
-      final patchPath = '$dir/v2/patch-v1-v2.db';
+    test('apply v14→v15 מצליח ומגיע ל-db_version=15 ול-toContentHash', () {
+      final dbPath = cloneDb('$dir/v14/seforim.db');
+      final patchPath = '$dir/v15/patch-v14-v15.db';
       if (dbPath == null || !File(patchPath).existsSync()) {
-        markTestSkipped('קבצי v1/v2 לא זמינים');
+        markTestSkipped('קבצי v14/v15 לא זמינים');
         return;
       }
       final manifest = _manifest(
-        from: 1,
-        to: 2,
+        from: 14,
+        to: 15,
         fromHash:
-            '35d499985cc1c37fd02904682d4f67a8c915625ef3768c0e856d3f79a4fc96c1',
+            '153ba2e803e5334e8e0bcaaf681d7853f14085f482ca87e70dcdd9f861f01319',
         toHash:
-            '2be5318d73e4ffa6b32c5d265699e6000cd84f776c304db4a9b192e7d67b3d06',
+            '5ed1d2a7b01606c77996ec26fcccaf9d173f346b1c0ec64280b915185fbfc81d',
       );
       final result = _applier.apply(
           dbPath: dbPath, patchPath: patchPath, manifest: manifest);
@@ -463,45 +463,45 @@ void main() {
           .select("SELECT value FROM schema_meta WHERE key='db_version'")
           .first['value'];
       db.close();
-      expect(version, '2');
-    }, timeout: const Timeout(Duration(minutes: 6)));
+      expect(version, '15');
+    }, timeout: const Timeout(Duration(minutes: 10)));
 
-    test('apply v2→v3 מצליח ומגיע ל-toContentHash', () {
-      final dbPath = cloneDb('$dir/v2/seforim.db');
-      final patchPath = '$dir/v3/patch-v2-v3.db';
+    test('apply v14→v15r (patch חלופי) מצליח ומגיע ל-toContentHash', () {
+      final dbPath = cloneDb('$dir/v14/seforim.db');
+      final patchPath = '$dir/v15/patch-v14-v15r.db';
       if (dbPath == null || !File(patchPath).existsSync()) {
-        markTestSkipped('קבצי v2/v3 לא זמינים');
+        markTestSkipped('קבצי v14/v15r לא זמינים');
         return;
       }
       final manifest = _manifest(
-        from: 2,
-        to: 3,
+        from: 14,
+        to: 15,
         fromHash:
-            '2be5318d73e4ffa6b32c5d265699e6000cd84f776c304db4a9b192e7d67b3d06',
+            '153ba2e803e5334e8e0bcaaf681d7853f14085f482ca87e70dcdd9f861f01319',
         toHash:
-            'adb131e748347b1b1f0d3407ee99cddae6d6d18e0a40078176b17cd68d6ff9cf',
+            '623302b075bceb4dc823131e0e37c2ebba781f1c0215c1dddcc8b1825727ea7f',
       );
       final result = _applier.apply(
           dbPath: dbPath, patchPath: patchPath, manifest: manifest);
       expect(result.resultHash, manifest.toContentHash);
-    }, timeout: const Timeout(Duration(minutes: 6)));
+    }, timeout: const Timeout(Duration(minutes: 10)));
 
-    test('patch על גרסה שגויה (v2→v3 על DB v1) נכשל לפני כתיבה', () {
-      final dbPath = cloneDb('$dir/v1/seforim.db');
-      final patchPath = '$dir/v3/patch-v2-v3.db';
+    test('patch על גרסה שגויה (v14→v15 על DB v15) נכשל לפני כתיבה', () {
+      final dbPath = cloneDb('$dir/v15/seforim.db');
+      final patchPath = '$dir/v15/patch-v14-v15.db';
       if (dbPath == null || !File(patchPath).existsSync()) {
         markTestSkipped('קבצים לא זמינים');
         return;
       }
       final manifest = _manifest(
-        from: 2,
-        to: 3,
+        from: 14,
+        to: 15,
         fromHash:
-            '2be5318d73e4ffa6b32c5d265699e6000cd84f776c304db4a9b192e7d67b3d06',
+            '153ba2e803e5334e8e0bcaaf681d7853f14085f482ca87e70dcdd9f861f01319',
         toHash:
-            'adb131e748347b1b1f0d3407ee99cddae6d6d18e0a40078176b17cd68d6ff9cf',
+            '5ed1d2a7b01606c77996ec26fcccaf9d173f346b1c0ec64280b915185fbfc81d',
       );
-      // נכשל מיד על version mismatch (local=1, manifest.from=2) — לפני hash יקר
+      // נכשל מיד על version mismatch (local=15, manifest.from=14) — לפני hash יקר
       expect(
         () => _applier.apply(
             dbPath: dbPath, patchPath: patchPath, manifest: manifest),

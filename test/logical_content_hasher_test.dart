@@ -68,7 +68,7 @@ void main() {
       db.execute("INSERT INTO source VALUES (1,'aleph'),(2,'bet'),(3,'gimel')");
       expect(
         _hasher.compute(db),
-        'e334a18a931aaeeca11722ad3cc7d13c187555019a4013b8e5d129048038995e',
+        '25a80e5d37c944e57d0aafe2b52b2157bdedce38ddb4b6da344adc475f5cf708',
       );
       db.close();
     });
@@ -92,18 +92,16 @@ void main() {
   group('LogicalContentHasher against real DBs', () {
     final releasesDir =
         Platform.environment['SEFORIM_LIBRARY_RELEASES_DIR'] ?? '/nonexistent';
+    // hashes מה-manifests של המפיק הקוטליני; ערכי v1-v3 אינם ברי-שחזור מאז
+    // הוספת 5 הטבלאות (קידומת table: נכתבת גם לטבלה חסרה).
     const cases = [
       (
-        'v1',
-        '35d499985cc1c37fd02904682d4f67a8c915625ef3768c0e856d3f79a4fc96c1'
+        'v14',
+        '153ba2e803e5334e8e0bcaaf681d7853f14085f482ca87e70dcdd9f861f01319'
       ),
       (
-        'v2',
-        '2be5318d73e4ffa6b32c5d265699e6000cd84f776c304db4a9b192e7d67b3d06'
-      ),
-      (
-        'v3',
-        'adb131e748347b1b1f0d3407ee99cddae6d6d18e0a40078176b17cd68d6ff9cf'
+        'v15',
+        '623302b075bceb4dc823131e0e37c2ebba781f1c0215c1dddcc8b1825727ea7f'
       ),
     ];
 
