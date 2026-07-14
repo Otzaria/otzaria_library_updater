@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:test/test.dart';
+import 'package:seforim_library_updater/src/models/patch_table_spec.dart';
 import 'package:seforim_library_updater/src/services/logical_content_hasher.dart';
 import 'package:sqlite3/sqlite3.dart' as sqlite3;
 
@@ -94,25 +95,33 @@ void main() {
   group('LogicalContentHasher against real DBs', () {
     final releasesDir =
         Platform.environment['SEFORIM_LIBRARY_RELEASES_DIR'] ?? '/nonexistent';
-    // goldens נעוצים ל-kHashTableOrder בן 34 הטבלאות (כולל book_base_text,
-    // aa2158f) — קידומת table: נכתבת גם לטבלה נעדרת, לכן ערכי סכמה-1 השתנו.
+    // כל fixture נבדק בשני הסדרים:
+    // * hash34 — סדר 34 הטבלאות הנוכחי ([kHashTableOrder], ברירת המחדל).
+    // * hashLegacy — סדר 33 הטבלאות הקפוא ([kHashTableOrderSchema1]); מוכיח
+    //   שהרשימה הישנה משחזרת אות-באות את ה-hashes ההיסטוריים של סכמה-1.
     const cases = [
       (
         'v14',
-        '3e6fce9860f37395468057b67bc4c53e9adcc45630fdc382a65850e7636d729c'
+        '3e6fce9860f37395468057b67bc4c53e9adcc45630fdc382a65850e7636d729c',
+        '153ba2e803e5334e8e0bcaaf681d7853f14085f482ca87e70dcdd9f861f01319',
       ),
       (
         'v15',
-        'f7d5ae802550f5e5580f3a0b4b9f8da02a465b4cc2b79725693dad0a2f3019ae'
+        'f7d5ae802550f5e5580f3a0b4b9f8da02a465b4cc2b79725693dad0a2f3019ae',
+        '623302b075bceb4dc823131e0e37c2ebba781f1c0215c1dddcc8b1825727ea7f',
       ),
     ];
 
-    for (final (version, expected) in cases) {
+    for (final (version, hash34, hashLegacy) in cases) {
       final path = '$releasesDir/$version/seforim.db';
-      test('hash($version) == content hash', () {
+      test('hash($version) — סדר 34 ו-33 תואמים ל-goldens', () {
         final db = sqlite3.sqlite3.open(path, mode: sqlite3.OpenMode.readOnly);
         try {
-          expect(_hasher.compute(db), expected);
+          expect(_hasher.compute(db), hash34);
+          expect(
+            _hasher.compute(db, tableOrder: kHashTableOrderSchema1),
+            hashLegacy,
+          );
         } finally {
           db.close();
         }
@@ -120,7 +129,7 @@ void main() {
           skip: File(path).existsSync()
               ? false
               : 'הגדר SEFORIM_LIBRARY_RELEASES_DIR לאימות מול הפצת $version',
-          timeout: const Timeout(Duration(minutes: 4)));
+          timeout: const Timeout(Duration(minutes: 8)));
     }
   });
 }

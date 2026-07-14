@@ -69,6 +69,21 @@ class PatchApplyException implements Exception {
   String toString() => 'PatchApplyException: $message';
 }
 
+/// בוחר את סדר ה-hash לפי גרסת הסכמה: 1 → [kHashTableOrderSchema1] (33 הישן),
+/// 2 → [kHashTableOrder] (34 הנוכחי). כל ערך אחר → זריקה (fail loudly).
+List<String> hashTableOrderForSchemaVersion(int schemaVersion) {
+  switch (schemaVersion) {
+    case 1:
+      return kHashTableOrderSchema1;
+    case 2:
+      return kHashTableOrder;
+    default:
+      throw PatchApplyException(
+        'גרסת סכמה $schemaVersion אינה נתמכת לבחירת סדר hash',
+      );
+  }
+}
+
 /// מחיל patch DB דלתאי על `seforim.db` בצורה אטומית, ומשכפל את
 /// `PatchApplier.kt` בצד הייצור.
 ///
@@ -145,7 +160,12 @@ class PatchApplier {
       if (verifyFromHash) {
         onStage?.call('verifyFromHash');
         if (verifyProgress != null) refreshTotal();
-        final localHash = hasher.compute(db, onProgress: verifyProgress);
+        // ה-DB *לפני* apply הוא בסכמת המקור — הסדר נבחר לפי fromSchemaVersion.
+        final localHash = hasher.compute(
+          db,
+          tableOrder: hashTableOrderForSchemaVersion(manifest.fromSchemaVersion),
+          onProgress: verifyProgress,
+        );
         if (localHash != manifest.fromContentHash) {
           throw PatchApplyException(
             'ה-DB המקומי שונה מהצפוי — hash לא תואם ל-fromContentHash. '
@@ -192,7 +212,12 @@ class PatchApplier {
 
       onStage?.call('verifyToHash');
       if (verifyProgress != null) refreshTotal();
-      final resultHash = hasher.compute(db, onProgress: verifyProgress);
+      // ה-DB *אחרי* apply הוא בסכמת היעד — הסדר נבחר לפי toSchemaVersion.
+      final resultHash = hasher.compute(
+        db,
+        tableOrder: hashTableOrderForSchemaVersion(manifest.toSchemaVersion),
+        onProgress: verifyProgress,
+      );
       if (resultHash != manifest.toContentHash) {
         throw PatchApplyException(
           'ה-hash אחרי apply ($resultHash) אינו תואם ל-toContentHash '
