@@ -426,6 +426,64 @@ void main() {
         throwsA(isA<PatchApplyException>()),
       );
     });
+
+    test('toSchemaVersion לא מוכר + verifyFromHash=false → זריקה לפני כל כתיבה',
+        () {
+      final base = buildBaseDb(version: 1, sourceRows: [
+        [1, 'a'],
+      ]);
+      final patch = buildPatchDb(from: 1, to: 2, upsertSource: [
+        [2, 'b'],
+      ]);
+      final bytesBefore = File(base).readAsBytesSync();
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: 'irrelevant',
+        toHash: 'irrelevant',
+        toSchema: 99,
+      );
+      expect(
+        () => _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifest,
+          verifyFromHash: false,
+        ),
+        throwsA(isA<PatchApplyException>()),
+      );
+      // ה-preflight רץ לפני פתיחת ה-DB — הקובץ זהה בתים למצב ההתחלתי
+      expect(File(base).readAsBytesSync(), bytesBefore);
+    });
+
+    test(
+        'fromSchemaVersion לא מוכר + verifyFromHash=false → זריקה לפני כל כתיבה',
+        () {
+      final base = buildBaseDb(version: 1, sourceRows: [
+        [1, 'a'],
+      ]);
+      final patch = buildPatchDb(from: 1, to: 2, upsertSource: [
+        [2, 'b'],
+      ]);
+      final bytesBefore = File(base).readAsBytesSync();
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: 'irrelevant',
+        toHash: 'irrelevant',
+        fromSchema: 0,
+      );
+      expect(
+        () => _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifest,
+          verifyFromHash: false,
+        ),
+        throwsA(isA<PatchApplyException>()),
+      );
+      expect(File(base).readAsBytesSync(), bytesBefore);
+    });
   });
 
   group('hashTableOrderForSchemaVersion', () {

@@ -119,6 +119,12 @@ class PatchApplier {
     void Function(int hashedBytes, int totalBytes)? onVerifyProgress,
     int? verifyTotalBytesHint,
   }) {
+    // ── preflight: שני סדרי ה-hash נפתרים לפני כל פתיחה/כתיבה — גרסת סכמה
+    // לא מוכרת (from או to) זורקת כאן, גם כש-verifyFromHash כבוי.
+    final fromOrder =
+        hashTableOrderForSchemaVersion(manifest.fromSchemaVersion);
+    final toOrder = hashTableOrderForSchemaVersion(manifest.toSchemaVersion);
+
     // עם hint (סך-הבתים מריצה קודמת) ה-total מדויק; בלעדיו נופלים לגודל
     // הקובץ — הערכת-יתר (אינדקסים ודפים לא נכנסים ל-hash), שנמדדת מחדש לפני
     // כל אימות כי ה-patch משנה את הגודל. בשני המסלולים זו הערכה למד בלבד.
@@ -163,7 +169,7 @@ class PatchApplier {
         // ה-DB *לפני* apply הוא בסכמת המקור — הסדר נבחר לפי fromSchemaVersion.
         final localHash = hasher.compute(
           db,
-          tableOrder: hashTableOrderForSchemaVersion(manifest.fromSchemaVersion),
+          tableOrder: fromOrder,
           onProgress: verifyProgress,
         );
         if (localHash != manifest.fromContentHash) {
@@ -215,7 +221,7 @@ class PatchApplier {
       // ה-DB *אחרי* apply הוא בסכמת היעד — הסדר נבחר לפי toSchemaVersion.
       final resultHash = hasher.compute(
         db,
-        tableOrder: hashTableOrderForSchemaVersion(manifest.toSchemaVersion),
+        tableOrder: toOrder,
         onProgress: verifyProgress,
       );
       if (resultHash != manifest.toContentHash) {

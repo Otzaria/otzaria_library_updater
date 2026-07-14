@@ -1,0 +1,46 @@
+# בדיקת חוזה טבלאות ה-patch מול צד ה-Kotlin (Otzaria/SeforimLibrary).
+# המאגר ציבורי כרגע ולכן אין צורך ב-token; אם יהפוך לפרטי יש להוסיף
+# ל-checkout שלו `token: ${{ secrets.CONTRACT_REPO_TOKEN }}` ולהגדיר את ה-secret.
+name: contract
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    env:
+      KOTLIN_FIXTURE: seforim-library/generator/common/src/jvmTest/resources/patch_tables_contract.json
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout Otzaria/SeforimLibrary (צד ה-Kotlin)
+        uses: actions/checkout@v4
+        with:
+          repository: Otzaria/SeforimLibrary
+          ref: otzaria
+          path: seforim-library
+
+      # נתיב שגוי חייב להיכשל בקול רם, לא להתדלג בשקט בבדיקת ה-Dart
+      - name: Verify Kotlin fixture exists
+        run: test -f "$KOTLIN_FIXTURE"
+
+      # השוואת בתים ישירה בין שני ה-fixtures — בלתי תלויה ב-Dart
+      - name: cmp fixtures (byte-identical)
+        run: cmp test/patch_tables_contract.json "$KOTLIN_FIXTURE"
+
+      - uses: dart-lang/setup-dart@v1
+
+      - run: dart pub get
+
+      - name: Run contract tests (fail on skip)
+        env:
+          SEFORIM_LIBRARY_REPO: ${{ github.workspace }}/seforim-library
+        run: |
+          set -euo pipefail
+          dart test test/patch_tables_contract_test.dart -r expanded | tee contract_test_output.txt
+          if grep -Eiq '(skipped|\+[0-9]+ ~[0-9]+)' contract_test_output.txt; then
+            echo '::error::בדיקת החוזה דולגה — SEFORIM_LIBRARY_REPO לא נקלט או שה-fixture חסר'
+            exit 1
+          fi
