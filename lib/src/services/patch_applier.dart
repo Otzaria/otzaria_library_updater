@@ -18,6 +18,7 @@ const Set<String> kBooksTouchedTables = {
   'alt_toc_entry',
   'line_alt_toc',
   'book_author',
+  'book_base_text',
   'book_topic',
   'book_acronym',
 };
@@ -85,7 +86,7 @@ class PatchApplier {
 
   const PatchApplier({
     this.hasher = const LogicalContentHasher(),
-    this.supportedSchemaVersion = 1,
+    this.supportedSchemaVersion = 2,
   });
 
   /// מחיל את ה-patch שב-[patchPath] על ה-DB שב-[dbPath] לפי [manifest].
@@ -389,6 +390,12 @@ class PatchApplier {
       for (final t in const ['book_author', 'book_topic', 'book_acronym']) {
         collect('${op}_$t', 'SELECT DISTINCT bookId FROM patch.${op}_$t');
       }
+      // book_base_text — שני הצדדים (bookId וגם baseBookId) הם מזהי ספרים
+      // שחלק מה-PK, ושינוי בכל אחד מהם נוגע לספר המתאים.
+      collect('${op}_book_base_text',
+          'SELECT DISTINCT bookId FROM patch.${op}_book_base_text');
+      collect('${op}_book_base_text',
+          'SELECT DISTINCT baseBookId FROM patch.${op}_book_base_text');
     }
     return touched;
   }
