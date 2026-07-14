@@ -94,16 +94,16 @@ void main() {
   group('LogicalContentHasher against real DBs', () {
     final releasesDir =
         Platform.environment['SEFORIM_LIBRARY_RELEASES_DIR'] ?? '/nonexistent';
-    // hashes מה-manifests של המפיק הקוטליני; ערכי v1-v3 אינם ברי-שחזור מאז
-    // הוספת 5 הטבלאות (קידומת table: נכתבת גם לטבלה חסרה).
+    // goldens נעוצים ל-kHashTableOrder בן 34 הטבלאות (כולל book_base_text,
+    // aa2158f) — קידומת table: נכתבת גם לטבלה נעדרת, לכן ערכי סכמה-1 השתנו.
     const cases = [
       (
         'v14',
-        '153ba2e803e5334e8e0bcaaf681d7853f14085f482ca87e70dcdd9f861f01319'
+        '3e6fce9860f37395468057b67bc4c53e9adcc45630fdc382a65850e7636d729c'
       ),
       (
         'v15',
-        '623302b075bceb4dc823131e0e37c2ebba781f1c0215c1dddcc8b1825727ea7f'
+        'f7d5ae802550f5e5580f3a0b4b9f8da02a465b4cc2b79725693dad0a2f3019ae'
       ),
     ];
 

@@ -439,7 +439,15 @@ void main() {
       return dst;
     }
 
-    test('apply v14→v15 מצליח ומגיע ל-db_version=15 ול-toContentHash', () {
+    // hash ה-34-טבלאות של v14 (aa2158f) — "לפני", מוצלב מול ה-golden בבדיקת
+    // ה-hasher; ארטיפקטי עידן-33-הטבלאות חייבים להידחות בחבילת v2.
+    const v14Hash34 =
+        '3e6fce9860f37395468057b67bc4c53e9adcc45630fdc382a65850e7636d729c';
+
+    // התוכנית (סעיף 6.1): שחרור סכמה-2 הראשון הוא full-download בלבד — patch
+    // סכמה-1 עם fromContentHash של 33 טבלאות נדחה ב-verifyFromHash, בלי כתיבה.
+    test('apply v14→v15 (patch מעידן 33 הטבלאות) נדחה ב-verifyFromHash ללא שינוי DB',
+        () {
       final dbPath = cloneDb('$dir/v14/seforim.db');
       final patchPath = '$dir/v15/patch-v14-v15.db';
       if (dbPath == null || !File(patchPath).existsSync()) {
@@ -454,19 +462,16 @@ void main() {
         toHash:
             '5ed1d2a7b01606c77996ec26fcccaf9d173f346b1c0ec64280b915185fbfc81d',
       );
-      final result = _applier.apply(
-          dbPath: dbPath, patchPath: patchPath, manifest: manifest);
-      expect(result.resultHash, manifest.toContentHash);
-
-      final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
-      final version = db
-          .select("SELECT value FROM schema_meta WHERE key='db_version'")
-          .first['value'];
-      db.close();
-      expect(version, '15');
+      expect(
+        () => _applier.apply(
+            dbPath: dbPath, patchPath: patchPath, manifest: manifest),
+        throwsA(isA<PatchApplyException>()),
+      );
+      // rollback: hash אחרי הכשל == hash לפני (הדחייה בשלב preflight, טרם כתיבה)
+      expect(_hashOf(dbPath), v14Hash34);
     }, timeout: const Timeout(Duration(minutes: 10)));
 
-    test('apply v14→v15r (patch חלופי) מצליח ומגיע ל-toContentHash', () {
+    test('apply v14→v15r (patch חלופי מעידן 33 הטבלאות) נדחה ללא שינוי DB', () {
       final dbPath = cloneDb('$dir/v14/seforim.db');
       final patchPath = '$dir/v15/patch-v14-v15r.db';
       if (dbPath == null || !File(patchPath).existsSync()) {
@@ -481,9 +486,12 @@ void main() {
         toHash:
             '623302b075bceb4dc823131e0e37c2ebba781f1c0215c1dddcc8b1825727ea7f',
       );
-      final result = _applier.apply(
-          dbPath: dbPath, patchPath: patchPath, manifest: manifest);
-      expect(result.resultHash, manifest.toContentHash);
+      expect(
+        () => _applier.apply(
+            dbPath: dbPath, patchPath: patchPath, manifest: manifest),
+        throwsA(isA<PatchApplyException>()),
+      );
+      expect(_hashOf(dbPath), v14Hash34);
     }, timeout: const Timeout(Duration(minutes: 10)));
 
     test('patch על גרסה שגויה (v14→v15 על DB v15) נכשל לפני כתיבה', () {
