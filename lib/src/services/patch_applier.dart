@@ -18,6 +18,7 @@ const Set<String> kBooksTouchedTables = {
   'alt_toc_entry',
   'line_alt_toc',
   'book_author',
+  'book_base_text',
   'book_topic',
   'book_acronym',
 };
@@ -68,6 +69,21 @@ class PatchApplyException implements Exception {
   String toString() => 'PatchApplyException: $message';
 }
 
+/// בוחר את סדר ה-hash לפי גרסת הסכמה: 1 → [kHashTableOrderSchema1] (33 הישן),
+/// 2 → [kHashTableOrder] (34 הנוכחי). כל ערך אחר → זריקה (fail loudly).
+List<String> hashTableOrderForSchemaVersion(int schemaVersion) {
+  switch (schemaVersion) {
+    case 1:
+      return kHashTableOrderSchema1;
+    case 2:
+      return kHashTableOrder;
+    default:
+      throw PatchApplyException(
+        'גרסת סכמה $schemaVersion אינה נתמכת לבחירת סדר hash',
+      );
+  }
+}
+
 /// מחיל patch DB דלתאי על `seforim.db` בצורה אטומית, ומשכפל את
 /// `PatchApplier.kt` בצד הייצור.
 ///
@@ -85,7 +101,7 @@ class PatchApplier {
 
   const PatchApplier({
     this.hasher = const LogicalContentHasher(),
-    this.supportedSchemaVersion = 1,
+    this.supportedSchemaVersion = 2,
   });
 
   /// מחיל את ה-patch שב-[patchPath] על ה-DB שב-[dbPath] לפי [manifest].
@@ -103,6 +119,12 @@ class PatchApplier {
     void Function(int hashedBytes, int totalBytes)? onVerifyProgress,
     int? verifyTotalBytesHint,
   }) {
+    // ── preflight: שני סדרי ה-hash נפתרים לפני כל פתיחה/כתיבה — גרסת סכמה
+    // לא מוכרת (from או to) זורקת כאן, גם כש-verifyFromHash כבוי.
+    final fromOrder =
+        hashTableOrderForSchemaVersion(manifest.fromSchemaVersion);
+    final toOrder = hashTableOrderForSchemaVersion(manifest.toSchemaVersion);
+
     // עם hint (סך-הבתים מריצה קודמת) ה-total מדויק; בלעדיו נופלים לגודל
     // הקובץ — הערכת-יתר (אינדקסים ודפים לא נכנסים ל-hash), שנמדדת מחדש לפני
     // כל אימות כי ה-patch משנה את הגודל. בשני המסלולים זו הערכה למד בלבד.
@@ -144,7 +166,12 @@ class PatchApplier {
       if (verifyFromHash) {
         onStage?.call('verifyFromHash');
         if (verifyProgress != null) refreshTotal();
-        final localHash = hasher.compute(db, onProgress: verifyProgress);
+        // ה-DB *לפני* apply הוא בסכמת המקור — הסדר נבחר לפי fromSchemaVersion.
+        final localHash = hasher.compute(
+          db,
+          tableOrder: fromOrder,
+          onProgress: verifyProgress,
+        );
         if (localHash != manifest.fromContentHash) {
           throw PatchApplyException(
             'ה-DB המקומי שונה מהצפוי — hash לא תואם ל-fromContentHash. '
@@ -191,7 +218,12 @@ class PatchApplier {
 
       onStage?.call('verifyToHash');
       if (verifyProgress != null) refreshTotal();
-      final resultHash = hasher.compute(db, onProgress: verifyProgress);
+      // ה-DB *אחרי* apply הוא בסכמת היעד — הסדר נבחר לפי toSchemaVersion.
+      final resultHash = hasher.compute(
+        db,
+        tableOrder: toOrder,
+        onProgress: verifyProgress,
+      );
       if (resultHash != manifest.toContentHash) {
         throw PatchApplyException(
           'ה-hash אחרי apply ($resultHash) אינו תואם ל-toContentHash '
@@ -389,6 +421,12 @@ class PatchApplier {
       for (final t in const ['book_author', 'book_topic', 'book_acronym']) {
         collect('${op}_$t', 'SELECT DISTINCT bookId FROM patch.${op}_$t');
       }
+      // book_base_text — שני הצדדים (bookId וגם baseBookId) הם מזהי ספרים
+      // שחלק מה-PK, ושינוי בכל אחד מהם נוגע לספר המתאים.
+      collect('${op}_book_base_text',
+          'SELECT DISTINCT bookId FROM patch.${op}_book_base_text');
+      collect('${op}_book_base_text',
+          'SELECT DISTINCT baseBookId FROM patch.${op}_book_base_text');
     }
     return touched;
   }

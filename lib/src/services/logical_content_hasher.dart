@@ -11,8 +11,9 @@ import '../models/patch_table_spec.dart';
 /// ל-`fromContentHash`/`toContentHash` שב-manifest.
 ///
 /// האלגוריתם (אומת אות-באות מול שרשרת v14/v15 האמיתית):
-/// * לכל טבלה ב-[kHashTableOrder] נכתב הקידומת `" table:<name> "` — תמיד,
-///   גם אם הטבלה אינה קיימת.
+/// * לכל טבלה בסדר ה-hash הנתון ([compute]‏ `tableOrder`, ברירת מחדל
+///   [kHashTableOrder]) נכתב הקידומת `" table:<name> "` — תמיד, גם אם הטבלה
+///   אינה קיימת. הסדר נבחר לפי גרסת הסכמה (34 לסכמה-2, 33 לסכמה-1).
 /// * אם הטבלה קיימת: `"cols:<c1,c2,...>"` (עמודות ממוינות אלפביתית) ואז בית 0x00.
 /// * השורות נקראות לפי `ORDER BY id` (אם יש עמודת id) או לפי כל העמודות.
 /// * לכל תא: בית-סוג ואז הנתונים, ואז מפריד יחידה 0x1F.
@@ -38,13 +39,16 @@ class LogicalContentHasher {
   ///
   /// [onProgress] מדווח את מספר הבתים המצטבר שהוזרם ל-SHA עד כה (מדוד כל
   /// ~16MB), למד התקדמות במהלך האימות הארוך.
+  /// [tableOrder] — סדר הטבלאות לשקלול ב-hash. ברירת מחדל: [kHashTableOrder]
+  /// (34 טבלאות, סכמה-2). ה-caller בוחר את הסדר לפי גרסת הסכמה של ה-DB.
   String compute(sqlite3.Database db,
-      {void Function(int bytesHashed)? onProgress}) {
+      {List<String> tableOrder = kHashTableOrder,
+      void Function(int bytesHashed)? onProgress}) {
     final digestSink = _DigestSink();
     final shaSink = sha256.startChunkedConversion(digestSink);
     final out = _BufferedByteSink(shaSink, onProgress: onProgress);
 
-    for (final table in kHashTableOrder) {
+    for (final table in tableOrder) {
       out.addBytes(utf8.encode(' table:$table '));
       final cols = _readColumnsCanonical(db, table);
       if (cols == null) continue;

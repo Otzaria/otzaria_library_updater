@@ -32,6 +32,7 @@ const List<PatchTableSpec> kPatchTablesInFkOrder = [
       updatable: false),
   PatchTableSpec('book', ['id'], updatable: true),
   PatchTableSpec('book_author', ['bookId', 'authorId'], updatable: false),
+  PatchTableSpec('book_base_text', ['bookId', 'baseBookId'], updatable: false),
   PatchTableSpec('book_topic', ['bookId', 'topicId'], updatable: false),
   PatchTableSpec('book_pub_place', ['bookId', 'pubPlaceId'], updatable: false),
   PatchTableSpec('book_pub_date', ['bookId', 'pubDateId'], updatable: false),
@@ -64,6 +65,45 @@ const List<PatchTableSpec> kPatchTablesInFkOrder = [
 /// משוכפל אות-באות מ-`DEFAULT_TABLES` ב-`LogicalContentHasher.kt`.
 /// הסדר כאן שונה מ-[kPatchTablesInFkOrder] — אסור להחליף ביניהם.
 const List<String> kHashTableOrder = [
+  'source',
+  'author',
+  'topic',
+  'pub_place',
+  'pub_date',
+  'connection_type',
+  'generation',
+  'category',
+  'category_closure',
+  'tocText',
+  'book',
+  'book_topic',
+  'book_author',
+  'book_base_text',
+  'book_pub_place',
+  'book_pub_date',
+  'book_generation',
+  'tocEntry',
+  'line',
+  'line_toc',
+  'link',
+  'link_anchor',
+  'link_range',
+  'link_coverage',
+  'book_has_links',
+  'book_version',
+  'version_line',
+  'book_acronym',
+  'alt_toc_structure',
+  'alt_toc_entry',
+  'line_alt_toc',
+  'default_commentator',
+  'default_targum',
+  'schema_meta',
+];
+
+/// סדר ה-hash הקפוא של סכמה-1 (33 טבלאות, ללא `book_base_text`) — משחזר בדיוק
+/// את ה-hash של ארטיפקטי סכמה-1 ההיסטוריים. לעולם אין לערוך.
+const List<String> kHashTableOrderSchema1 = [
   'source',
   'author',
   'topic',

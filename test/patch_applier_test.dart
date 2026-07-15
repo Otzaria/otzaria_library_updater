@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:test/test.dart';
 import 'package:seforim_library_updater/src/models/delta_manifest.dart';
+import 'package:seforim_library_updater/src/models/patch_table_spec.dart';
 import 'package:seforim_library_updater/src/services/logical_content_hasher.dart';
 import 'package:seforim_library_updater/src/services/patch_applier.dart';
 import 'package:sqlite3/sqlite3.dart' as sqlite3;
@@ -19,17 +20,21 @@ String _hashOf(String dbPath) {
 }
 
 /// בונה manifest סינתטי. ה-hashes מחושבים מהקבצים בפועל אחרי בנייתם.
+/// [fromSchema]/[toSchema] ברירת מחדל 2 → סדר ה-hash הנוכחי (34), תואם ל-
+/// [_hashOf] (שמשתמש בברירת המחדל של ה-hasher). בדיקות v14/v15 מעבירות 1.
 DeltaManifest _manifest({
   required int from,
   required int to,
   required String fromHash,
   required String toHash,
+  int fromSchema = 2,
+  int toSchema = 2,
 }) =>
     DeltaManifest(
       fromVersion: from,
       toVersion: to,
-      fromSchemaVersion: 1,
-      toSchemaVersion: 1,
+      fromSchemaVersion: fromSchema,
+      toSchemaVersion: toSchema,
       fromContentHash: fromHash,
       toContentHash: toHash,
       patchFiles: const [
@@ -60,7 +65,7 @@ void main() {
     final db = sqlite3.sqlite3.open(path);
     db.execute('CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT)');
     db.execute("INSERT INTO schema_meta VALUES ('db_version','$version'),"
-        "('db_schema_version','1')");
+        "('db_schema_version','2')");
     db.execute('CREATE TABLE source (id INTEGER PRIMARY KEY, name TEXT)');
     for (final r in sourceRows) {
       db.execute('INSERT INTO source VALUES (?,?)', [r[0], r[1]]);
@@ -421,6 +426,83 @@ void main() {
         throwsA(isA<PatchApplyException>()),
       );
     });
+
+    test('toSchemaVersion לא מוכר + verifyFromHash=false → זריקה לפני כל כתיבה',
+        () {
+      final base = buildBaseDb(version: 1, sourceRows: [
+        [1, 'a'],
+      ]);
+      final patch = buildPatchDb(from: 1, to: 2, upsertSource: [
+        [2, 'b'],
+      ]);
+      final bytesBefore = File(base).readAsBytesSync();
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: 'irrelevant',
+        toHash: 'irrelevant',
+        toSchema: 99,
+      );
+      expect(
+        () => _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifest,
+          verifyFromHash: false,
+        ),
+        throwsA(isA<PatchApplyException>()),
+      );
+      // ה-preflight רץ לפני פתיחת ה-DB — הקובץ זהה בתים למצב ההתחלתי
+      expect(File(base).readAsBytesSync(), bytesBefore);
+    });
+
+    test(
+        'fromSchemaVersion לא מוכר + verifyFromHash=false → זריקה לפני כל כתיבה',
+        () {
+      final base = buildBaseDb(version: 1, sourceRows: [
+        [1, 'a'],
+      ]);
+      final patch = buildPatchDb(from: 1, to: 2, upsertSource: [
+        [2, 'b'],
+      ]);
+      final bytesBefore = File(base).readAsBytesSync();
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: 'irrelevant',
+        toHash: 'irrelevant',
+        fromSchema: 0,
+      );
+      expect(
+        () => _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifest,
+          verifyFromHash: false,
+        ),
+        throwsA(isA<PatchApplyException>()),
+      );
+      expect(File(base).readAsBytesSync(), bytesBefore);
+    });
+  });
+
+  group('hashTableOrderForSchemaVersion', () {
+    test('סכמה-1 → סדר 33 הישן (ללא book_base_text)', () {
+      expect(hashTableOrderForSchemaVersion(1), same(kHashTableOrderSchema1));
+      expect(kHashTableOrderSchema1.length, 33);
+      expect(kHashTableOrderSchema1, isNot(contains('book_base_text')));
+    });
+    test('סכמה-2 → סדר 34 הנוכחי (כולל book_base_text)', () {
+      expect(hashTableOrderForSchemaVersion(2), same(kHashTableOrder));
+      expect(kHashTableOrder.length, 34);
+      expect(kHashTableOrder, contains('book_base_text'));
+    });
+    test('גרסת סכמה לא מוכרת → זורק PatchApplyException', () {
+      expect(() => hashTableOrderForSchemaVersion(0),
+          throwsA(isA<PatchApplyException>()));
+      expect(() => hashTableOrderForSchemaVersion(3),
+          throwsA(isA<PatchApplyException>()));
+    });
   });
 
   // אימות מול הקבצים האמיתיים — ה-acceptance criteria 1+2.
@@ -439,7 +521,10 @@ void main() {
       return dst;
     }
 
-    test('apply v14→v15 מצליח ומגיע ל-db_version=15 ול-toContentHash', () {
+    // manifest של סכמה-1 (from/to schema=1) → סדר ה-hash הישן (33) →
+    // ה-hashes ההיסטוריים תואמים שוב, ודלתאות סכמה-1 נשארות קבילות.
+    test('apply v14→v15 (סכמה-1) מצליח ומגיע ל-db_version=15 ול-toContentHash',
+        () {
       final dbPath = cloneDb('$dir/v14/seforim.db');
       final patchPath = '$dir/v15/patch-v14-v15.db';
       if (dbPath == null || !File(patchPath).existsSync()) {
@@ -449,6 +534,8 @@ void main() {
       final manifest = _manifest(
         from: 14,
         to: 15,
+        fromSchema: 1,
+        toSchema: 1,
         fromHash:
             '153ba2e803e5334e8e0bcaaf681d7853f14085f482ca87e70dcdd9f861f01319',
         toHash:
@@ -466,7 +553,34 @@ void main() {
       expect(version, '15');
     }, timeout: const Timeout(Duration(minutes: 10)));
 
-    test('apply v14→v15r (patch חלופי) מצליח ומגיע ל-toContentHash', () {
+    // דרישת הסוקר: verifyFromHash=false גם הוא מגיע ל-toContentHash.
+    test('apply v14→v15 (סכמה-1) עם verifyFromHash=false מצליח', () {
+      final dbPath = cloneDb('$dir/v14/seforim.db');
+      final patchPath = '$dir/v15/patch-v14-v15.db';
+      if (dbPath == null || !File(patchPath).existsSync()) {
+        markTestSkipped('קבצי v14/v15 לא זמינים');
+        return;
+      }
+      final manifest = _manifest(
+        from: 14,
+        to: 15,
+        fromSchema: 1,
+        toSchema: 1,
+        fromHash:
+            '153ba2e803e5334e8e0bcaaf681d7853f14085f482ca87e70dcdd9f861f01319',
+        toHash:
+            '5ed1d2a7b01606c77996ec26fcccaf9d173f346b1c0ec64280b915185fbfc81d',
+      );
+      final result = _applier.apply(
+        dbPath: dbPath,
+        patchPath: patchPath,
+        manifest: manifest,
+        verifyFromHash: false,
+      );
+      expect(result.resultHash, manifest.toContentHash);
+    }, timeout: const Timeout(Duration(minutes: 10)));
+
+    test('apply v14→v15r (patch חלופי, סכמה-1) מצליח ומגיע ל-toContentHash', () {
       final dbPath = cloneDb('$dir/v14/seforim.db');
       final patchPath = '$dir/v15/patch-v14-v15r.db';
       if (dbPath == null || !File(patchPath).existsSync()) {
@@ -476,6 +590,8 @@ void main() {
       final manifest = _manifest(
         from: 14,
         to: 15,
+        fromSchema: 1,
+        toSchema: 1,
         fromHash:
             '153ba2e803e5334e8e0bcaaf681d7853f14085f482ca87e70dcdd9f861f01319',
         toHash:
