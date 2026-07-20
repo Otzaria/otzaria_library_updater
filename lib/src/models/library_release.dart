@@ -6,10 +6,22 @@ class ReleaseAsset extends Equatable {
   final String downloadUrl;
   final int size;
 
+  /// מזהה הנכס אצל GitHub — יציב לאורך חיי הנכס ומשתנה בהעלאה מחדש.
+  final int? id;
+
+  /// חותמת עדכון הנכס (`updated_at`) — משתנה בהעלאה מחדש תחת אותו tag.
+  final String? updatedAt;
+
+  /// digest של התוכן (`sha256:<hex>`) כשה-API מספק; null כשחסר.
+  final String? digest;
+
   const ReleaseAsset({
     required this.name,
     required this.downloadUrl,
     required this.size,
+    this.id,
+    this.updatedAt,
+    this.digest,
   });
 
   factory ReleaseAsset.fromJson(Map<String, dynamic> json) {
@@ -17,6 +29,9 @@ class ReleaseAsset extends Equatable {
       name: (json['name'] as String?) ?? '',
       downloadUrl: (json['browser_download_url'] as String?) ?? '',
       size: (json['size'] as num?)?.toInt() ?? 0,
+      id: (json['id'] as num?)?.toInt(),
+      updatedAt: json['updated_at'] as String?,
+      digest: json['digest'] as String?,
     );
   }
 
@@ -29,7 +44,7 @@ class ReleaseAsset extends Equatable {
   bool get isFullDbArchive => name == 'seforim.db.zst';
 
   @override
-  List<Object?> get props => [name, downloadUrl, size];
+  List<Object?> get props => [name, downloadUrl, size, id, updatedAt, digest];
 }
 
 /// מייצג release אחד מ-GitHub עם כל ה-assets שלו.
