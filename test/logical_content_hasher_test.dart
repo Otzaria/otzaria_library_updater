@@ -95,8 +95,8 @@ void main() {
   group('LogicalContentHasher against real DBs', () {
     final releasesDir =
         Platform.environment['SEFORIM_LIBRARY_RELEASES_DIR'] ?? '/nonexistent';
-    // כל fixture נבדק בשני הסדרים:
-    // * hash34 — סדר 34 הטבלאות הנוכחי ([kHashTableOrder], ברירת המחדל).
+    // כל fixture נבדק בשני הסדרים ההיסטוריים של הסכמות שלהם:
+    // * hash34 — סדר 34 הטבלאות של סכמה 2 ([kHashTableOrderSchema2]).
     // * hashLegacy — סדר 33 הטבלאות הקפוא ([kHashTableOrderSchema1]); מוכיח
     //   שהרשימה הישנה משחזרת אות-באות את ה-hashes ההיסטוריים של סכמה-1.
     const cases = [
@@ -117,7 +117,10 @@ void main() {
       test('hash($version) — סדר 34 ו-33 תואמים ל-goldens', () {
         final db = sqlite3.sqlite3.open(path, mode: sqlite3.OpenMode.readOnly);
         try {
-          expect(_hasher.compute(db), hash34);
+          expect(
+            _hasher.compute(db, tableOrder: kHashTableOrderSchema2),
+            hash34,
+          );
           expect(
             _hasher.compute(db, tableOrder: kHashTableOrderSchema1),
             hashLegacy,
