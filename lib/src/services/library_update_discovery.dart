@@ -89,11 +89,17 @@ class LibraryUpdateDiscovery {
     final latestVersion =
         maxEdgeVersion > bestFullVersion ? maxEdgeVersion : bestFullVersion;
 
+    // DB מלא ישן יותר אינו fallback חוקי ל-latest: הצרכן מאמת את הגרסה
+    // שחולצה מול plan.targetVersion, ולכן צירוף asset ישן היה גורם להורדה
+    // גדולה שמובטח שתיכשל באימות. במקרה כזה משאירים את ה-fallback חסר.
+    final fullMatchesLatest =
+        latestFull != null && bestFullVersion == latestVersion;
+
     return LibraryDiscoveryResult(
       latestVersion: latestVersion,
       edges: edges,
-      latestFullDbAsset: latestFull,
-      latestReleaseTag: latestTag,
+      latestFullDbAsset: fullMatchesLatest ? latestFull : null,
+      latestReleaseTag: fullMatchesLatest ? latestTag : null,
     );
   }
 

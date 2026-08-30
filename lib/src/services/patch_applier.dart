@@ -1,6 +1,6 @@
 import 'dart:io';
 
-import 'package:sqlite3/sqlite3.dart' as sqlite3;
+import 'package:seforim_library_updater/src/sqlite/sqlite3_api.dart' as sqlite3;
 
 import '../models/delta_manifest.dart';
 import '../models/patch_table_spec.dart';
@@ -61,21 +61,49 @@ class PatchApplyResult {
   });
 }
 
+/// השלב שבו hash לוגי לא תאם לערך שב-manifest.
+enum PatchHashMismatchStage {
+  /// ה-DB לפני apply לא תאם ל-fromContentHash.
+  fromContentHash,
+
+  /// התוצאה לפני commit לא תאמה ל-toContentHash.
+  toContentHash,
+}
+
 /// נזרק כאשר preflight או אימות נכשלים — ה-DB לא שונה (לא בוצע commit).
 class PatchApplyException implements Exception {
   final String message;
-  const PatchApplyException(this.message);
+
+  /// true כשה-hash הלוגי אינו תואם (from או to), ולכן אין לסמוך על מסלול
+  /// הדלתא ויש להציע fallback להורדה מלאה.
+  ///
+  /// אי-התאמת toContentHash אינה מוכיחה לבדה שהמקור המקומי סטה: היא עשויה
+  /// להעיד גם על patch/manifest לא עקביים או על באג ב-applier. ראו
+  /// [hashMismatchStage] לאבחון מדויק.
+  final bool isContentMismatch;
+
+  /// null בכשל שאינו hash; אחרת מציין איזה אימות hash נכשל.
+  final PatchHashMismatchStage? hashMismatchStage;
+
+  const PatchApplyException(
+    this.message, {
+    bool isContentMismatch = false,
+    this.hashMismatchStage,
+  }) : isContentMismatch = isContentMismatch || hashMismatchStage != null;
   @override
   String toString() => 'PatchApplyException: $message';
 }
 
-/// בוחר את סדר ה-hash לפי גרסת הסכמה: 1 → [kHashTableOrderSchema1] (33 הישן),
-/// 2 → [kHashTableOrder] (34 הנוכחי). כל ערך אחר → זריקה (fail loudly).
+/// בוחר את סדר ה-hash לפי גרסת הסכמה: 1 → [kHashTableOrderSchema1] (33),
+/// 2 → [kHashTableOrderSchema2] (34), 3 → [kHashTableOrder] (35, הנוכחי).
+/// כל ערך אחר → זריקה (fail loudly).
 List<String> hashTableOrderForSchemaVersion(int schemaVersion) {
   switch (schemaVersion) {
     case 1:
       return kHashTableOrderSchema1;
     case 2:
+      return kHashTableOrderSchema2;
+    case 3:
       return kHashTableOrder;
     default:
       throw PatchApplyException(
@@ -101,7 +129,7 @@ class PatchApplier {
 
   const PatchApplier({
     this.hasher = const LogicalContentHasher(),
-    this.supportedSchemaVersion = 2,
+    this.supportedSchemaVersion = 3,
   });
 
   /// מחיל את ה-patch שב-[patchPath] על ה-DB שב-[dbPath] לפי [manifest].
@@ -176,6 +204,7 @@ class PatchApplier {
           throw PatchApplyException(
             'ה-DB המקומי שונה מהצפוי — hash לא תואם ל-fromContentHash. '
             'נדרשת הורדה מלאה.',
+            hashMismatchStage: PatchHashMismatchStage.fromContentHash,
           );
         }
       }
@@ -228,6 +257,7 @@ class PatchApplier {
         throw PatchApplyException(
           'ה-hash אחרי apply ($resultHash) אינו תואם ל-toContentHash '
           '(${manifest.toContentHash})',
+          hashMismatchStage: PatchHashMismatchStage.toContentHash,
         );
       }
 

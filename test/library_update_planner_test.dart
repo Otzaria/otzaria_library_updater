@@ -160,5 +160,25 @@ void main() {
       expect(p.deltaSteps, hasLength(1));
       expect(p.deltaSteps.single.toVersion, 2);
     });
+    test('תוכנית delta נושאת את ה-DB המלא כ-fallback', () {
+      final p = plan(local: 1, latest: 3, edges: [_edge(1, 2), _edge(2, 3)]);
+      expect(p.kind, LibraryUpdatePlanKind.delta);
+      final fallback = p.toFullDownloadFallback(reason: 'סטיית תוכן');
+      expect(fallback, isNotNull);
+      expect(fallback!.kind, LibraryUpdatePlanKind.fullDownload);
+      expect(fallback.fullDbAsset, _fullAsset);
+      expect(fallback.reason, 'סטיית תוכן');
+    });
+
+    test('toFullDownloadFallback בלי DB מלא → null', () {
+      final p = plan(
+        local: 1,
+        latest: 3,
+        edges: [_edge(1, 2), _edge(2, 3)],
+        full: null,
+        tag: null,
+      );
+      expect(p.toFullDownloadFallback(), isNull);
+    });
   });
 }

@@ -33,6 +33,7 @@ export 'src/services/patch_applier.dart'
         PatchApplier,
         PatchApplyResult,
         PatchApplyException,
+        PatchHashMismatchStage,
         kBooksTouchedTables;
 export 'src/services/patch_downloader.dart'
     show PatchDownloader, PatchDownloadException, PatchDownloadCancelled;

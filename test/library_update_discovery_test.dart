@@ -251,5 +251,59 @@ void main() {
           result.latestFullDbAsset?.downloadUrl, 'https://x/v4/seforim.db.zst');
       expect(result.latestReleaseTag, 'v4');
     });
+
+    test('DB מלא ישן מ-latest אינו מוצע כ-fallback', () async {
+      final releasesJsonWithStaleFull = jsonEncode([
+        {
+          'tag_name': 'v4',
+          'prerelease': false,
+          'draft': false,
+          'assets': [
+            {
+              'name': 'patch-v3-v4.db.zst',
+              'browser_download_url': 'https://x/v4/patch-v3-v4.db.zst',
+              'size': 1000
+            },
+            {
+              'name': 'patch-v3-v4.db.zst.manifest.json',
+              'browser_download_url':
+                  'https://x/v4/patch-v3-v4.db.zst.manifest.json',
+              'size': 600
+            },
+          ],
+        },
+        {
+          'tag_name': 'v3',
+          'prerelease': false,
+          'draft': false,
+          'assets': [
+            {
+              'name': 'seforim.db.zst',
+              'browser_download_url': 'https://x/v3/seforim.db.zst',
+              'size': 1197000000
+            },
+          ],
+        },
+      ]);
+      final mock = MockClient((request) async {
+        final url = request.url.toString();
+        if (url.contains('/releases?') || url.endsWith('/releases')) {
+          return http.Response(releasesJsonWithStaleFull, 200);
+        }
+        if (url.endsWith('patch-v3-v4.db.zst.manifest.json')) {
+          return http.Response(_manifestJson(3, 4), 200);
+        }
+        return http.Response('not found', 404);
+      });
+      final discovery = LibraryUpdateDiscovery(
+        client: GithubLibraryReleaseClient(httpClient: mock),
+      );
+      final result = await discovery.discover(allowPrerelease: false);
+
+      expect(result.latestVersion, 4);
+      expect(result.edges, hasLength(1));
+      expect(result.latestFullDbAsset, isNull);
+      expect(result.latestReleaseTag, isNull);
+    });
   });
 }

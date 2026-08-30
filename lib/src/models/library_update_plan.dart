@@ -58,7 +58,8 @@ class LibraryUpdatePlan extends Equatable {
   /// שלבי הדלתא להחלה, בסדר (עבור [LibraryUpdatePlanKind.delta]).
   final List<PatchEdge> deltaSteps;
 
-  /// ה-DB המלא להורדה (עבור [LibraryUpdatePlanKind.fullDownload]).
+  /// ה-DB המלא להורדה. בתוכנית fullDownload — היעד להורדה; בתוכנית delta —
+  /// fallback ל-[toFullDownloadFallback] אם ההחלה נכשלת על סטיית תוכן.
   final ReleaseAsset? fullDbAsset;
 
   /// ה-tag של ה-release שממנו יורד ה-DB המלא.
@@ -88,17 +89,22 @@ class LibraryUpdatePlan extends Equatable {
         targetVersion: targetVersion ?? localVersion,
       );
 
-  /// מסלול דלתא — סדרת patches להחלה.
+  /// מסלול דלתא — סדרת patches להחלה. [fullDbAsset]/[fullDbReleaseTag]
+  /// אופציונליים ומאפשרים [toFullDownloadFallback] אם ההחלה תיכשל.
   factory LibraryUpdatePlan.delta({
     required int localVersion,
     required int targetVersion,
     required List<PatchEdge> steps,
+    ReleaseAsset? fullDbAsset,
+    String? fullDbReleaseTag,
   }) =>
       LibraryUpdatePlan._(
         kind: LibraryUpdatePlanKind.delta,
         localVersion: localVersion,
         targetVersion: targetVersion,
         deltaSteps: List.unmodifiable(steps),
+        fullDbAsset: fullDbAsset,
+        fullDbReleaseTag: fullDbReleaseTag,
       );
 
   /// מסלול הורדה מלאה.
@@ -130,6 +136,21 @@ class LibraryUpdatePlan extends Equatable {
         targetVersion: targetVersion,
         reason: reason,
       );
+
+  /// ממיר תוכנית דלתא לתוכנית הורדה מלאה — fallback כשההחלה נכשלת על סטיית
+  /// תוכן. מחזיר null אם אין DB מלא זמין (ואז נשארים במסך השגיאה).
+  LibraryUpdatePlan? toFullDownloadFallback({String? reason}) {
+    final asset = fullDbAsset;
+    final tag = fullDbReleaseTag;
+    if (asset == null || tag == null) return null;
+    return LibraryUpdatePlan.fullDownload(
+      localVersion: localVersion,
+      targetVersion: targetVersion,
+      asset: asset,
+      releaseTag: tag,
+      reason: reason,
+    );
+  }
 
   /// גודל ההורדה הכולל בבייטים (דחוס) — לתצוגה למשתמש.
   int get totalDownloadSize {

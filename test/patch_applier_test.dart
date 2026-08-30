@@ -10,10 +10,21 @@ import 'package:sqlite3/sqlite3.dart' as sqlite3;
 const _hasher = LogicalContentHasher();
 const _applier = PatchApplier();
 
+/// ה-fixtures בונים DB ו-patch של סכמה-2, ולכן ה-hash הצפוי חייב להיחשב
+/// בסדר הקפוא של סכמה-2 — לא בברירת המחדל, שמאז סכמה-3 כוללת טבלה נוספת.
+String _hashWithOrder(String dbPath, List<String> order) {
+  final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
+  try {
+    return _hasher.compute(db, tableOrder: order);
+  } finally {
+    db.close();
+  }
+}
+
 String _hashOf(String dbPath) {
   final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
   try {
-    return _hasher.compute(db);
+    return _hasher.compute(db, tableOrder: kHashTableOrderSchema2);
   } finally {
     db.close();
   }
@@ -222,7 +233,33 @@ void main() {
       expect(
         () =>
             _applier.apply(dbPath: base, patchPath: patch, manifest: manifest),
-        throwsA(isA<PatchApplyException>()),
+        throwsA(isA<PatchApplyException>()
+            .having((e) => e.isContentMismatch, 'isContentMismatch', isFalse)),
+      );
+      expect(_hashOf(base), beforeHash);
+    });
+
+    test('fromContentHash לא תואם → isContentMismatch וה-DB לא משתנה', () {
+      final base = buildBaseDb(version: 1, sourceRows: [
+        [1, 'a'],
+      ]);
+      final beforeHash = _hashOf(base);
+      final patch = buildPatchDb(from: 1, to: 2, upsertSource: [
+        [2, 'b'],
+      ]);
+      final manifest =
+          _manifest(from: 1, to: 2, fromHash: 'diverged', toHash: 'irrelevant');
+
+      expect(
+        () =>
+            _applier.apply(dbPath: base, patchPath: patch, manifest: manifest),
+        throwsA(isA<PatchApplyException>()
+            .having((e) => e.isContentMismatch, 'isContentMismatch', isTrue)
+            .having(
+              (e) => e.hashMismatchStage,
+              'hashMismatchStage',
+              PatchHashMismatchStage.fromContentHash,
+            )),
       );
       expect(_hashOf(base), beforeHash);
     });
@@ -245,7 +282,13 @@ void main() {
       expect(
         () =>
             _applier.apply(dbPath: base, patchPath: patch, manifest: manifest),
-        throwsA(isA<PatchApplyException>()),
+        throwsA(isA<PatchApplyException>()
+            .having((e) => e.isContentMismatch, 'isContentMismatch', isTrue)
+            .having(
+              (e) => e.hashMismatchStage,
+              'hashMismatchStage',
+              PatchHashMismatchStage.toContentHash,
+            )),
       );
       expect(_hashOf(base), beforeHash); // rollback שמר על המקור
     });
@@ -486,21 +529,207 @@ void main() {
     });
   });
 
+  group('שדרוג סכמה 2→3 (link_suppressed_side)', () {
+    // המסלול האמיתי של שלב 2: ה-DB המקומי בסכמה 2, ה-patch מביא CREATE TABLE
+    // כמיגרציה ומאכלס אותה. ה-from-hash חייב להיחשב בסדר סכמה-2 וה-to-hash
+    // בסדר סכמה-3, אחרת ה-apply נדחה על DB תקין לחלוטין.
+    String buildSchema3Db({
+      required int version,
+      required List<List> rows,
+      int reasonMask = 4,
+      String name = 'expected',
+    }) {
+      final path = '${tmp.path}/${name}_s3_$version.db';
+      final db = sqlite3.sqlite3.open(path);
+      db.execute('CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT)');
+      db.execute("INSERT INTO schema_meta VALUES ('db_version','$version'),"
+          "('db_schema_version','3')");
+      db.execute('CREATE TABLE source (id INTEGER PRIMARY KEY, name TEXT)');
+      for (final r in rows) {
+        db.execute('INSERT INTO source VALUES (?,?)', [r[0], r[1]]);
+      }
+      db.execute('CREATE TABLE link_suppressed_side (linkId INTEGER NOT NULL, '
+          'side INTEGER NOT NULL, reasonMask INTEGER NOT NULL, '
+          'PRIMARY KEY (linkId, side))');
+      db.execute(
+        'INSERT INTO link_suppressed_side VALUES (7,0,?)',
+        [reasonMask],
+      );
+      db.close();
+      return path;
+    }
+
+    test('CREATE TABLE + אכלוס, ושתי גרסאות ה-hash נבחרות נכון', () {
+      final base = buildBaseDb(version: 1, sourceRows: [
+        [1, 'aleph'],
+      ]);
+      final patch = buildPatchDb(
+        from: 1,
+        to: 2,
+        migrations: [
+          'CREATE TABLE link_suppressed_side (linkId INTEGER NOT NULL, '
+              'side INTEGER NOT NULL, reasonMask INTEGER NOT NULL, '
+              'PRIMARY KEY (linkId, side))',
+        ],
+      );
+      final pdb = sqlite3.sqlite3.open(patch);
+      pdb.execute('CREATE TABLE upsert_link_suppressed_side (linkId INTEGER, '
+          'side INTEGER, reasonMask INTEGER, PRIMARY KEY (linkId, side))');
+      pdb.execute('INSERT INTO upsert_link_suppressed_side VALUES (7,0,4)');
+      pdb.execute(
+        "UPDATE upsert_schema_meta SET value='2' WHERE key='db_version'",
+      );
+      pdb.execute(
+        "INSERT INTO upsert_schema_meta VALUES ('db_schema_version','3')",
+      );
+      pdb.close();
+
+      final expected = buildSchema3Db(version: 2, rows: [
+        [1, 'aleph'],
+      ]);
+
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromSchema: 2,
+        toSchema: 3,
+        // ה-from נמדד בסדר סכמה-2, ה-to בסדר סכמה-3 — כמו שהאפליר עושה.
+        fromHash: _hashOf(base),
+        toHash: _hashWithOrder(expected, kHashTableOrder),
+      );
+
+      final result = _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: manifest,
+      );
+
+      expect(result.resultHash, manifest.toContentHash);
+      final db = sqlite3.sqlite3.open(base, mode: sqlite3.OpenMode.readOnly);
+      expect(
+        db
+            .select('SELECT linkId, side, reasonMask FROM link_suppressed_side')
+            .map((r) => r.values.toList()),
+        [
+          [7, 0, 4]
+        ],
+      );
+      expect(
+        db
+            .select(
+                "SELECT value FROM schema_meta WHERE key='db_schema_version'")
+            .first
+            .values
+            .first,
+        '3',
+      );
+      db.close();
+    });
+
+    test('סכמה 3→3 מעדכנת reasonMask על מפתח קיים', () {
+      final base = buildSchema3Db(
+        version: 2,
+        rows: [
+          [1, 'aleph'],
+        ],
+        name: 'base',
+      );
+      final patch = buildPatchDb(from: 2, to: 3, schemaVersion: 3);
+      final pdb = sqlite3.sqlite3.open(patch);
+      pdb.execute(
+        'CREATE TABLE upsert_link_suppressed_side (linkId INTEGER, '
+        'side INTEGER, reasonMask INTEGER, PRIMARY KEY (linkId, side))',
+      );
+      pdb.execute('INSERT INTO upsert_link_suppressed_side VALUES (7,0,5)');
+      pdb.close();
+
+      final expected = buildSchema3Db(
+        version: 3,
+        rows: [
+          [1, 'aleph'],
+        ],
+        reasonMask: 5,
+      );
+      final manifest = _manifest(
+        from: 2,
+        to: 3,
+        fromSchema: 3,
+        toSchema: 3,
+        fromHash: _hashWithOrder(base, kHashTableOrder),
+        toHash: _hashWithOrder(expected, kHashTableOrder),
+      );
+
+      final result = _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: manifest,
+      );
+
+      expect(result.resultHash, manifest.toContentHash);
+      final db = sqlite3.sqlite3.open(base, mode: sqlite3.OpenMode.readOnly);
+      expect(
+        db
+            .select(
+              'SELECT reasonMask FROM link_suppressed_side '
+              'WHERE linkId=7 AND side=0',
+            )
+            .single
+            .values
+            .single,
+        5,
+      );
+      db.close();
+    });
+
+    test('לקוח ישן דוחה patch של סכמה 3 לפני שהוא נוגע ב-DB', () {
+      // supportedSchemaVersion=2 מדמה גרסת אפליקציה שלא עודכנה.
+      const oldClient = PatchApplier(supportedSchemaVersion: 2);
+      final base = buildBaseDb(version: 1, sourceRows: [
+        [1, 'aleph'],
+      ]);
+      final before = _hashOf(base);
+      final patch = buildPatchDb(from: 1, to: 2, schemaVersion: 3);
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: before,
+        toHash: before,
+      );
+
+      expect(
+        () =>
+            oldClient.apply(dbPath: base, patchPath: patch, manifest: manifest),
+        throwsA(isA<PatchApplyException>()),
+      );
+      // fail-closed: ה-DB לא נגוע.
+      expect(_hashOf(base), before);
+    });
+  });
+
   group('hashTableOrderForSchemaVersion', () {
     test('סכמה-1 → סדר 33 הישן (ללא book_base_text)', () {
       expect(hashTableOrderForSchemaVersion(1), same(kHashTableOrderSchema1));
       expect(kHashTableOrderSchema1.length, 33);
       expect(kHashTableOrderSchema1, isNot(contains('book_base_text')));
     });
-    test('סכמה-2 → סדר 34 הנוכחי (כולל book_base_text)', () {
-      expect(hashTableOrderForSchemaVersion(2), same(kHashTableOrder));
-      expect(kHashTableOrder.length, 34);
-      expect(kHashTableOrder, contains('book_base_text'));
+    test('סכמה-2 → סדר 34 הקפוא (כולל book_base_text)', () {
+      expect(hashTableOrderForSchemaVersion(2), same(kHashTableOrderSchema2));
+      expect(kHashTableOrderSchema2.length, 34);
+      expect(kHashTableOrderSchema2, contains('book_base_text'));
+      expect(kHashTableOrderSchema2, isNot(contains('link_suppressed_side')));
+    });
+    test('סכמה-3 → סדר 35 הנוכחי (כולל link_suppressed_side)', () {
+      expect(hashTableOrderForSchemaVersion(3), same(kHashTableOrder));
+      expect(kHashTableOrder.length, 35);
+      expect(kHashTableOrder, contains('link_suppressed_side'));
+      // מיד אחרי link_coverage — אותו מיקום כמו בצד הקוטליני.
+      expect(kHashTableOrder.indexOf('link_suppressed_side'),
+          kHashTableOrder.indexOf('link_coverage') + 1);
     });
     test('גרסת סכמה לא מוכרת → זורק PatchApplyException', () {
       expect(() => hashTableOrderForSchemaVersion(0),
           throwsA(isA<PatchApplyException>()));
-      expect(() => hashTableOrderForSchemaVersion(3),
+      expect(() => hashTableOrderForSchemaVersion(4),
           throwsA(isA<PatchApplyException>()));
     });
   });
@@ -580,7 +809,8 @@ void main() {
       expect(result.resultHash, manifest.toContentHash);
     }, timeout: const Timeout(Duration(minutes: 10)));
 
-    test('apply v14→v15r (patch חלופי, סכמה-1) מצליח ומגיע ל-toContentHash', () {
+    test('apply v14→v15r (patch חלופי, סכמה-1) מצליח ומגיע ל-toContentHash',
+        () {
       final dbPath = cloneDb('$dir/v14/seforim.db');
       final patchPath = '$dir/v15/patch-v14-v15r.db';
       if (dbPath == null || !File(patchPath).existsSync()) {

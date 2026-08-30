@@ -46,6 +46,8 @@ class LibraryUpdatePlanner {
         localVersion: localVersion,
         targetVersion: latestVersion,
         steps: path,
+        fullDbAsset: latestFullDbAsset,
+        fullDbReleaseTag: latestReleaseTag,
       );
     }
 

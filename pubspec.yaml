@@ -2,7 +2,7 @@ name: seforim_library_updater
 description: >-
   לקוח Dart לצריכת הפצות הדלתא של Otzaria/SeforimLibrary — גילוי, תכנון מסלול,
   הורדה, אימות hash לוגי, והחלה אטומית של הפרשי DB.
-version: 0.1.0
+version: 0.2.0
 publish_to: none
 
 environment:
