@@ -1,12 +1,20 @@
 import '../models/library_release.dart';
 import '../models/library_update_plan.dart';
+import '../models/patch_table_spec.dart';
 
 /// בוחר את תוכנית העדכון: מסלול דלתא, הורדה מלאה, none, או blocked.
 ///
 /// פונקציה טהורה — אינה ניגשת לרשת או ל-DB. מקבלת את כל המידע שכבר נאסף
 /// (גרסה מקומית, edges, ו-DB מלא ל-fallback) ומחזירה [LibraryUpdatePlan].
 class LibraryUpdatePlanner {
-  const LibraryUpdatePlanner();
+  /// גרסת סכמת ה-patch הגבוהה ביותר שהצרכן יודע להחיל. edges שדורשים סכמה
+  /// חדשה יותר לא נכנסים לגרף — במקום שהלקוח יוריד patch שיידחה ב-preflight
+  /// של ה-applier ("נדרש עדכון תוכנה") בלי מוצא, הוא מתכנן הורדה מלאה.
+  final int supportedSchemaVersion;
+
+  const LibraryUpdatePlanner({
+    this.supportedSchemaVersion = kSupportedPatchSchemaVersion,
+  });
 
   /// בונה תוכנית עדכון.
   ///
@@ -40,7 +48,15 @@ class LibraryUpdatePlanner {
       );
     }
 
-    final path = _findBestPath(edges, localVersion, latestVersion);
+    // edges שהחלתם דורשת סכמת patch חדשה מהנתמכת נפסלים כאן — ה-applier ממילא
+    // היה דוחה אותם ב-preflight, ועדיף ליפול להורדה מלאה מאשר לשגיאה חוזרת.
+    final supportedEdges = edges
+        .where((e) =>
+            e.manifest.fromSchemaVersion <= supportedSchemaVersion &&
+            e.manifest.toSchemaVersion <= supportedSchemaVersion)
+        .toList();
+
+    final path = _findBestPath(supportedEdges, localVersion, latestVersion);
     if (path != null && path.isNotEmpty) {
       return LibraryUpdatePlan.delta(
         localVersion: localVersion,
@@ -51,12 +67,19 @@ class LibraryUpdatePlanner {
       );
     }
 
+    // מבחין בין "אין מסלול בכלל" ל"יש מסלול אך הוא דורש עדכון אפליקציה" —
+    // ההודעה השנייה אומרת למשתמש מה יתקן את זה לצמיתות.
+    final blockedBySchema = supportedEdges.length != edges.length &&
+        _findBestPath(edges, localVersion, latestVersion) != null;
     return _fullOrBlocked(
       localVersion: localVersion,
       latestVersion: latestVersion,
       asset: latestFullDbAsset,
       tag: latestReleaseTag,
-      reason: 'אין מסלול דלתא רציף מגרסה $localVersion לגרסה $latestVersion',
+      reason: blockedBySchema
+          ? 'מסלול הדלתא לגרסה $latestVersion דורש סכמת patch חדשה מהנתמכת '
+              '($supportedSchemaVersion) — נדרש עדכון אפליקציה'
+          : 'אין מסלול דלתא רציף מגרסה $localVersion לגרסה $latestVersion',
     );
   }
 

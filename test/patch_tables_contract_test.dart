@@ -39,9 +39,8 @@ void main() {
   group('חוזה טבלאות ה-patch', () {
     const fixturePath = 'test/patch_tables_contract.json';
 
-    // ה-fixture מתאר את החוזה הנוכחי (סכמה-2): hashOrder = 34 הטבלאות.
-    // kHashTableOrderSchema1 (33) הוא היסטוריה קפואה של Dart בלבד — לא נכנס
-    // ל-fixture ואין לו תאום Kotlin.
+    // ה-fixture מתאר את החוזה הנוכחי (סכמה-4): hashOrder = 36 הטבלאות.
+    // הסדרים הקפואים של סכמות 1–3 הם היסטוריה — לא נכנסים ל-fixture.
     test('הסריאליזציה הקנונית תואמת ל-fixture המקומי', () {
       final expected = File(fixturePath).readAsStringSync();
       final actual = canonicalContract(

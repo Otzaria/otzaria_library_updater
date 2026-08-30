@@ -5,14 +5,20 @@ import 'package:seforim_library_updater/src/models/library_update_plan.dart';
 import 'package:seforim_library_updater/src/services/library_update_planner.dart';
 
 /// בונה PatchEdge פיקטיבי מ-[from] ל-[to] בגודל דחוס [size].
-PatchEdge _edge(int from, int to, {int size = 1000}) {
+PatchEdge _edge(
+  int from,
+  int to, {
+  int size = 1000,
+  int fromSchema = 1,
+  int toSchema = 1,
+}) {
   final file = 'patch-v$from-v$to.db.zst';
   return PatchEdge(
     manifest: DeltaManifest(
       fromVersion: from,
       toVersion: to,
-      fromSchemaVersion: 1,
-      toSchemaVersion: 1,
+      fromSchemaVersion: fromSchema,
+      toSchemaVersion: toSchema,
       fromContentHash: 'hash$from',
       toContentHash: 'hash$to',
       patchFiles: [
@@ -179,6 +185,76 @@ void main() {
         tag: null,
       );
       expect(p.toFullDownloadFallback(), isNull);
+    });
+  });
+
+  group('LibraryUpdatePlanner — מודעות לגרסת סכמת patch', () {
+    // מדמה לקוח שתומך עד סכמה 3 מול releases שכבר עברו לסכמה 4.
+    const oldClient = LibraryUpdatePlanner(supportedSchemaVersion: 3);
+
+    test('edge שדורש סכמה חדשה מהנתמכת → full fallback עם סיבת עדכון', () {
+      final p = oldClient.plan(
+        localVersion: 1,
+        hasLocalVersionMeta: true,
+        latestVersion: 2,
+        edges: [_edge(1, 2, fromSchema: 3, toSchema: 4)],
+        latestFullDbAsset: _fullAsset,
+        latestReleaseTag: 'v2',
+      );
+      expect(p.kind, LibraryUpdatePlanKind.fullDownload);
+      expect(p.reason, contains('עדכון אפליקציה'));
+    });
+
+    test('קיים מסלול חלופי בסכמה נתמכת → נבחר delta ולא full', () {
+      final p = oldClient.plan(
+        localVersion: 1,
+        hasLocalVersionMeta: true,
+        latestVersion: 2,
+        edges: [
+          _edge(1, 2, fromSchema: 3, toSchema: 4, size: 100),
+          _edge(1, 2, fromSchema: 3, toSchema: 3, size: 9000),
+        ],
+        latestFullDbAsset: _fullAsset,
+        latestReleaseTag: 'v2',
+      );
+      expect(p.kind, LibraryUpdatePlanKind.delta);
+      expect(p.deltaSteps.single.manifest.toSchemaVersion, 3);
+    });
+
+    test('אין מסלול גם בלי סינון הסכמה → הסיבה הרגילה, לא עדכון אפליקציה',
+        () {
+      final p = oldClient.plan(
+        localVersion: 1,
+        hasLocalVersionMeta: true,
+        latestVersion: 3,
+        edges: [_edge(1, 2, toSchema: 4)],
+        latestFullDbAsset: _fullAsset,
+        latestReleaseTag: 'v3',
+      );
+      expect(p.kind, LibraryUpdatePlanKind.fullDownload);
+      expect(p.reason, isNot(contains('עדכון אפליקציה')));
+    });
+
+    test('הלקוח הנוכחי מקבל edges של סכמה 4', () {
+      final p = plan(
+        local: 1,
+        latest: 2,
+        edges: [_edge(1, 2, fromSchema: 3, toSchema: 4)],
+      );
+      expect(p.kind, LibraryUpdatePlanKind.delta);
+    });
+
+    test('סכמה נדרשת ואין DB מלא → blocked עם סיבת העדכון', () {
+      final p = oldClient.plan(
+        localVersion: 1,
+        hasLocalVersionMeta: true,
+        latestVersion: 2,
+        edges: [_edge(1, 2, toSchema: 4)],
+        latestFullDbAsset: null,
+        latestReleaseTag: null,
+      );
+      expect(p.kind, LibraryUpdatePlanKind.blocked);
+      expect(p.reason, contains('עדכון אפליקציה'));
     });
   });
 }

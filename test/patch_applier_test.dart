@@ -595,7 +595,7 @@ void main() {
         toSchema: 3,
         // ה-from נמדד בסדר סכמה-2, ה-to בסדר סכמה-3 — כמו שהאפליר עושה.
         fromHash: _hashOf(base),
-        toHash: _hashWithOrder(expected, kHashTableOrder),
+        toHash: _hashWithOrder(expected, kHashTableOrderSchema3),
       );
 
       final result = _applier.apply(
@@ -655,8 +655,8 @@ void main() {
         to: 3,
         fromSchema: 3,
         toSchema: 3,
-        fromHash: _hashWithOrder(base, kHashTableOrder),
-        toHash: _hashWithOrder(expected, kHashTableOrder),
+        fromHash: _hashWithOrder(base, kHashTableOrderSchema3),
+        toHash: _hashWithOrder(expected, kHashTableOrderSchema3),
       );
 
       final result = _applier.apply(
@@ -706,6 +706,156 @@ void main() {
     });
   });
 
+  group('שדרוג סכמה 3→4 (line_ref)', () {
+    // המסלול האמיתי של שדרוג הסכמה: ה-DB המקומי בסכמה 3, ה-patch מביא
+    // CREATE TABLE כמיגרציה ומאכלס אותה. ה-from-hash נחשב בסדר סכמה-3
+    // וה-to-hash בסדר סכמה-4, אחרת ה-apply נדחה על DB תקין לחלוטין.
+    String buildSchema3Db({
+      required int version,
+      required List<List> rows,
+      String name = 'expected',
+    }) {
+      final path = '${tmp.path}/${name}_s3_$version.db';
+      final db = sqlite3.sqlite3.open(path);
+      db.execute('CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT)');
+      db.execute("INSERT INTO schema_meta VALUES ('db_version','$version'),"
+          "('db_schema_version','3')");
+      db.execute('CREATE TABLE source (id INTEGER PRIMARY KEY, name TEXT)');
+      for (final r in rows) {
+        db.execute('INSERT INTO source VALUES (?,?)', [r[0], r[1]]);
+      }
+      db.close();
+      return path;
+    }
+
+    String buildSchema4Db({
+      required int version,
+      required List<List> rows,
+      required List<List> lineRefRows,
+      String name = 'expected',
+    }) {
+      final path = '${tmp.path}/${name}_s4_$version.db';
+      final db = sqlite3.sqlite3.open(path);
+      db.execute('CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT)');
+      db.execute("INSERT INTO schema_meta VALUES ('db_version','$version'),"
+          "('db_schema_version','4')");
+      db.execute('CREATE TABLE source (id INTEGER PRIMARY KEY, name TEXT)');
+      for (final r in rows) {
+        db.execute('INSERT INTO source VALUES (?,?)', [r[0], r[1]]);
+      }
+      db.execute('CREATE TABLE line_ref (bookId INTEGER NOT NULL, '
+          'refKeyHash INTEGER NOT NULL, lineIndex INTEGER NOT NULL, '
+          'PRIMARY KEY (bookId, refKeyHash, lineIndex)) WITHOUT ROWID');
+      for (final r in lineRefRows) {
+        db.execute('INSERT INTO line_ref VALUES (?,?,?)', [r[0], r[1], r[2]]);
+      }
+      db.close();
+      return path;
+    }
+
+    test('CREATE TABLE + אכלוס, ושתי גרסאות ה-hash נבחרות נכון', () {
+      final base = buildSchema3Db(version: 3, rows: [
+        [1, 'aleph'],
+      ], name: 'base');
+      final patch = buildPatchDb(
+        from: 3,
+        to: 4,
+        schemaVersion: 4,
+        migrations: [
+          'CREATE TABLE line_ref (bookId INTEGER NOT NULL, '
+              'refKeyHash INTEGER NOT NULL, lineIndex INTEGER NOT NULL, '
+              'PRIMARY KEY (bookId, refKeyHash, lineIndex)) WITHOUT ROWID',
+        ],
+      );
+      final pdb = sqlite3.sqlite3.open(patch);
+      pdb.execute('CREATE TABLE upsert_line_ref (bookId INTEGER, '
+          'refKeyHash INTEGER, lineIndex INTEGER, '
+          'PRIMARY KEY (bookId, refKeyHash, lineIndex))');
+      pdb.execute('INSERT INTO upsert_line_ref VALUES (12,777,3),(12,778,4)');
+      pdb.execute(
+        "UPDATE upsert_schema_meta SET value='4' WHERE key='db_version'",
+      );
+      pdb.execute(
+        "INSERT INTO upsert_schema_meta VALUES ('db_schema_version','4')",
+      );
+      pdb.close();
+
+      final expected = buildSchema4Db(version: 4, rows: [
+        [1, 'aleph'],
+      ], lineRefRows: [
+        [12, 777, 3],
+        [12, 778, 4],
+      ]);
+
+      final manifest = _manifest(
+        from: 3,
+        to: 4,
+        fromSchema: 3,
+        toSchema: 4,
+        fromHash: _hashWithOrder(base, kHashTableOrderSchema3),
+        toHash: _hashWithOrder(expected, kHashTableOrder),
+      );
+
+      final result = _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: manifest,
+      );
+
+      expect(result.resultHash, manifest.toContentHash);
+      // line_ref היא אינדקס ניווט — לא נחשבת שינוי שדורש רענון אינדקס חיפוש.
+      expect(result.booksTouched, isEmpty);
+      expect(result.hasChangesOutsideBooksTouched, isFalse);
+      final db = sqlite3.sqlite3.open(base, mode: sqlite3.OpenMode.readOnly);
+      expect(
+        db
+            .select('SELECT bookId, refKeyHash, lineIndex FROM line_ref '
+                'ORDER BY refKeyHash')
+            .map((r) => r.values.toList()),
+        [
+          [12, 777, 3],
+          [12, 778, 4],
+        ],
+      );
+      expect(
+        db
+            .select(
+                "SELECT value FROM schema_meta WHERE key='db_schema_version'")
+            .first
+            .values
+            .first,
+        '4',
+      );
+      db.close();
+    });
+
+    test('לקוח בסכמה-3 דוחה patch של סכמה 4 לפני שהוא נוגע ב-DB', () {
+      // supportedSchemaVersion=3 מדמה גרסת אפליקציה שלא עודכנה.
+      const oldClient = PatchApplier(supportedSchemaVersion: 3);
+      final base = buildSchema3Db(version: 3, rows: [
+        [1, 'aleph'],
+      ], name: 'base');
+      final before = _hashWithOrder(base, kHashTableOrderSchema3);
+      final patch = buildPatchDb(from: 3, to: 4, schemaVersion: 4);
+      final manifest = _manifest(
+        from: 3,
+        to: 4,
+        fromSchema: 3,
+        toSchema: 3,
+        fromHash: before,
+        toHash: before,
+      );
+
+      expect(
+        () =>
+            oldClient.apply(dbPath: base, patchPath: patch, manifest: manifest),
+        throwsA(isA<PatchApplyException>()),
+      );
+      // fail-closed: ה-DB לא נגוע.
+      expect(_hashWithOrder(base, kHashTableOrderSchema3), before);
+    });
+  });
+
   group('hashTableOrderForSchemaVersion', () {
     test('סכמה-1 → סדר 33 הישן (ללא book_base_text)', () {
       expect(hashTableOrderForSchemaVersion(1), same(kHashTableOrderSchema1));
@@ -718,18 +868,26 @@ void main() {
       expect(kHashTableOrderSchema2, contains('book_base_text'));
       expect(kHashTableOrderSchema2, isNot(contains('link_suppressed_side')));
     });
-    test('סכמה-3 → סדר 35 הנוכחי (כולל link_suppressed_side)', () {
-      expect(hashTableOrderForSchemaVersion(3), same(kHashTableOrder));
-      expect(kHashTableOrder.length, 35);
-      expect(kHashTableOrder, contains('link_suppressed_side'));
+    test('סכמה-3 → סדר 35 הקפוא (כולל link_suppressed_side, ללא line_ref)', () {
+      expect(hashTableOrderForSchemaVersion(3), same(kHashTableOrderSchema3));
+      expect(kHashTableOrderSchema3.length, 35);
+      expect(kHashTableOrderSchema3, contains('link_suppressed_side'));
+      expect(kHashTableOrderSchema3, isNot(contains('line_ref')));
       // מיד אחרי link_coverage — אותו מיקום כמו בצד הקוטליני.
-      expect(kHashTableOrder.indexOf('link_suppressed_side'),
-          kHashTableOrder.indexOf('link_coverage') + 1);
+      expect(kHashTableOrderSchema3.indexOf('link_suppressed_side'),
+          kHashTableOrderSchema3.indexOf('link_coverage') + 1);
+    });
+    test('סכמה-4 → סדר 36 הנוכחי (כולל line_ref)', () {
+      expect(hashTableOrderForSchemaVersion(4), same(kHashTableOrder));
+      expect(kHashTableOrder.length, 36);
+      // מיד אחרי line_toc — אותו מיקום כמו בצד הקוטליני.
+      expect(kHashTableOrder.indexOf('line_ref'),
+          kHashTableOrder.indexOf('line_toc') + 1);
     });
     test('גרסת סכמה לא מוכרת → זורק PatchApplyException', () {
       expect(() => hashTableOrderForSchemaVersion(0),
           throwsA(isA<PatchApplyException>()));
-      expect(() => hashTableOrderForSchemaVersion(4),
+      expect(() => hashTableOrderForSchemaVersion(5),
           throwsA(isA<PatchApplyException>()));
     });
   });
