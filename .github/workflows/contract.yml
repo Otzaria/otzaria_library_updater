@@ -21,7 +21,7 @@ jobs:
           repository: Otzaria/SeforimLibrary
           # Coordinated schema-3 contract. Return to `otzaria` after this
           # generator commit is merged into that branch.
-          ref: 1a4778e291d2cb0416e3772e285ab2decdc792f3
+          ref: b2217a624311c1acd86231010ea75d2769b3a28a
           path: seforim-library
 
       # נתיב שגוי חייב להיכשל בקול רם, לא להתדלג בשקט בבדיקת ה-Dart
@@ -35,6 +35,14 @@ jobs:
       - uses: dart-lang/setup-dart@v1
 
       - run: dart pub get
+
+      - name: Analyze
+        run: dart analyze
+
+      - name: Run full test suite
+        env:
+          SEFORIM_LIBRARY_REPO: ${{ github.workspace }}/seforim-library
+        run: dart test
 
       - name: Run contract tests (fail on skip)
         env:
