@@ -533,8 +533,13 @@ void main() {
     // המסלול האמיתי של שלב 2: ה-DB המקומי בסכמה 2, ה-patch מביא CREATE TABLE
     // כמיגרציה ומאכלס אותה. ה-from-hash חייב להיחשב בסדר סכמה-2 וה-to-hash
     // בסדר סכמה-3, אחרת ה-apply נדחה על DB תקין לחלוטין.
-    String buildSchema3Expected({required int version, required List<List> rows}) {
-      final path = '${tmp.path}/expected_s3_$version.db';
+    String buildSchema3Db({
+      required int version,
+      required List<List> rows,
+      int reasonMask = 4,
+      String name = 'expected',
+    }) {
+      final path = '${tmp.path}/${name}_s3_$version.db';
       final db = sqlite3.sqlite3.open(path);
       db.execute('CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT)');
       db.execute("INSERT INTO schema_meta VALUES ('db_version','$version'),"
@@ -546,7 +551,10 @@ void main() {
       db.execute('CREATE TABLE link_suppressed_side (linkId INTEGER NOT NULL, '
           'side INTEGER NOT NULL, reasonMask INTEGER NOT NULL, '
           'PRIMARY KEY (linkId, side))');
-      db.execute('INSERT INTO link_suppressed_side VALUES (7,0,4)');
+      db.execute(
+        'INSERT INTO link_suppressed_side VALUES (7,0,?)',
+        [reasonMask],
+      );
       db.close();
       return path;
     }
@@ -568,11 +576,15 @@ void main() {
       pdb.execute('CREATE TABLE upsert_link_suppressed_side (linkId INTEGER, '
           'side INTEGER, reasonMask INTEGER, PRIMARY KEY (linkId, side))');
       pdb.execute('INSERT INTO upsert_link_suppressed_side VALUES (7,0,4)');
-      pdb.execute("UPDATE upsert_schema_meta SET value='2' WHERE key='db_version'");
-      pdb.execute("INSERT INTO upsert_schema_meta VALUES ('db_schema_version','3')");
+      pdb.execute(
+        "UPDATE upsert_schema_meta SET value='2' WHERE key='db_version'",
+      );
+      pdb.execute(
+        "INSERT INTO upsert_schema_meta VALUES ('db_schema_version','3')",
+      );
       pdb.close();
 
-      final expected = buildSchema3Expected(version: 2, rows: [
+      final expected = buildSchema3Db(version: 2, rows: [
         [1, 'aleph'],
       ]);
 
@@ -595,18 +607,76 @@ void main() {
       expect(result.resultHash, manifest.toContentHash);
       final db = sqlite3.sqlite3.open(base, mode: sqlite3.OpenMode.readOnly);
       expect(
-        db.select('SELECT linkId, side, reasonMask FROM link_suppressed_side')
+        db
+            .select('SELECT linkId, side, reasonMask FROM link_suppressed_side')
             .map((r) => r.values.toList()),
         [
           [7, 0, 4]
         ],
       );
       expect(
-        db.select("SELECT value FROM schema_meta WHERE key='db_schema_version'")
+        db
+            .select(
+                "SELECT value FROM schema_meta WHERE key='db_schema_version'")
             .first
             .values
             .first,
         '3',
+      );
+      db.close();
+    });
+
+    test('סכמה 3→3 מעדכנת reasonMask על מפתח קיים', () {
+      final base = buildSchema3Db(
+        version: 2,
+        rows: [
+          [1, 'aleph'],
+        ],
+        name: 'base',
+      );
+      final patch = buildPatchDb(from: 2, to: 3, schemaVersion: 3);
+      final pdb = sqlite3.sqlite3.open(patch);
+      pdb.execute(
+        'CREATE TABLE upsert_link_suppressed_side (linkId INTEGER, '
+        'side INTEGER, reasonMask INTEGER, PRIMARY KEY (linkId, side))',
+      );
+      pdb.execute('INSERT INTO upsert_link_suppressed_side VALUES (7,0,5)');
+      pdb.close();
+
+      final expected = buildSchema3Db(
+        version: 3,
+        rows: [
+          [1, 'aleph'],
+        ],
+        reasonMask: 5,
+      );
+      final manifest = _manifest(
+        from: 2,
+        to: 3,
+        fromSchema: 3,
+        toSchema: 3,
+        fromHash: _hashWithOrder(base, kHashTableOrder),
+        toHash: _hashWithOrder(expected, kHashTableOrder),
+      );
+
+      final result = _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: manifest,
+      );
+
+      expect(result.resultHash, manifest.toContentHash);
+      final db = sqlite3.sqlite3.open(base, mode: sqlite3.OpenMode.readOnly);
+      expect(
+        db
+            .select(
+              'SELECT reasonMask FROM link_suppressed_side '
+              'WHERE linkId=7 AND side=0',
+            )
+            .single
+            .values
+            .single,
+        5,
       );
       db.close();
     });
@@ -627,8 +697,8 @@ void main() {
       );
 
       expect(
-        () => oldClient.apply(
-            dbPath: base, patchPath: patch, manifest: manifest),
+        () =>
+            oldClient.apply(dbPath: base, patchPath: patch, manifest: manifest),
         throwsA(isA<PatchApplyException>()),
       );
       // fail-closed: ה-DB לא נגוע.

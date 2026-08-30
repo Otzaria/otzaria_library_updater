@@ -48,8 +48,8 @@ const List<PatchTableSpec> kPatchTablesInFkOrder = [
   PatchTableSpec('link_range', ['linkId', 'side'], updatable: true),
   PatchTableSpec('link_coverage', ['lineId', 'linkId', 'side'],
       updatable: false),
-  // סכמה 3 — דלילה ונכתבת מחדש בכל בנייה, כמו link_coverage.
-  PatchTableSpec('link_suppressed_side', ['linkId', 'side'], updatable: false),
+  // reasonMask עשוי להשתנות כאשר המפתח נשאר זהה.
+  PatchTableSpec('link_suppressed_side', ['linkId', 'side'], updatable: true),
   PatchTableSpec('book_has_links', ['bookId'], updatable: true),
   PatchTableSpec('book_version', ['id'], updatable: true),
   PatchTableSpec('version_line', ['versionId', 'lineId'], updatable: true),
