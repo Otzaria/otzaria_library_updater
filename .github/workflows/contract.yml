@@ -19,9 +19,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Otzaria/SeforimLibrary
-          # Coordinated schema-3 contract. Return to `otzaria` after this
-          # generator commit is merged into that branch.
-          ref: b2217a624311c1acd86231010ea75d2769b3a28a
           path: seforim-library
 
       # נתיב שגוי חייב להיכשל בקול רם, לא להתדלג בשקט בבדיקת ה-Dart
