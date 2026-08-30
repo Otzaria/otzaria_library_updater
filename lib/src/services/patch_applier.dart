@@ -94,13 +94,16 @@ class PatchApplyException implements Exception {
   String toString() => 'PatchApplyException: $message';
 }
 
-/// בוחר את סדר ה-hash לפי גרסת הסכמה: 1 → [kHashTableOrderSchema1] (33 הישן),
-/// 2 → [kHashTableOrder] (34 הנוכחי). כל ערך אחר → זריקה (fail loudly).
+/// בוחר את סדר ה-hash לפי גרסת הסכמה: 1 → [kHashTableOrderSchema1] (33),
+/// 2 → [kHashTableOrderSchema2] (34), 3 → [kHashTableOrder] (35, הנוכחי).
+/// כל ערך אחר → זריקה (fail loudly).
 List<String> hashTableOrderForSchemaVersion(int schemaVersion) {
   switch (schemaVersion) {
     case 1:
       return kHashTableOrderSchema1;
     case 2:
+      return kHashTableOrderSchema2;
+    case 3:
       return kHashTableOrder;
     default:
       throw PatchApplyException(
@@ -126,7 +129,7 @@ class PatchApplier {
 
   const PatchApplier({
     this.hasher = const LogicalContentHasher(),
-    this.supportedSchemaVersion = 2,
+    this.supportedSchemaVersion = 3,
   });
 
   /// מחיל את ה-patch שב-[patchPath] על ה-DB שב-[dbPath] לפי [manifest].

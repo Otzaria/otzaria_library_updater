@@ -69,9 +69,9 @@ void main() {
       db.execute("INSERT INTO source VALUES (1,'aleph'),(2,'bet'),(3,'gimel')");
       expect(
         _hasher.compute(db),
-        // 34 טבלאות ב-kHashTableOrder (כולל book_base_text) — כל שם נכתב כ-
+        // 35 טבלאות ב-kHashTableOrder (סכמה 3) — כל שם נכתב כ-
         // marker גם כשהטבלה נעדרת, לכן ה-golden מתעדכן עם סנכרון הרשימה.
-        'be9a9509fc7a2ab495fb17447e6fc1b3aebc7ea7234757cac5748a00daadb265',
+        'c26ea1c49cab50b9893df661a98211e8fd923269df79e13cbd89a88f98f2e6c0',
       );
       db.close();
     });

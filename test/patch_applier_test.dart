@@ -10,10 +10,12 @@ import 'package:sqlite3/sqlite3.dart' as sqlite3;
 const _hasher = LogicalContentHasher();
 const _applier = PatchApplier();
 
+/// ה-fixtures בונים DB ו-patch של סכמה-2, ולכן ה-hash הצפוי חייב להיחשב
+/// בסדר הקפוא של סכמה-2 — לא בברירת המחדל, שמאז סכמה-3 כוללת טבלה נוספת.
 String _hashOf(String dbPath) {
   final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
   try {
-    return _hasher.compute(db);
+    return _hasher.compute(db, tableOrder: kHashTableOrderSchema2);
   } finally {
     db.close();
   }
@@ -524,15 +526,24 @@ void main() {
       expect(kHashTableOrderSchema1.length, 33);
       expect(kHashTableOrderSchema1, isNot(contains('book_base_text')));
     });
-    test('סכמה-2 → סדר 34 הנוכחי (כולל book_base_text)', () {
-      expect(hashTableOrderForSchemaVersion(2), same(kHashTableOrder));
-      expect(kHashTableOrder.length, 34);
-      expect(kHashTableOrder, contains('book_base_text'));
+    test('סכמה-2 → סדר 34 הקפוא (כולל book_base_text)', () {
+      expect(hashTableOrderForSchemaVersion(2), same(kHashTableOrderSchema2));
+      expect(kHashTableOrderSchema2.length, 34);
+      expect(kHashTableOrderSchema2, contains('book_base_text'));
+      expect(kHashTableOrderSchema2, isNot(contains('link_suppressed_side')));
+    });
+    test('סכמה-3 → סדר 35 הנוכחי (כולל link_suppressed_side)', () {
+      expect(hashTableOrderForSchemaVersion(3), same(kHashTableOrder));
+      expect(kHashTableOrder.length, 35);
+      expect(kHashTableOrder, contains('link_suppressed_side'));
+      // מיד אחרי link_coverage — אותו מיקום כמו בצד הקוטליני.
+      expect(kHashTableOrder.indexOf('link_suppressed_side'),
+          kHashTableOrder.indexOf('link_coverage') + 1);
     });
     test('גרסת סכמה לא מוכרת → זורק PatchApplyException', () {
       expect(() => hashTableOrderForSchemaVersion(0),
           throwsA(isA<PatchApplyException>()));
-      expect(() => hashTableOrderForSchemaVersion(3),
+      expect(() => hashTableOrderForSchemaVersion(4),
           throwsA(isA<PatchApplyException>()));
     });
   });

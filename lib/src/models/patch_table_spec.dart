@@ -48,6 +48,8 @@ const List<PatchTableSpec> kPatchTablesInFkOrder = [
   PatchTableSpec('link_range', ['linkId', 'side'], updatable: true),
   PatchTableSpec('link_coverage', ['lineId', 'linkId', 'side'],
       updatable: false),
+  // סכמה 3 — דלילה ונכתבת מחדש בכל בנייה, כמו link_coverage.
+  PatchTableSpec('link_suppressed_side', ['linkId', 'side'], updatable: false),
   PatchTableSpec('book_has_links', ['bookId'], updatable: true),
   PatchTableSpec('book_version', ['id'], updatable: true),
   PatchTableSpec('version_line', ['versionId', 'lineId'], updatable: true),
@@ -60,10 +62,47 @@ const List<PatchTableSpec> kPatchTablesInFkOrder = [
   PatchTableSpec('schema_meta', ['key'], updatable: true),
 ];
 
-/// סדר הטבלאות לחישוב logical content hash.
-///
-/// משוכפל אות-באות מ-`DEFAULT_TABLES` ב-`LogicalContentHasher.kt`.
-/// הסדר כאן שונה מ-[kPatchTablesInFkOrder] — אסור להחליף ביניהם.
+/// סדר ה-hash הקפוא של סכמה-2 (34 טבלאות, ללא `link_suppressed_side`) —
+/// משחזר בדיוק את ה-hash של ארטיפקטי סכמה-2. לעולם אין לערוך.
+const List<String> kHashTableOrderSchema2 = [
+  'source',
+  'author',
+  'topic',
+  'pub_place',
+  'pub_date',
+  'connection_type',
+  'generation',
+  'category',
+  'category_closure',
+  'tocText',
+  'book',
+  'book_topic',
+  'book_author',
+  'book_base_text',
+  'book_pub_place',
+  'book_pub_date',
+  'book_generation',
+  'tocEntry',
+  'line',
+  'line_toc',
+  'link',
+  'link_anchor',
+  'link_range',
+  'link_coverage',
+  'book_has_links',
+  'book_version',
+  'version_line',
+  'book_acronym',
+  'alt_toc_structure',
+  'alt_toc_entry',
+  'line_alt_toc',
+  'default_commentator',
+  'default_targum',
+  'schema_meta',
+];
+
+/// סדר ה-hash הנוכחי (סכמה 3). `link_suppressed_side` יושבת מיד אחרי
+/// `link_coverage` — אותו מיקום בדיוק כמו בצד הקוטליני.
 const List<String> kHashTableOrder = [
   'source',
   'author',
@@ -89,6 +128,7 @@ const List<String> kHashTableOrder = [
   'link_anchor',
   'link_range',
   'link_coverage',
+  'link_suppressed_side',
   'book_has_links',
   'book_version',
   'version_line',
