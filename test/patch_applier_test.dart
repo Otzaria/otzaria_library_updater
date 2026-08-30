@@ -12,6 +12,15 @@ const _applier = PatchApplier();
 
 /// ה-fixtures בונים DB ו-patch של סכמה-2, ולכן ה-hash הצפוי חייב להיחשב
 /// בסדר הקפוא של סכמה-2 — לא בברירת המחדל, שמאז סכמה-3 כוללת טבלה נוספת.
+String _hashWithOrder(String dbPath, List<String> order) {
+  final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
+  try {
+    return _hasher.compute(db, tableOrder: order);
+  } finally {
+    db.close();
+  }
+}
+
 String _hashOf(String dbPath) {
   final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
   try {
@@ -517,6 +526,113 @@ void main() {
         throwsA(isA<PatchApplyException>()),
       );
       expect(File(base).readAsBytesSync(), bytesBefore);
+    });
+  });
+
+  group('שדרוג סכמה 2→3 (link_suppressed_side)', () {
+    // המסלול האמיתי של שלב 2: ה-DB המקומי בסכמה 2, ה-patch מביא CREATE TABLE
+    // כמיגרציה ומאכלס אותה. ה-from-hash חייב להיחשב בסדר סכמה-2 וה-to-hash
+    // בסדר סכמה-3, אחרת ה-apply נדחה על DB תקין לחלוטין.
+    String buildSchema3Expected({required int version, required List<List> rows}) {
+      final path = '${tmp.path}/expected_s3_$version.db';
+      final db = sqlite3.sqlite3.open(path);
+      db.execute('CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT)');
+      db.execute("INSERT INTO schema_meta VALUES ('db_version','$version'),"
+          "('db_schema_version','3')");
+      db.execute('CREATE TABLE source (id INTEGER PRIMARY KEY, name TEXT)');
+      for (final r in rows) {
+        db.execute('INSERT INTO source VALUES (?,?)', [r[0], r[1]]);
+      }
+      db.execute('CREATE TABLE link_suppressed_side (linkId INTEGER NOT NULL, '
+          'side INTEGER NOT NULL, reasonMask INTEGER NOT NULL, '
+          'PRIMARY KEY (linkId, side))');
+      db.execute('INSERT INTO link_suppressed_side VALUES (7,0,4)');
+      db.close();
+      return path;
+    }
+
+    test('CREATE TABLE + אכלוס, ושתי גרסאות ה-hash נבחרות נכון', () {
+      final base = buildBaseDb(version: 1, sourceRows: [
+        [1, 'aleph'],
+      ]);
+      final patch = buildPatchDb(
+        from: 1,
+        to: 2,
+        migrations: [
+          'CREATE TABLE link_suppressed_side (linkId INTEGER NOT NULL, '
+              'side INTEGER NOT NULL, reasonMask INTEGER NOT NULL, '
+              'PRIMARY KEY (linkId, side))',
+        ],
+      );
+      final pdb = sqlite3.sqlite3.open(patch);
+      pdb.execute('CREATE TABLE upsert_link_suppressed_side (linkId INTEGER, '
+          'side INTEGER, reasonMask INTEGER, PRIMARY KEY (linkId, side))');
+      pdb.execute('INSERT INTO upsert_link_suppressed_side VALUES (7,0,4)');
+      pdb.execute("UPDATE upsert_schema_meta SET value='2' WHERE key='db_version'");
+      pdb.execute("INSERT INTO upsert_schema_meta VALUES ('db_schema_version','3')");
+      pdb.close();
+
+      final expected = buildSchema3Expected(version: 2, rows: [
+        [1, 'aleph'],
+      ]);
+
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromSchema: 2,
+        toSchema: 3,
+        // ה-from נמדד בסדר סכמה-2, ה-to בסדר סכמה-3 — כמו שהאפליר עושה.
+        fromHash: _hashOf(base),
+        toHash: _hashWithOrder(expected, kHashTableOrder),
+      );
+
+      final result = _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: manifest,
+      );
+
+      expect(result.resultHash, manifest.toContentHash);
+      final db = sqlite3.sqlite3.open(base, mode: sqlite3.OpenMode.readOnly);
+      expect(
+        db.select('SELECT linkId, side, reasonMask FROM link_suppressed_side')
+            .map((r) => r.values.toList()),
+        [
+          [7, 0, 4]
+        ],
+      );
+      expect(
+        db.select("SELECT value FROM schema_meta WHERE key='db_schema_version'")
+            .first
+            .values
+            .first,
+        '3',
+      );
+      db.close();
+    });
+
+    test('לקוח ישן דוחה patch של סכמה 3 לפני שהוא נוגע ב-DB', () {
+      // supportedSchemaVersion=2 מדמה גרסת אפליקציה שלא עודכנה.
+      const oldClient = PatchApplier(supportedSchemaVersion: 2);
+      final base = buildBaseDb(version: 1, sourceRows: [
+        [1, 'aleph'],
+      ]);
+      final before = _hashOf(base);
+      final patch = buildPatchDb(from: 1, to: 2, schemaVersion: 3);
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: before,
+        toHash: before,
+      );
+
+      expect(
+        () => oldClient.apply(
+            dbPath: base, patchPath: patch, manifest: manifest),
+        throwsA(isA<PatchApplyException>()),
+      );
+      // fail-closed: ה-DB לא נגוע.
+      expect(_hashOf(base), before);
     });
   });
 
