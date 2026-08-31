@@ -65,6 +65,11 @@ class DeltaManifest extends Equatable {
   final int fromSchemaVersion;
   final int toSchemaVersion;
 
+  /// גרסת פורמט `patch.db` (`patch_meta.schema_version`) כשהיצרן מפרסם
+  /// אותה במניפסט. null עבור מניפסטים היסטוריים שקדמו לשדה הזה.
+  /// זהו חוזה נפרד מ-[fromSchemaVersion]/[toSchemaVersion] של ה-DB הלוגי.
+  final int? patchFormatVersion;
+
   /// logical content hash צפוי של ה-DB *לפני* החלת ה-patch.
   final String fromContentHash;
 
@@ -83,6 +88,7 @@ class DeltaManifest extends Equatable {
     required this.toVersion,
     required this.fromSchemaVersion,
     required this.toSchemaVersion,
+    this.patchFormatVersion,
     required this.fromContentHash,
     required this.toContentHash,
     required this.patchFiles,
@@ -98,11 +104,20 @@ class DeltaManifest extends Equatable {
       throw const FormatException('שדה חובה חסר או ריק ב-manifest: patchFiles');
     }
     final booksTouchedRaw = json['booksTouched'];
+    final fromSchemaVersion = _requireInt(json, 'fromSchemaVersion');
+    final toSchemaVersion = _requireInt(json, 'toSchemaVersion');
+    final patchFormatVersion = _optionalInt(json, 'patchFormatVersion');
+    if (toSchemaVersion >= 4 && patchFormatVersion == null) {
+      throw const FormatException(
+        'שדה חובה חסר במניפסט של schema 4+: patchFormatVersion',
+      );
+    }
     return DeltaManifest(
       fromVersion: _requireInt(json, 'fromVersion'),
       toVersion: _requireInt(json, 'toVersion'),
-      fromSchemaVersion: _requireInt(json, 'fromSchemaVersion'),
-      toSchemaVersion: _requireInt(json, 'toSchemaVersion'),
+      fromSchemaVersion: fromSchemaVersion,
+      toSchemaVersion: toSchemaVersion,
+      patchFormatVersion: patchFormatVersion,
       fromContentHash: _requireString(json, 'fromContentHash'),
       toContentHash: _requireString(json, 'toContentHash'),
       patchFiles: patchFilesRaw
@@ -125,6 +140,7 @@ class DeltaManifest extends Equatable {
         toVersion,
         fromSchemaVersion,
         toSchemaVersion,
+        patchFormatVersion,
         fromContentHash,
         toContentHash,
         patchFiles,
@@ -145,6 +161,15 @@ int _requireInt(Map<String, dynamic> json, String key) {
   final value = json[key];
   if (value is! num) {
     throw FormatException('שדה חובה חסר או לא תקין ב-manifest: $key');
+  }
+  return value.toInt();
+}
+
+int? _optionalInt(Map<String, dynamic> json, String key) {
+  if (!json.containsKey(key) || json[key] == null) return null;
+  final value = json[key];
+  if (value is! num) {
+    throw FormatException('שדה אופציונלי לא תקין במניפסט: $key');
   }
   return value.toInt();
 }

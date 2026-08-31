@@ -1,22 +1,36 @@
 import '../models/library_release.dart';
 import '../models/library_update_plan.dart';
+import '../models/patch_table_spec.dart';
 
 /// בוחר את תוכנית העדכון: מסלול דלתא, הורדה מלאה, none, או blocked.
 ///
 /// פונקציה טהורה — אינה ניגשת לרשת או ל-DB. מקבלת את כל המידע שכבר נאסף
 /// (גרסה מקומית, edges, ו-DB מלא ל-fallback) ומחזירה [LibraryUpdatePlan].
 class LibraryUpdatePlanner {
-  const LibraryUpdatePlanner();
+  /// גרסת סכמת ה-DB הלוגית הגבוהה ביותר שהצרכן יודע לאמת.
+  final int supportedDbSchemaVersion;
+
+  /// גרסת פורמט patch.db הגבוהה ביותר שה-applier בצרכן יודע להחיל.
+  final int supportedPatchFormatVersion;
+
+  const LibraryUpdatePlanner({
+    this.supportedDbSchemaVersion = kSupportedDbSchemaVersion,
+    this.supportedPatchFormatVersion = kSupportedPatchFormatVersion,
+  })  : assert(supportedDbSchemaVersion >= 1),
+        assert(supportedPatchFormatVersion >= 1);
 
   /// בונה תוכנית עדכון.
   ///
   /// [localVersion] — גרסת ה-DB המקומי.
+  /// [localSchemaVersion] — חובה להעביר את `LocalDbVersion.schemaVersion`;
+  /// הערך עצמו nullable כאשר `db_schema_version` חסר ב-DB ישן.
   /// [hasLocalVersionMeta] — `false` אם `schema_meta.db_version` חסר.
   /// [latestVersion] — הגרסה הגבוהה ביותר הזמינה ב-releases.
   /// [edges] — כל ה-patches הזמינים.
   /// [latestFullDbAsset] / [latestReleaseTag] — ה-DB המלא ל-fallback.
   LibraryUpdatePlan plan({
     required int localVersion,
+    required int? localSchemaVersion,
     required bool hasLocalVersionMeta,
     required int latestVersion,
     required List<PatchEdge> edges,
@@ -40,7 +54,31 @@ class LibraryUpdatePlanner {
       );
     }
 
-    final path = _findBestPath(edges, localVersion, latestVersion);
+    // חוזה ה-DB וחוזה פורמט ה-patch נבדקים בנפרד. מניפסטים היסטוריים אינם
+    // כוללים patchFormatVersion; בהם ה-applier נשאר שער ה-preflight.
+    final validEdges = edges.where((e) {
+      final fromSchema = e.manifest.fromSchemaVersion;
+      final toSchema = e.manifest.toSchemaVersion;
+      final patchFormat = e.manifest.patchFormatVersion;
+      return fromSchema >= 1 &&
+          toSchema >= fromSchema &&
+          (toSchema < 4 || patchFormat != null) &&
+          (patchFormat == null || patchFormat >= 1);
+    }).toList();
+    final supportedEdges = validEdges
+        .where((e) =>
+            e.manifest.fromSchemaVersion <= supportedDbSchemaVersion &&
+            e.manifest.toSchemaVersion <= supportedDbSchemaVersion &&
+            (e.manifest.patchFormatVersion == null ||
+                e.manifest.patchFormatVersion! <= supportedPatchFormatVersion))
+        .toList();
+
+    final path = _findBestPath(
+      supportedEdges,
+      localVersion,
+      latestVersion,
+      fromSchemaVersion: localSchemaVersion,
+    );
     if (path != null && path.isNotEmpty) {
       return LibraryUpdatePlan.delta(
         localVersion: localVersion,
@@ -51,12 +89,26 @@ class LibraryUpdatePlanner {
       );
     }
 
+    // מבחין בין "אין מסלול בכלל" ל"יש מסלול אך הוא דורש עדכון אפליקציה" —
+    // ההודעה השנייה אומרת למשתמש מה יתקן את זה לצמיתות.
+    final blockedByCapability = supportedEdges.length != validEdges.length &&
+        _findBestPath(
+              validEdges,
+              localVersion,
+              latestVersion,
+              fromSchemaVersion: localSchemaVersion,
+            ) !=
+            null;
     return _fullOrBlocked(
       localVersion: localVersion,
       latestVersion: latestVersion,
       asset: latestFullDbAsset,
       tag: latestReleaseTag,
-      reason: 'אין מסלול דלתא רציף מגרסה $localVersion לגרסה $latestVersion',
+      reason: blockedByCapability
+          ? 'מסלול הדלתא לגרסה $latestVersion דורש סכמת DB או פורמט patch '
+              'חדשים מהנתמך (DB $supportedDbSchemaVersion, '
+              'patch $supportedPatchFormatVersion) — נדרש עדכון אפליקציה'
+          : 'אין מסלול דלתא רציף מגרסה $localVersion לגרסה $latestVersion',
     );
   }
 
@@ -88,19 +140,23 @@ class LibraryUpdatePlanner {
   List<PatchEdge>? _findBestPath(
     List<PatchEdge> edges,
     int from,
-    int to,
-  ) {
+    int to, {
+    int? fromSchemaVersion,
+  }) {
     final adjacency = <int, List<PatchEdge>>{};
     for (final edge in edges) {
       if (edge.toVersion <= edge.fromVersion) continue; // רק קדימה
       adjacency.putIfAbsent(edge.fromVersion, () => []).add(edge);
     }
 
-    final best = <int, _Reach>{from: const _Reach(0, 0, [])};
-    final visited = <int>{};
+    final start = (version: from, schema: fromSchemaVersion);
+    final best = <({int version, int? schema}), _Reach>{
+      start: const _Reach(0, 0, []),
+    };
+    final visited = <({int version, int? schema})>{};
 
     while (true) {
-      int? current;
+      ({int version, int? schema})? current;
       _Reach? currentReach;
       for (final entry in best.entries) {
         if (visited.contains(entry.key)) continue;
@@ -110,11 +166,18 @@ class LibraryUpdatePlanner {
         }
       }
       if (current == null || currentReach == null) break;
-      if (current == to) return currentReach.path;
+      if (current.version == to) return currentReach.path;
       visited.add(current);
 
-      for (final edge in adjacency[current] ?? const <PatchEdge>[]) {
-        final next = edge.toVersion;
+      for (final edge in adjacency[current.version] ?? const <PatchEdge>[]) {
+        if (current.schema != null &&
+            edge.manifest.fromSchemaVersion != current.schema) {
+          continue;
+        }
+        final next = (
+          version: edge.toVersion,
+          schema: edge.manifest.toSchemaVersion,
+        );
         if (visited.contains(next)) continue;
         final candidate = _Reach(
           currentReach.hops + 1,

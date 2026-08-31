@@ -42,6 +42,12 @@ const List<PatchTableSpec> kPatchTablesInFkOrder = [
   PatchTableSpec('tocEntry', ['id'], updatable: true),
   PatchTableSpec('line', ['id'], updatable: true),
   PatchTableSpec('line_toc', ['lineId'], updatable: true),
+  // סכמה 4. טבלת מפתח טהורה — כל עמודותיה PK, אין מה לעדכן בהתנגשות.
+  PatchTableSpec('line_ref', ['bookId', 'refKeyHash', 'lineIndex'],
+      updatable: false),
+  // סכמה 4. אינדקס דיבורי-המתחיל — טבלת מפתח טהורה, אותה תבנית.
+  PatchTableSpec('line_dh', ['bookId', 'dhText', 'lineIndex'],
+      updatable: false),
   PatchTableSpec('link', ['id'], updatable: true),
   PatchTableSpec('link_anchor', ['linkId', 'side', 'charStart'],
       updatable: true),
@@ -101,8 +107,60 @@ const List<String> kHashTableOrderSchema2 = [
   'schema_meta',
 ];
 
-/// סדר ה-hash הנוכחי (סכמה 3). `link_suppressed_side` יושבת מיד אחרי
-/// `link_coverage` — אותו מיקום בדיוק כמו בצד הקוטליני.
+/// גרסת סכמת ה-DB הלוגית הגבוהה ביותר שה-hasher וה-planner מכירים.
+const int kSupportedDbSchemaVersion = 4;
+
+/// גרסת פורמט `patch.db` הגבוהה ביותר שה-applier יודע להחיל.
+///
+/// זהו חוזה נפרד מסכמת ה-DB: producer חדש יכול לכתוב format 4 גם עבור
+/// מעבר DB לוגי 2→3. כאשר `patchFormatVersion` קיים במניפסט, ה-planner
+/// מסנן גם לפיו; במניפסטים היסטוריים האימות נשאר ב-preflight של ה-applier.
+const int kSupportedPatchFormatVersion = 4;
+
+/// סדר ה-hash הקפוא של סכמה-3 (35 טבלאות, ללא טבלאות סכמה-4: `line_ref`
+/// ו-`line_dh`) — משחזר בדיוק את ה-hash של ארטיפקטי סכמה-3. לעולם אין לערוך.
+/// `link_suppressed_side` יושבת מיד אחרי `link_coverage` — אותו מיקום בדיוק
+/// כמו בצד הקוטליני.
+const List<String> kHashTableOrderSchema3 = [
+  'source',
+  'author',
+  'topic',
+  'pub_place',
+  'pub_date',
+  'connection_type',
+  'generation',
+  'category',
+  'category_closure',
+  'tocText',
+  'book',
+  'book_topic',
+  'book_author',
+  'book_base_text',
+  'book_pub_place',
+  'book_pub_date',
+  'book_generation',
+  'tocEntry',
+  'line',
+  'line_toc',
+  'link',
+  'link_anchor',
+  'link_range',
+  'link_coverage',
+  'link_suppressed_side',
+  'book_has_links',
+  'book_version',
+  'version_line',
+  'book_acronym',
+  'alt_toc_structure',
+  'alt_toc_entry',
+  'line_alt_toc',
+  'default_commentator',
+  'default_targum',
+  'schema_meta',
+];
+
+/// סדר ה-hash הנוכחי (סכמה 4). `line_ref` ואחריה `line_dh` יושבות מיד אחרי
+/// `line_toc` — אותו מיקום בדיוק כמו בצד הקוטליני.
 const List<String> kHashTableOrder = [
   'source',
   'author',
@@ -124,6 +182,8 @@ const List<String> kHashTableOrder = [
   'tocEntry',
   'line',
   'line_toc',
+  'line_ref',
+  'line_dh',
   'link',
   'link_anchor',
   'link_range',

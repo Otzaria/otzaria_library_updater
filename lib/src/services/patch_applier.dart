@@ -8,6 +8,11 @@ import 'logical_content_hasher.dart';
 
 /// הטבלאות ששינוי בהן ממופה למזהי ספרים ב-[PatchApplyResult.booksTouched].
 /// חייב להישאר תואם ל-queries ב-`PatchApplier._collectBooksTouched`.
+///
+/// `line_ref` ו-`line_dh` (סכמה 4) מוחרגות במכוון: הן אינדקסים נגזרים
+/// (הפניה→שורה, דיבור-המתחיל→שורה) ולא תוכן שנכנס לאינדקס החיפוש, ושינוי
+/// בהן לבדן לא צריך לגרור רענון אינדקס לספר — שינוי תוכן אמיתי מגיע תמיד
+/// דרך שורות `line` שכבר מכוסות.
 const Set<String> kBooksTouchedTables = {
   'book',
   'line',
@@ -42,12 +47,14 @@ class PatchApplyResult {
   final Set<int> booksTouched;
 
   /// האם ה-patch שינה טבלאות שאינן מכוסות ב-[booksTouched] (מלבד schema_meta,
-  /// שמתעדכן בכל patch). כש-true, צרכן שהאינדקס שלו תלוי בטבלאות האלה צריך
-  /// רענון מלא — אין דרך לגזור מהן מזהי ספרים מדויקים.
+  /// שמתעדכן בכל patch, ו-line_ref/line_dh, שאינן תוכן חיפוש — ראו
+  /// [kBooksTouchedTables]). כש-true, צרכן שהאינדקס שלו תלוי בטבלאות האלה
+  /// צריך רענון מלא — אין דרך לגזור מהן מזהי ספרים מדויקים.
   bool get hasChangesOutsideBooksTouched {
+    const ignored = {'schema_meta', 'line_ref', 'line_dh'};
     bool changed(MapEntry<String, int> e) =>
         e.value > 0 &&
-        e.key != 'schema_meta' &&
+        !ignored.contains(e.key) &&
         !kBooksTouchedTables.contains(e.key);
     return upserts.entries.any(changed) || deletes.entries.any(changed);
   }
@@ -95,8 +102,8 @@ class PatchApplyException implements Exception {
 }
 
 /// בוחר את סדר ה-hash לפי גרסת הסכמה: 1 → [kHashTableOrderSchema1] (33),
-/// 2 → [kHashTableOrderSchema2] (34), 3 → [kHashTableOrder] (35, הנוכחי).
-/// כל ערך אחר → זריקה (fail loudly).
+/// 2 → [kHashTableOrderSchema2] (34), 3 → [kHashTableOrderSchema3] (35),
+/// 4 → [kHashTableOrder] (37, הנוכחי). כל ערך אחר → זריקה (fail loudly).
 List<String> hashTableOrderForSchemaVersion(int schemaVersion) {
   switch (schemaVersion) {
     case 1:
@@ -104,6 +111,8 @@ List<String> hashTableOrderForSchemaVersion(int schemaVersion) {
     case 2:
       return kHashTableOrderSchema2;
     case 3:
+      return kHashTableOrderSchema3;
+    case 4:
       return kHashTableOrder;
     default:
       throw PatchApplyException(
@@ -124,13 +133,13 @@ List<String> hashTableOrderForSchemaVersion(int schemaVersion) {
 class PatchApplier {
   final LogicalContentHasher hasher;
 
-  /// גרסת הסכמה הגבוהה ביותר שהאפליקציה יודעת להחיל.
-  final int supportedSchemaVersion;
+  /// גרסת פורמט patch.db הגבוהה ביותר שהאפליקציה יודעת להחיל.
+  final int supportedPatchFormatVersion;
 
   const PatchApplier({
     this.hasher = const LogicalContentHasher(),
-    this.supportedSchemaVersion = 3,
-  });
+    this.supportedPatchFormatVersion = kSupportedPatchFormatVersion,
+  }) : assert(supportedPatchFormatVersion >= 1);
 
   /// מחיל את ה-patch שב-[patchPath] על ה-DB שב-[dbPath] לפי [manifest].
   ///
@@ -297,10 +306,22 @@ class PatchApplier {
     if (schemaVersion == null) {
       throw const PatchApplyException('patch_meta.schema_version חסר ב-patch');
     }
-    if (schemaVersion > supportedSchemaVersion) {
+    if (schemaVersion < 1 || schemaVersion > supportedPatchFormatVersion) {
       throw PatchApplyException(
-        'גרסת סכמת ה-patch ($schemaVersion) חדשה מהנתמך '
-        '($supportedSchemaVersion) — נדרש עדכון תוכנה',
+        'גרסת פורמט ה-patch ($schemaVersion) מחוץ לטווח הנתמך '
+        '(1–$supportedPatchFormatVersion) — נדרש עדכון תוכנה או patch תקין',
+      );
+    }
+    final declaredFormat = manifest.patchFormatVersion;
+    if (manifest.toSchemaVersion >= 4 && declaredFormat == null) {
+      throw const PatchApplyException(
+        'patchFormatVersion חסר במניפסט של schema 4 ומעלה',
+      );
+    }
+    if (declaredFormat != null && schemaVersion != declaredFormat) {
+      throw PatchApplyException(
+        'גרסת פורמט ה-patch ($schemaVersion) אינה תואמת למניפסט '
+        '($declaredFormat)',
       );
     }
     final from = _readPatchMetaInt(db, 'from_version');
