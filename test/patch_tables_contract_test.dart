@@ -39,17 +39,26 @@ void main() {
   group('חוזה טבלאות ה-patch', () {
     const fixturePath = 'test/patch_tables_contract.json';
 
-    // ה-fixture מתאר את החוזה הנוכחי (סכמה-4): hashOrder = 36 הטבלאות.
+    // ה-fixture מתאר את החוזה הנוכחי (סכמה-4): hashOrder = 37 הטבלאות.
     // הסדרים הקפואים של סכמות 1–3 הם היסטוריה — לא נכנסים ל-fixture.
     test('הסריאליזציה הקנונית תואמת ל-fixture המקומי', () {
       final expected = File(fixturePath).readAsStringSync();
       final actual = canonicalContract(
         kPatchTablesInFkOrder,
         kHashTableOrder,
-        const PatchApplier().supportedSchemaVersion,
+        kSupportedDbSchemaVersion,
       );
       expect(actual, expected,
           reason: 'הרשימות סטו מה-fixture — הרץ מחדש את מחולל החוזה');
+    });
+
+    test('יכולות DB ופורמט artifact מפורשות ונפרדות', () {
+      expect(kSupportedDbSchemaVersion, 4);
+      expect(kSupportedPatchFormatVersion, 4);
+      expect(
+        const PatchApplier().supportedPatchFormatVersion,
+        kSupportedPatchFormatVersion,
+      );
     });
 
     // גשר בין המאגרים: משווה בתים מול ה-fixture של Kotlin. מדולג ללא ה-env,
@@ -68,7 +77,8 @@ void main() {
       }
       final local = File(fixturePath).readAsBytesSync();
       final remote = kotlinFixture.readAsBytesSync();
-      expect(remote, local, reason: 'שני עותקי ה-fixture חייבים להיות זהים בתים');
+      expect(remote, local,
+          reason: 'שני עותקי ה-fixture חייבים להיות זהים בתים');
     });
   });
 }

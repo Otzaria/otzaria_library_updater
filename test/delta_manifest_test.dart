@@ -34,12 +34,31 @@ void main() {
       expect(m.toVersion, 2);
       expect(m.fromSchemaVersion, 1);
       expect(m.toSchemaVersion, 1);
+      expect(m.patchFormatVersion, isNull);
       expect(m.fromContentHash, startsWith('35d49998'));
       expect(m.toContentHash, startsWith('2be5318d'));
       expect(m.patchFiles, hasLength(1));
       expect(m.patchFiles.first.file, 'patch-v1-v2.db.zst');
       expect(m.patchFiles.first.size, 1040075);
       expect(m.totalCompressedSize, 1040075);
+    });
+
+    test('מפענח patchFormatVersion אופציונלי ודוחה טיפוס לא תקין', () {
+      final json = jsonDecode(validJson) as Map<String, dynamic>;
+      json['patchFormatVersion'] = 4;
+      expect(DeltaManifest.fromJson(json).patchFormatVersion, 4);
+
+      json['patchFormatVersion'] = '4';
+      expect(() => DeltaManifest.fromJson(json), throwsFormatException);
+    });
+
+    test('schema 4 ומעלה מחייב patchFormatVersion', () {
+      final json = jsonDecode(validJson) as Map<String, dynamic>;
+      json['toSchemaVersion'] = 4;
+      expect(() => DeltaManifest.fromJson(json), throwsFormatException);
+
+      json['patchFormatVersion'] = 4;
+      expect(DeltaManifest.fromJson(json).patchFormatVersion, 4);
     });
 
     test('סלחני לשדות לא מוכרים', () {

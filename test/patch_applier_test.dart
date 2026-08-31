@@ -40,12 +40,16 @@ DeltaManifest _manifest({
   required String toHash,
   int fromSchema = 2,
   int toSchema = 2,
+  int? patchFormat,
+  bool omitPatchFormat = false,
 }) =>
     DeltaManifest(
       fromVersion: from,
       toVersion: to,
       fromSchemaVersion: fromSchema,
       toSchemaVersion: toSchema,
+      patchFormatVersion:
+          omitPatchFormat ? null : (patchFormat ?? (toSchema >= 4 ? 4 : null)),
       fromContentHash: fromHash,
       toContentHash: toHash,
       patchFiles: const [
@@ -682,8 +686,8 @@ void main() {
     });
 
     test('לקוח ישן דוחה patch של סכמה 3 לפני שהוא נוגע ב-DB', () {
-      // supportedSchemaVersion=2 מדמה גרסת אפליקציה שלא עודכנה.
-      const oldClient = PatchApplier(supportedSchemaVersion: 2);
+      // supportedPatchFormatVersion=2 מדמה גרסת אפליקציה שלא עודכנה.
+      const oldClient = PatchApplier(supportedPatchFormatVersion: 2);
       final base = buildBaseDb(version: 1, sourceRows: [
         [1, 'aleph'],
       ]);
@@ -704,6 +708,63 @@ void main() {
       // fail-closed: ה-DB לא נגוע.
       expect(_hashOf(base), before);
     });
+
+    test('גרסת פורמט patch לא חיובית נדחית לפני שינוי ה-DB', () {
+      for (final schemaVersion in [0, -1]) {
+        final base = buildBaseDb(version: 1, sourceRows: [
+          [1, 'aleph'],
+        ]);
+        final before = _hashOf(base);
+        final patch = buildPatchDb(
+          from: 1,
+          to: 2,
+          schemaVersion: schemaVersion,
+        );
+        final manifest = _manifest(
+          from: 1,
+          to: 2,
+          fromHash: before,
+          toHash: before,
+        );
+
+        expect(
+          () => _applier.apply(
+            dbPath: base,
+            patchPath: patch,
+            manifest: manifest,
+          ),
+          throwsA(isA<PatchApplyException>()),
+        );
+        expect(_hashOf(base), before);
+        File(patch).deleteSync();
+        File(base).deleteSync();
+      }
+    });
+
+    test('גרסת פורמט במניפסט חייבת להתאים ל-patch_meta', () {
+      final base = buildBaseDb(version: 1, sourceRows: [
+        [1, 'aleph'],
+      ]);
+      final before = _hashOf(base);
+      final patch = buildPatchDb(from: 1, to: 2, schemaVersion: 3);
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        patchFormat: 4,
+        fromHash: before,
+        toHash: before,
+      );
+
+      expect(
+        () => _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifest,
+        ),
+        throwsA(isA<PatchApplyException>()),
+      );
+      expect(_hashOf(base), before);
+    });
   });
 
   group('שדרוג סכמה 3→4 (line_ref + line_dh)', () {
@@ -714,6 +775,7 @@ void main() {
       required int version,
       required List<List> rows,
       String name = 'expected',
+      bool withUnsignedIndexes = false,
     }) {
       final path = '${tmp.path}/${name}_s3_$version.db';
       final db = sqlite3.sqlite3.open(path);
@@ -723,6 +785,17 @@ void main() {
       db.execute('CREATE TABLE source (id INTEGER PRIMARY KEY, name TEXT)');
       for (final r in rows) {
         db.execute('INSERT INTO source VALUES (?,?)', [r[0], r[1]]);
+      }
+      if (withUnsignedIndexes) {
+        db.execute('CREATE TABLE line_ref (bookId INTEGER NOT NULL, '
+            'refKeyHash INTEGER NOT NULL, lineIndex INTEGER NOT NULL, '
+            'PRIMARY KEY (bookId, refKeyHash, lineIndex)) WITHOUT ROWID');
+        db.execute('INSERT INTO line_ref VALUES (12,777,3),(12,999,9)');
+        db.execute('CREATE TABLE line_dh (bookId INTEGER NOT NULL, '
+            'dhText TEXT NOT NULL, lineIndex INTEGER NOT NULL, '
+            'PRIMARY KEY (bookId, dhText, lineIndex)) WITHOUT ROWID');
+        db.execute("INSERT INTO line_dh VALUES (12,'מאימתי קורין',3),"
+            "(12,'רשומה ישנה',9)");
       }
       db.close();
       return path;
@@ -758,18 +831,61 @@ void main() {
       return path;
     }
 
+    test('manifest ידני של schema 4 ללא patchFormatVersion נדחה ללא שינוי', () {
+      final base = buildSchema3Db(
+        version: 3,
+        rows: [
+          [1, 'aleph'],
+        ],
+        name: 'missing_format_base',
+      );
+      final before = _hashWithOrder(base, kHashTableOrderSchema3);
+      final patch = buildPatchDb(from: 3, to: 4, schemaVersion: 4);
+      final manifest = _manifest(
+        from: 3,
+        to: 4,
+        fromSchema: 3,
+        toSchema: 4,
+        omitPatchFormat: true,
+        fromHash: before,
+        toHash: before,
+      );
+
+      expect(
+        () => _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifest,
+        ),
+        throwsA(isA<PatchApplyException>()),
+      );
+      expect(_hashWithOrder(base, kHashTableOrderSchema3), before);
+    });
+
     test('CREATE TABLE + אכלוס, ושתי גרסאות ה-hash נבחרות נכון', () {
-      final base = buildSchema3Db(version: 3, rows: [
-        [1, 'aleph'],
-      ], name: 'base');
+      final base = buildSchema3Db(
+          version: 3,
+          rows: [
+            [1, 'aleph'],
+          ],
+          name: 'base',
+          withUnsignedIndexes: true);
+      final deltaClientBase = buildSchema3Db(
+          version: 3,
+          rows: [
+            [1, 'aleph'],
+          ],
+          name: 'delta_client_without_indexes');
       final patch = buildPatchDb(
         from: 3,
         to: 4,
         schemaVersion: 4,
         migrations: [
+          'DROP TABLE IF EXISTS "line_ref"',
           'CREATE TABLE line_ref (bookId INTEGER NOT NULL, '
               'refKeyHash INTEGER NOT NULL, lineIndex INTEGER NOT NULL, '
               'PRIMARY KEY (bookId, refKeyHash, lineIndex)) WITHOUT ROWID',
+          'DROP TABLE IF EXISTS "line_dh"',
           'CREATE TABLE line_dh (bookId INTEGER NOT NULL, '
               'dhText TEXT NOT NULL, lineIndex INTEGER NOT NULL, '
               'PRIMARY KEY (bookId, dhText, lineIndex)) WITHOUT ROWID',
@@ -816,6 +932,12 @@ void main() {
       );
 
       expect(result.resultHash, manifest.toContentHash);
+      final deltaClientResult = _applier.apply(
+        dbPath: deltaClientBase,
+        patchPath: patch,
+        manifest: manifest,
+      );
+      expect(deltaClientResult.resultHash, manifest.toContentHash);
       // line_ref/line_dh הם אינדקסים נגזרים — לא שינוי שדורש רענון אינדקס חיפוש.
       expect(result.booksTouched, isEmpty);
       expect(result.hasChangesOutsideBooksTouched, isFalse);
@@ -849,11 +971,14 @@ void main() {
     });
 
     test('לקוח בסכמה-3 דוחה patch של סכמה 4 לפני שהוא נוגע ב-DB', () {
-      // supportedSchemaVersion=3 מדמה גרסת אפליקציה שלא עודכנה.
-      const oldClient = PatchApplier(supportedSchemaVersion: 3);
-      final base = buildSchema3Db(version: 3, rows: [
-        [1, 'aleph'],
-      ], name: 'base');
+      // supportedPatchFormatVersion=3 מדמה גרסת אפליקציה שלא עודכנה.
+      const oldClient = PatchApplier(supportedPatchFormatVersion: 3);
+      final base = buildSchema3Db(
+          version: 3,
+          rows: [
+            [1, 'aleph'],
+          ],
+          name: 'base');
       final before = _hashWithOrder(base, kHashTableOrderSchema3);
       final patch = buildPatchDb(from: 3, to: 4, schemaVersion: 4);
       final manifest = _manifest(
@@ -872,6 +997,99 @@ void main() {
       );
       // fail-closed: ה-DB לא נגוע.
       expect(_hashWithOrder(base, kHashTableOrderSchema3), before);
+    });
+
+    test('כשל toContentHash מחזיר DROP+CREATE ואת נתוני האינדקס הישנים', () {
+      final base = buildSchema3Db(
+        version: 3,
+        rows: [
+          [1, 'aleph'],
+        ],
+        name: 'rollback_base',
+        withUnsignedIndexes: true,
+      );
+      final before = _hashWithOrder(base, kHashTableOrderSchema3);
+      final patch = buildPatchDb(
+        from: 3,
+        to: 4,
+        schemaVersion: 4,
+        migrations: [
+          'DROP TABLE IF EXISTS "line_ref"',
+          'CREATE TABLE line_ref (bookId INTEGER NOT NULL, '
+              'refKeyHash INTEGER NOT NULL, lineIndex INTEGER NOT NULL, '
+              'PRIMARY KEY (bookId, refKeyHash, lineIndex)) WITHOUT ROWID',
+          'DROP TABLE IF EXISTS "line_dh"',
+          'CREATE TABLE line_dh (bookId INTEGER NOT NULL, '
+              'dhText TEXT NOT NULL, lineIndex INTEGER NOT NULL, '
+              'PRIMARY KEY (bookId, dhText, lineIndex)) WITHOUT ROWID',
+        ],
+      );
+      final pdb = sqlite3.sqlite3.open(patch);
+      pdb.execute('CREATE TABLE upsert_line_ref (bookId INTEGER, '
+          'refKeyHash INTEGER, lineIndex INTEGER, '
+          'PRIMARY KEY (bookId, refKeyHash, lineIndex))');
+      pdb.execute('INSERT INTO upsert_line_ref VALUES (12,777,3),(12,778,4)');
+      pdb.execute('CREATE TABLE upsert_line_dh (bookId INTEGER, '
+          'dhText TEXT, lineIndex INTEGER, '
+          'PRIMARY KEY (bookId, dhText, lineIndex))');
+      pdb.execute("INSERT INTO upsert_line_dh VALUES (12,'חדש',3)");
+      pdb.execute(
+        "UPDATE upsert_schema_meta SET value='4' WHERE key='db_version'",
+      );
+      pdb.execute(
+        "INSERT INTO upsert_schema_meta VALUES ('db_schema_version','4')",
+      );
+      pdb.close();
+
+      final manifest = _manifest(
+        from: 3,
+        to: 4,
+        fromSchema: 3,
+        toSchema: 4,
+        patchFormat: 4,
+        fromHash: before,
+        toHash: List.filled(64, '0').join(),
+      );
+      expect(
+        () => _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifest,
+        ),
+        throwsA(
+          isA<PatchApplyException>().having(
+            (e) => e.hashMismatchStage,
+            'hashMismatchStage',
+            PatchHashMismatchStage.toContentHash,
+          ),
+        ),
+      );
+
+      expect(_hashWithOrder(base, kHashTableOrderSchema3), before);
+      final db = sqlite3.sqlite3.open(base, mode: sqlite3.OpenMode.readOnly);
+      expect(
+        db
+            .select('SELECT refKeyHash FROM line_ref ORDER BY lineIndex')
+            .map((row) => row.values.first),
+        [777, 999],
+      );
+      expect(
+        db
+            .select('SELECT dhText FROM line_dh ORDER BY lineIndex')
+            .map((row) => row.values.first),
+        ['מאימתי קורין', 'רשומה ישנה'],
+      );
+      expect(
+        db
+            .select(
+              "SELECT value FROM schema_meta WHERE key='db_schema_version'",
+            )
+            .single
+            .values
+            .first,
+        '3',
+      );
+      db.close();
     });
   });
 

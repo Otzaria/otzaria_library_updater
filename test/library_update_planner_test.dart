@@ -11,6 +11,7 @@ PatchEdge _edge(
   int size = 1000,
   int fromSchema = 1,
   int toSchema = 1,
+  int? patchFormat,
 }) {
   final file = 'patch-v$from-v$to.db.zst';
   return PatchEdge(
@@ -19,6 +20,7 @@ PatchEdge _edge(
       toVersion: to,
       fromSchemaVersion: fromSchema,
       toSchemaVersion: toSchema,
+      patchFormatVersion: patchFormat,
       fromContentHash: 'hash$from',
       toContentHash: 'hash$to',
       patchFiles: [
@@ -51,11 +53,13 @@ void main() {
     required int latest,
     required List<PatchEdge> edges,
     bool hasMeta = true,
+    int? localSchema = 1,
     ReleaseAsset? full = _fullAsset,
     String? tag = 'v3',
   }) =>
       planner.plan(
         localVersion: local,
+        localSchemaVersion: localSchema,
         hasLocalVersionMeta: hasMeta,
         latestVersion: latest,
         edges: edges,
@@ -190,14 +194,42 @@ void main() {
 
   group('LibraryUpdatePlanner — מודעות לגרסת סכמת patch', () {
     // מדמה לקוח שתומך עד סכמה 3 מול releases שכבר עברו לסכמה 4.
-    const oldClient = LibraryUpdatePlanner(supportedSchemaVersion: 3);
+    const oldClient = LibraryUpdatePlanner(
+      supportedDbSchemaVersion: 3,
+      supportedPatchFormatVersion: 3,
+    );
 
     test('edge שדורש סכמה חדשה מהנתמכת → full fallback עם סיבת עדכון', () {
       final p = oldClient.plan(
         localVersion: 1,
+        localSchemaVersion: 3,
         hasLocalVersionMeta: true,
         latestVersion: 2,
-        edges: [_edge(1, 2, fromSchema: 3, toSchema: 4)],
+        edges: [
+          _edge(1, 2, fromSchema: 3, toSchema: 4, patchFormat: 4),
+        ],
+        latestFullDbAsset: _fullAsset,
+        latestReleaseTag: 'v2',
+      );
+      expect(p.kind, LibraryUpdatePlanKind.fullDownload);
+      expect(p.reason, contains('עדכון אפליקציה'));
+    });
+
+    test('פורמט artifact חדש נפסל גם כשהמעבר הלוגי נשאר 2→3', () {
+      final p = oldClient.plan(
+        localVersion: 1,
+        localSchemaVersion: 2,
+        hasLocalVersionMeta: true,
+        latestVersion: 2,
+        edges: [
+          _edge(
+            1,
+            2,
+            fromSchema: 2,
+            toSchema: 3,
+            patchFormat: 4,
+          ),
+        ],
         latestFullDbAsset: _fullAsset,
         latestReleaseTag: 'v2',
       );
@@ -208,10 +240,18 @@ void main() {
     test('קיים מסלול חלופי בסכמה נתמכת → נבחר delta ולא full', () {
       final p = oldClient.plan(
         localVersion: 1,
+        localSchemaVersion: 3,
         hasLocalVersionMeta: true,
         latestVersion: 2,
         edges: [
-          _edge(1, 2, fromSchema: 3, toSchema: 4, size: 100),
+          _edge(
+            1,
+            2,
+            fromSchema: 3,
+            toSchema: 4,
+            patchFormat: 4,
+            size: 100,
+          ),
           _edge(1, 2, fromSchema: 3, toSchema: 3, size: 9000),
         ],
         latestFullDbAsset: _fullAsset,
@@ -221,13 +261,13 @@ void main() {
       expect(p.deltaSteps.single.manifest.toSchemaVersion, 3);
     });
 
-    test('אין מסלול גם בלי סינון הסכמה → הסיבה הרגילה, לא עדכון אפליקציה',
-        () {
+    test('אין מסלול גם בלי סינון הסכמה → הסיבה הרגילה, לא עדכון אפליקציה', () {
       final p = oldClient.plan(
         localVersion: 1,
+        localSchemaVersion: 1,
         hasLocalVersionMeta: true,
         latestVersion: 3,
-        edges: [_edge(1, 2, toSchema: 4)],
+        edges: [_edge(1, 2, toSchema: 4, patchFormat: 4)],
         latestFullDbAsset: _fullAsset,
         latestReleaseTag: 'v3',
       );
@@ -238,8 +278,11 @@ void main() {
     test('הלקוח הנוכחי מקבל edges של סכמה 4', () {
       final p = plan(
         local: 1,
+        localSchema: 3,
         latest: 2,
-        edges: [_edge(1, 2, fromSchema: 3, toSchema: 4)],
+        edges: [
+          _edge(1, 2, fromSchema: 3, toSchema: 4, patchFormat: 4),
+        ],
       );
       expect(p.kind, LibraryUpdatePlanKind.delta);
     });
@@ -247,14 +290,82 @@ void main() {
     test('סכמה נדרשת ואין DB מלא → blocked עם סיבת העדכון', () {
       final p = oldClient.plan(
         localVersion: 1,
+        localSchemaVersion: 1,
         hasLocalVersionMeta: true,
         latestVersion: 2,
-        edges: [_edge(1, 2, toSchema: 4)],
+        edges: [_edge(1, 2, toSchema: 4, patchFormat: 4)],
         latestFullDbAsset: null,
         latestReleaseTag: null,
       );
       expect(p.kind, LibraryUpdatePlanKind.blocked);
       expect(p.reason, contains('עדכון אפליקציה'));
+    });
+
+    test('סכמת המקור של ה-edge חייבת להתאים לסכמה המקומית', () {
+      final p = plan(
+        local: 1,
+        localSchema: 4,
+        latest: 2,
+        edges: [
+          _edge(1, 2, fromSchema: 3, toSchema: 4, patchFormat: 4),
+        ],
+      );
+      expect(p.kind, LibraryUpdatePlanKind.fullDownload);
+      expect(p.reason, contains('אין מסלול דלתא רציף'));
+    });
+
+    test('שרשרת עם מעבר schema לא רציף נפסלת', () {
+      final p = plan(
+        local: 1,
+        localSchema: 3,
+        latest: 3,
+        edges: [
+          _edge(1, 2, fromSchema: 3, toSchema: 4, patchFormat: 4),
+          _edge(2, 3, fromSchema: 3, toSchema: 4, patchFormat: 4),
+        ],
+      );
+      expect(p.kind, LibraryUpdatePlanKind.fullDownload);
+    });
+
+    test('שרשרת עם מעבר schema רציף נבחרת', () {
+      final p = plan(
+        local: 1,
+        localSchema: 3,
+        latest: 3,
+        edges: [
+          _edge(1, 2, fromSchema: 3, toSchema: 4, patchFormat: 4),
+          _edge(2, 3, fromSchema: 4, toSchema: 4, patchFormat: 4),
+        ],
+      );
+      expect(p.kind, LibraryUpdatePlanKind.delta);
+      expect(p.deltaSteps, hasLength(2));
+    });
+
+    test('סכמה מקומית חסרה ב-DB ישן — הצעד הראשון מותר אך המשך השרשרת רציף',
+        () {
+      final p = plan(
+        local: 1,
+        localSchema: null,
+        latest: 3,
+        edges: [
+          _edge(1, 2, fromSchema: 2, toSchema: 3),
+          _edge(2, 3, fromSchema: 3, toSchema: 4, patchFormat: 4),
+        ],
+      );
+      expect(p.kind, LibraryUpdatePlanKind.delta);
+      expect(p.deltaSteps, hasLength(2));
+    });
+
+    test('schema אפס או downgrade אינם edges תקינים', () {
+      final p = plan(
+        local: 1,
+        latest: 2,
+        edges: [
+          _edge(1, 2, fromSchema: 0, toSchema: 0),
+          _edge(1, 2, fromSchema: 4, toSchema: 3),
+        ],
+      );
+      expect(p.kind, LibraryUpdatePlanKind.fullDownload);
     });
   });
 }

@@ -107,12 +107,15 @@ const List<String> kHashTableOrderSchema2 = [
   'schema_meta',
 ];
 
-/// גרסת סכמת ה-patch הגבוהה ביותר שהחבילה יודעת להחיל ולאמת.
+/// גרסת סכמת ה-DB הלוגית הגבוהה ביותר שה-hasher וה-planner מכירים.
+const int kSupportedDbSchemaVersion = 4;
+
+/// גרסת פורמט `patch.db` הגבוהה ביותר שה-applier יודע להחיל.
 ///
-/// משמש כברירת המחדל של `PatchApplier.supportedSchemaVersion` ושל
-/// `LibraryUpdatePlanner.supportedSchemaVersion` — כך ששניהם מסכימים תמיד:
-/// ה-planner לא יבחר מסלול דלתא שה-applier ידחה.
-const int kSupportedPatchSchemaVersion = 4;
+/// זהו חוזה נפרד מסכמת ה-DB: producer חדש יכול לכתוב format 4 גם עבור
+/// מעבר DB לוגי 2→3. כאשר `patchFormatVersion` קיים במניפסט, ה-planner
+/// מסנן גם לפיו; במניפסטים היסטוריים האימות נשאר ב-preflight של ה-applier.
+const int kSupportedPatchFormatVersion = 4;
 
 /// סדר ה-hash הקפוא של סכמה-3 (35 טבלאות, ללא טבלאות סכמה-4: `line_ref`
 /// ו-`line_dh`) — משחזר בדיוק את ה-hash של ארטיפקטי סכמה-3. לעולם אין לערוך.

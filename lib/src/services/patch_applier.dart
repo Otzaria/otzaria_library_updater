@@ -103,7 +103,7 @@ class PatchApplyException implements Exception {
 
 /// בוחר את סדר ה-hash לפי גרסת הסכמה: 1 → [kHashTableOrderSchema1] (33),
 /// 2 → [kHashTableOrderSchema2] (34), 3 → [kHashTableOrderSchema3] (35),
-/// 4 → [kHashTableOrder] (36, הנוכחי). כל ערך אחר → זריקה (fail loudly).
+/// 4 → [kHashTableOrder] (37, הנוכחי). כל ערך אחר → זריקה (fail loudly).
 List<String> hashTableOrderForSchemaVersion(int schemaVersion) {
   switch (schemaVersion) {
     case 1:
@@ -133,13 +133,13 @@ List<String> hashTableOrderForSchemaVersion(int schemaVersion) {
 class PatchApplier {
   final LogicalContentHasher hasher;
 
-  /// גרסת הסכמה הגבוהה ביותר שהאפליקציה יודעת להחיל.
-  final int supportedSchemaVersion;
+  /// גרסת פורמט patch.db הגבוהה ביותר שהאפליקציה יודעת להחיל.
+  final int supportedPatchFormatVersion;
 
   const PatchApplier({
     this.hasher = const LogicalContentHasher(),
-    this.supportedSchemaVersion = kSupportedPatchSchemaVersion,
-  });
+    this.supportedPatchFormatVersion = kSupportedPatchFormatVersion,
+  }) : assert(supportedPatchFormatVersion >= 1);
 
   /// מחיל את ה-patch שב-[patchPath] על ה-DB שב-[dbPath] לפי [manifest].
   ///
@@ -306,10 +306,22 @@ class PatchApplier {
     if (schemaVersion == null) {
       throw const PatchApplyException('patch_meta.schema_version חסר ב-patch');
     }
-    if (schemaVersion > supportedSchemaVersion) {
+    if (schemaVersion < 1 || schemaVersion > supportedPatchFormatVersion) {
       throw PatchApplyException(
-        'גרסת סכמת ה-patch ($schemaVersion) חדשה מהנתמך '
-        '($supportedSchemaVersion) — נדרש עדכון תוכנה',
+        'גרסת פורמט ה-patch ($schemaVersion) מחוץ לטווח הנתמך '
+        '(1–$supportedPatchFormatVersion) — נדרש עדכון תוכנה או patch תקין',
+      );
+    }
+    final declaredFormat = manifest.patchFormatVersion;
+    if (manifest.toSchemaVersion >= 4 && declaredFormat == null) {
+      throw const PatchApplyException(
+        'patchFormatVersion חסר במניפסט של schema 4 ומעלה',
+      );
+    }
+    if (declaredFormat != null && schemaVersion != declaredFormat) {
+      throw PatchApplyException(
+        'גרסת פורמט ה-patch ($schemaVersion) אינה תואמת למניפסט '
+        '($declaredFormat)',
       );
     }
     final from = _readPatchMetaInt(db, 'from_version');
