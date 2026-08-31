@@ -9,8 +9,10 @@ import 'logical_content_hasher.dart';
 /// הטבלאות ששינוי בהן ממופה למזהי ספרים ב-[PatchApplyResult.booksTouched].
 /// חייב להישאר תואם ל-queries ב-`PatchApplier._collectBooksTouched`.
 ///
-/// `line_ref` (סכמה 4) מוחרגת במכוון: היא אינדקס ניווט (הפניה→שורה) ולא תוכן
-/// שנכנס לאינדקס החיפוש, ושינוי בה לבדה לא צריך לגרור רענון אינדקס לספר.
+/// `line_ref` ו-`line_dh` (סכמה 4) מוחרגות במכוון: הן אינדקסים נגזרים
+/// (הפניה→שורה, דיבור-המתחיל→שורה) ולא תוכן שנכנס לאינדקס החיפוש, ושינוי
+/// בהן לבדן לא צריך לגרור רענון אינדקס לספר — שינוי תוכן אמיתי מגיע תמיד
+/// דרך שורות `line` שכבר מכוסות.
 const Set<String> kBooksTouchedTables = {
   'book',
   'line',
@@ -45,11 +47,11 @@ class PatchApplyResult {
   final Set<int> booksTouched;
 
   /// האם ה-patch שינה טבלאות שאינן מכוסות ב-[booksTouched] (מלבד schema_meta,
-  /// שמתעדכן בכל patch, ו-line_ref, שאינה תוכן חיפוש — ראו
+  /// שמתעדכן בכל patch, ו-line_ref/line_dh, שאינן תוכן חיפוש — ראו
   /// [kBooksTouchedTables]). כש-true, צרכן שהאינדקס שלו תלוי בטבלאות האלה
   /// צריך רענון מלא — אין דרך לגזור מהן מזהי ספרים מדויקים.
   bool get hasChangesOutsideBooksTouched {
-    const ignored = {'schema_meta', 'line_ref'};
+    const ignored = {'schema_meta', 'line_ref', 'line_dh'};
     bool changed(MapEntry<String, int> e) =>
         e.value > 0 &&
         !ignored.contains(e.key) &&

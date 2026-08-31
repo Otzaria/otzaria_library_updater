@@ -706,7 +706,7 @@ void main() {
     });
   });
 
-  group('שדרוג סכמה 3→4 (line_ref)', () {
+  group('שדרוג סכמה 3→4 (line_ref + line_dh)', () {
     // המסלול האמיתי של שדרוג הסכמה: ה-DB המקומי בסכמה 3, ה-patch מביא
     // CREATE TABLE כמיגרציה ומאכלס אותה. ה-from-hash נחשב בסדר סכמה-3
     // וה-to-hash בסדר סכמה-4, אחרת ה-apply נדחה על DB תקין לחלוטין.
@@ -749,6 +749,11 @@ void main() {
       for (final r in lineRefRows) {
         db.execute('INSERT INTO line_ref VALUES (?,?,?)', [r[0], r[1], r[2]]);
       }
+      db.execute('CREATE TABLE line_dh (bookId INTEGER NOT NULL, '
+          'dhText TEXT NOT NULL, lineIndex INTEGER NOT NULL, '
+          'PRIMARY KEY (bookId, dhText, lineIndex)) WITHOUT ROWID');
+      db.execute("INSERT INTO line_dh VALUES (12,'מאימתי קורין',3),"
+          "(12,'עד סוף האשמורה',4)");
       db.close();
       return path;
     }
@@ -765,6 +770,9 @@ void main() {
           'CREATE TABLE line_ref (bookId INTEGER NOT NULL, '
               'refKeyHash INTEGER NOT NULL, lineIndex INTEGER NOT NULL, '
               'PRIMARY KEY (bookId, refKeyHash, lineIndex)) WITHOUT ROWID',
+          'CREATE TABLE line_dh (bookId INTEGER NOT NULL, '
+              'dhText TEXT NOT NULL, lineIndex INTEGER NOT NULL, '
+              'PRIMARY KEY (bookId, dhText, lineIndex)) WITHOUT ROWID',
         ],
       );
       final pdb = sqlite3.sqlite3.open(patch);
@@ -772,6 +780,11 @@ void main() {
           'refKeyHash INTEGER, lineIndex INTEGER, '
           'PRIMARY KEY (bookId, refKeyHash, lineIndex))');
       pdb.execute('INSERT INTO upsert_line_ref VALUES (12,777,3),(12,778,4)');
+      pdb.execute('CREATE TABLE upsert_line_dh (bookId INTEGER, '
+          'dhText TEXT, lineIndex INTEGER, '
+          'PRIMARY KEY (bookId, dhText, lineIndex))');
+      pdb.execute("INSERT INTO upsert_line_dh VALUES (12,'מאימתי קורין',3),"
+          "(12,'עד סוף האשמורה',4)");
       pdb.execute(
         "UPDATE upsert_schema_meta SET value='4' WHERE key='db_version'",
       );
@@ -803,7 +816,7 @@ void main() {
       );
 
       expect(result.resultHash, manifest.toContentHash);
-      // line_ref היא אינדקס ניווט — לא נחשבת שינוי שדורש רענון אינדקס חיפוש.
+      // line_ref/line_dh הם אינדקסים נגזרים — לא שינוי שדורש רענון אינדקס חיפוש.
       expect(result.booksTouched, isEmpty);
       expect(result.hasChangesOutsideBooksTouched, isFalse);
       final db = sqlite3.sqlite3.open(base, mode: sqlite3.OpenMode.readOnly);
@@ -816,6 +829,12 @@ void main() {
           [12, 777, 3],
           [12, 778, 4],
         ],
+      );
+      expect(
+        db
+            .select('SELECT dhText FROM line_dh ORDER BY lineIndex')
+            .map((r) => r.values.first),
+        ['מאימתי קורין', 'עד סוף האשמורה'],
       );
       expect(
         db
@@ -873,16 +892,19 @@ void main() {
       expect(kHashTableOrderSchema3.length, 35);
       expect(kHashTableOrderSchema3, contains('link_suppressed_side'));
       expect(kHashTableOrderSchema3, isNot(contains('line_ref')));
+      expect(kHashTableOrderSchema3, isNot(contains('line_dh')));
       // מיד אחרי link_coverage — אותו מיקום כמו בצד הקוטליני.
       expect(kHashTableOrderSchema3.indexOf('link_suppressed_side'),
           kHashTableOrderSchema3.indexOf('link_coverage') + 1);
     });
-    test('סכמה-4 → סדר 36 הנוכחי (כולל line_ref)', () {
+    test('סכמה-4 → סדר 37 הנוכחי (כולל line_ref + line_dh)', () {
       expect(hashTableOrderForSchemaVersion(4), same(kHashTableOrder));
-      expect(kHashTableOrder.length, 36);
+      expect(kHashTableOrder.length, 37);
       // מיד אחרי line_toc — אותו מיקום כמו בצד הקוטליני.
       expect(kHashTableOrder.indexOf('line_ref'),
           kHashTableOrder.indexOf('line_toc') + 1);
+      expect(kHashTableOrder.indexOf('line_dh'),
+          kHashTableOrder.indexOf('line_ref') + 1);
     });
     test('גרסת סכמה לא מוכרת → זורק PatchApplyException', () {
       expect(() => hashTableOrderForSchemaVersion(0),

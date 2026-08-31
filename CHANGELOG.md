@@ -2,21 +2,23 @@
 
 ## 0.3.0
 
-תמיכה בסכמת patch 4 — טבלת `line_ref` (אינדקס הפניות קנוני), וחיסון הלקוח
-מול שדרוגי סכמה עתידיים.
+תמיכה בסכמת patch 4 — טבלאות `line_ref` (אינדקס הפניות קנוני) ו-`line_dh`
+(אינדקס דיבורי-המתחיל), וחיסון הלקוח מול שדרוגי סכמה עתידיים.
 
-- `kPatchTablesInFkOrder`: נוספה `line_ref` (junction טהורה,
-  PK ‏`bookId, refKeyHash, lineIndex`) מיד אחרי `line_toc` — אותו מיקום כמו
-  בצד הקוטליני.
+- `kPatchTablesInFkOrder`: נוספו `line_ref` (junction טהורה,
+  PK ‏`bookId, refKeyHash, lineIndex`) ו-`line_dh` (PK ‏`bookId, dhText,
+  lineIndex`) מיד אחרי `line_toc` — אותו מיקום כמו בצד הקוטליני.
 - סדר ה-hash של סכמה-3 הוקפא כ-`kHashTableOrderSchema3` (35 טבלאות);
-  `kHashTableOrder` הנוכחי (סכמה 4) כולל את `line_ref` — 36 טבלאות.
+  `kHashTableOrder` הנוכחי (סכמה 4) כולל את `line_ref` ו-`line_dh` —
+  37 טבלאות.
 - `kSupportedPatchSchemaVersion` (=4) — קבוע משותף ל-`PatchApplier`
   ול-`LibraryUpdatePlanner`, כך ששניהם מסכימים תמיד.
 - `LibraryUpdatePlanner` מודע לגרסת הסכמה: edges שדורשים סכמה חדשה מהנתמכת
   נפסלים מהגרף, והלקוח מתכנן הורדה מלאה (עם סיבה שמציינת שנדרש עדכון
   אפליקציה) במקום להוריד patch שיידחה ב-preflight בלי מוצא.
-- `booksTouched`/`hasChangesOutsideBooksTouched`: ‏`line_ref` מוחרגת במכוון —
-  אינדקס ניווט, לא תוכן חיפוש; שינוי בה לבדה אינו דורש רענון אינדקס.
+- `booksTouched`/`hasChangesOutsideBooksTouched`: ‏`line_ref` ו-`line_dh`
+  מוחרגות במכוון — אינדקסים נגזרים, לא תוכן חיפוש; שינוי בהן לבדן אינו
+  דורש רענון אינדקס.
 
 ## 0.2.0
 

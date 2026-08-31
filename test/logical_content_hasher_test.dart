@@ -69,12 +69,12 @@ void main() {
       db.execute("INSERT INTO source VALUES (1,'aleph'),(2,'bet'),(3,'gimel')");
       expect(
         _hasher.compute(db),
-        // 36 טבלאות ב-kHashTableOrder (סכמה 4) — כל שם נכתב כ-
+        // 37 טבלאות ב-kHashTableOrder (סכמה 4) — כל שם נכתב כ-
         // marker גם כשהטבלה נעדרת, לכן ה-golden מתעדכן עם סנכרון הרשימה.
-        'a8a21c5eadd92aa04a6bef273b8bf32ecbebfe62ea3580312bb0d55e78d1afa3',
+        '493bda433e8a8a154b69645c148240159365bca99d3386afd8e113c75b1d59ed',
       );
       // הסדר הקפוא של סכמה-3 חייב להמשיך לשחזר את ה-golden ההיסטורי —
-      // מוכיח שההקפאה נאמנה בית-בבית לרשימה שלפני הוספת line_ref.
+      // מוכיח שההקפאה נאמנה בית-בבית לרשימה שלפני הוספת line_ref ו-line_dh.
       expect(
         _hasher.compute(db, tableOrder: kHashTableOrderSchema3),
         'c26ea1c49cab50b9893df661a98211e8fd923269df79e13cbd89a88f98f2e6c0',
