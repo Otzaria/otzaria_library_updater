@@ -76,23 +76,81 @@ void main() {
     );
   });
 
-  test('sha256 מחולץ שגוי → נכשל', () async {
-    // decompress מחזיר בייטים שלא תואמים ל-uncompressedSha256
-    final mock = MockClient.streaming((request, bodyStream) async =>
-        http.StreamedResponse(Stream.value(compressed), 200,
-            contentLength: compressed.length));
-    final downloader = PatchDownloader(
-      httpClient: mock,
-      decompress: (c) async => Uint8List.fromList([9, 9, 9]),
-    );
-    expect(
-      () => downloader.downloadAndExtract(
+  // האורך חייב להישאר 64 כמו ב-entry(): אורך אחר נכשל על בדיקת הגודל, והטסט
+  // לא מגיע כלל לאימות ה-hash שהוא בא לבדוק.
+  final wrongUncompressed =
+      Uint8List.fromList(List.generate(64, (i) => 200 - i));
+
+  PatchDownloader wrongExtractionDownloader() => PatchDownloader(
+        httpClient: MockClient.streaming((request, bodyStream) async =>
+            http.StreamedResponse(Stream.value(compressed), 200,
+                contentLength: compressed.length)),
+        decompress: (c) async => wrongUncompressed,
+      );
+
+  test('sha256 מחולץ שגוי → נכשל בשגיאת ה-hash (לא בשגיאת גודל)', () async {
+    await expectLater(
+      wrongExtractionDownloader().downloadAndExtract(
         patchFile: entry(),
         downloadUrl: 'https://x/p',
         destDir: tmp,
       ),
-      throwsA(isA<PatchDownloadException>()),
+      throwsA(
+        isA<PatchDownloadException>().having(
+          (e) => e.message,
+          'message',
+          'sha256 של הקובץ המחולץ אינו תואם',
+        ),
+      ),
     );
+  });
+
+  // הקובץ נכתב לדיסק לפני אימות ה-hash — זה מה שמאפשר לחשב את ה-hash מהדיסק
+  // ב-isolate. אם האימות יחזור לרוץ על הבייטים שבזיכרון, הקובץ לא ייראה כאן.
+  test('המחולץ נכתב לדיסק לפני אימות ה-hash, ונמחק בכשל', () async {
+    final path = '${tmp.path}/patch-v1-v2.db';
+    var seenOnDisk = false;
+    Object? error;
+    var done = false;
+    final settled = wrongExtractionDownloader()
+        .downloadAndExtract(
+          patchFile: entry(),
+          downloadUrl: 'https://x/p',
+          destDir: tmp,
+        )
+        .then<void>((_) {}, onError: (Object e) => error = e)
+        .whenComplete(() => done = true);
+
+    while (!done) {
+      if (File(path).existsSync()) seenOnDisk = true;
+      await Future<void>.delayed(Duration.zero);
+    }
+    await settled;
+
+    expect(error, isA<PatchDownloadException>());
+    expect(seenOnDisk, isTrue);
+    expect(File(path).existsSync(), isFalse);
+  });
+
+  test('ביטול לפני החילוץ → PatchDownloadCancelled, ה-.db לא נכתב', () async {
+    var cancelled = false;
+    final downloader = PatchDownloader(
+      httpClient: MockClient.streaming((request, bodyStream) async =>
+          http.StreamedResponse(Stream.value(compressed), 200,
+              contentLength: compressed.length)),
+      decompress: (c) async => uncompressed,
+    );
+    await expectLater(
+      downloader.downloadAndExtract(
+        patchFile: entry(),
+        downloadUrl: 'https://x/p',
+        destDir: tmp,
+        onProgress: (_, __) => cancelled = true,
+        isCancelled: () => cancelled,
+      ),
+      throwsA(isA<PatchDownloadCancelled>()),
+    );
+    expect(File('${tmp.path}/patch-v1-v2.db').existsSync(), isFalse);
   });
 
   test('patch קטן: גוף תגובת שגיאה ננטש מיד ולא נצרך עד הסוף', () async {

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
@@ -67,20 +68,21 @@ class PatchDownloader {
     final extractedPath = p.join(destDir.path, extractedName);
 
     try {
-      final compressed = await _download(
+      final download = await _download(
         downloadUrl,
         maxBytes: patchFile.size,
         onProgress: onProgress,
         isCancelled: isCancelled,
       );
+      final compressed = download.bytes;
 
       _verify(
         actual: compressed.length,
         expected: patchFile.size,
         label: 'גודל הקובץ הדחוס',
       );
-      _verifyHash(
-        bytes: compressed,
+      _verifyDigest(
+        actual: download.digest,
         expected: patchFile.sha256,
         label: 'sha256 של הקובץ הדחוס',
       );
@@ -97,13 +99,15 @@ class PatchDownloader {
         expected: patchFile.uncompressedSize,
         label: 'גודל הקובץ המחולץ',
       );
-      _verifyHash(
-        bytes: extracted,
+
+      // כתיבה לפני אימות ה-hash: ה-hash מחושב מהדיסק ב-isolate, בלי להעביר את
+      // הבייטים דרך SendPort (העתקה שהייתה מכפילה את שיא הזיכרון).
+      await File(extractedPath).writeAsBytes(extracted, flush: true);
+      await _verifyFileHash(
+        path: extractedPath,
         expected: patchFile.uncompressedSha256,
         label: 'sha256 של הקובץ המחולץ',
       );
-
-      File(extractedPath).writeAsBytesSync(extracted, flush: true);
       return extractedPath;
     } catch (_) {
       _deleteQuietly(extractedPath);
@@ -233,9 +237,8 @@ class PatchDownloader {
       if (expectedSha256 != null) {
         // ה-hash חושב בזרימה תוך כדי ההורדה; רק במסלול alreadyComplete (אין
         // זרם) קוראים את הקובץ מהדיסק.
-        final actual =
-            (streamDigest ?? await _hashFileDigest(file, isCancelled))
-                .toString();
+        final actual = streamDigest?.toString() ??
+            await _hashFileSha256(destPath, isCancelled);
         if (actual != expectedSha256.toLowerCase()) {
           _deleteQuietly(destPath);
           _deleteQuietly(sidecarPath);
@@ -715,21 +718,6 @@ class PatchDownloader {
     return int.tryParse(match.group(1)!);
   }
 
-  /// מחשב sha256 על הקובץ השלם מהדיסק בזרימה (הקובץ >1GB — לא readAsBytes).
-  Future<Digest> _hashFileDigest(
-    File file,
-    bool Function()? isCancelled,
-  ) async {
-    final digestSink = _ChunkedDigestSink();
-    final input = sha256.startChunkedConversion(digestSink);
-    await for (final chunk in file.openRead()) {
-      _throwIfCancelled(isCancelled);
-      input.add(chunk);
-    }
-    input.close();
-    return digestSink.value;
-  }
-
   /// חלקי ניתן-לחידוש רק אם קובץ הצד מחזיק validator חזק (אפשר לשלוח If-Range),
   /// או שהקובץ כבר שלם ([expectedSize] מולא). חלקי בלי validator שאינו שלם
   /// יימחק ממילא ע"י כלל ה-entry בריצה הבאה, ולכן אין ערך לשמור אותו.
@@ -791,7 +779,9 @@ class PatchDownloader {
     return trimmed;
   }
 
-  Future<Uint8List> _download(
+  /// מוריד לזיכרון ומחשב את ה-sha256 תוך כדי הזרימה — צ'אנק-צ'אנק, כדי שלא
+  /// יורץ hash על מערך של מאות MB בפעימה אחת על ה-isolate הראשי.
+  Future<({Uint8List bytes, Digest digest})> _download(
     String url, {
     required int maxBytes,
     void Function(int downloaded, int? total)? onProgress,
@@ -808,6 +798,8 @@ class PatchDownloader {
     }
     final total = response.contentLength;
     final builder = BytesBuilder(copy: false);
+    final digestSink = _ChunkedDigestSink();
+    final hashInput = sha256.startChunkedConversion(digestSink);
     var downloaded = 0;
     await for (final chunk in response.stream.timeout(stallTimeout)) {
       _throwIfCancelled(isCancelled);
@@ -817,10 +809,12 @@ class PatchDownloader {
             'ההורדה חורגת מהגודל הצפוי ($maxBytes בייטים)');
       }
       builder.add(chunk);
+      hashInput.add(chunk);
       downloaded += chunk.length;
       onProgress?.call(downloaded, total);
     }
-    return builder.takeBytes();
+    hashInput.close();
+    return (bytes: builder.takeBytes(), digest: digestSink.value);
   }
 
   void _verify({
@@ -834,12 +828,24 @@ class PatchDownloader {
     }
   }
 
-  void _verifyHash({
-    required Uint8List bytes,
+  void _verifyDigest({
+    required Digest actual,
     required String expected,
     required String label,
   }) {
-    final actual = sha256.convert(bytes).toString();
+    if (actual.toString() != expected.toLowerCase()) {
+      throw PatchDownloadException('$label אינו תואם');
+    }
+  }
+
+  /// מאמת sha256 של קובץ שעל הדיסק; החישוב רץ ב-isolate נפרד (בזרימה) כדי לא
+  /// לחסום את ה-isolate הראשי, ומקבל נתיב בלבד — לא מערך בייטים.
+  Future<void> _verifyFileHash({
+    required String path,
+    required String expected,
+    required String label,
+  }) async {
+    final actual = await Isolate.run(() => _hashFileSha256(path));
     if (actual != expected.toLowerCase()) {
       throw PatchDownloadException('$label אינו תואם');
     }
@@ -877,7 +883,24 @@ class PatchDownloader {
   }
 }
 
-/// אוסף את ה-Digest מ-`startChunkedConversion` של sha256 בהורדה לדיסק.
+/// מחשב sha256 של קובץ בזרימה (עשוי לעבור 1GB — לא readAsBytes); top-level כדי
+/// שתרוץ ב-`Isolate.run`, ולכן [isCancelled] שמיש רק בקריאה מקומית.
+Future<String> _hashFileSha256(String path,
+    [bool Function()? isCancelled]) async {
+  final digestSink = _ChunkedDigestSink();
+  final input = sha256.startChunkedConversion(digestSink);
+  await for (final chunk in File(path).openRead()) {
+    if (isCancelled != null && isCancelled()) {
+      throw const PatchDownloadCancelled();
+    }
+    input.add(chunk);
+  }
+  input.close();
+  return digestSink.value.toString();
+}
+
+/// אוסף את ה-Digest מ-`startChunkedConversion` של sha256 — בכל המסלולים
+/// הזורמים: הורדה לדיסק, הורדה לזיכרון, וחישוב מקובץ קיים.
 class _ChunkedDigestSink implements Sink<Digest> {
   late Digest value;
   @override
