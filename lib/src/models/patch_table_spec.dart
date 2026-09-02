@@ -45,9 +45,9 @@ const List<PatchTableSpec> kPatchTablesInFkOrder = [
   // סכמה 4. טבלת מפתח טהורה — כל עמודותיה PK, אין מה לעדכן בהתנגשות.
   PatchTableSpec('line_ref', ['bookId', 'refKeyHash', 'lineIndex'],
       updatable: false),
-  // סכמה 4. אינדקס דיבורי-המתחיל — טבלת מפתח טהורה, אותה תבנית.
+  // סכמה 4. אינדקס דיבורי-המתחיל — dhDisplay (הצורה המודפסת) נלווית למפתח.
   PatchTableSpec('line_dh', ['bookId', 'dhText', 'lineIndex'],
-      updatable: false),
+      updatable: true),
   PatchTableSpec('link', ['id'], updatable: true),
   PatchTableSpec('link_anchor', ['linkId', 'side', 'charStart'],
       updatable: true),
