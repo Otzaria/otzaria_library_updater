@@ -17,11 +17,7 @@ export 'src/models/patch_table_spec.dart'
 export 'src/services/github_library_release_client.dart'
     show GithubLibraryReleaseClient;
 export 'src/services/library_db_recovery_service.dart'
-    show
-        LibraryDbRecoveryService,
-        RecoveryResult,
-        RecoveryAction,
-        BackupIntegrityException;
+    show LibraryDbRecoveryService, RecoveryResult, RecoveryAction;
 export 'src/services/library_update_discovery.dart'
     show LibraryUpdateDiscovery, LibraryDiscoveryResult;
 export 'src/services/library_update_planner.dart' show LibraryUpdatePlanner;
