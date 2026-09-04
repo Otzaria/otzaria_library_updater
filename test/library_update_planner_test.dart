@@ -275,16 +275,36 @@ void main() {
       expect(p.reason, isNot(contains('עדכון אפליקציה')));
     });
 
-    test('הלקוח הנוכחי מקבל edges של סכמה 4', () {
+    test('הלקוח הנוכחי מקבל edge של סכמה 4 לסכמה 5 בפורמט patch 4', () {
       final p = plan(
         local: 1,
-        localSchema: 3,
+        localSchema: 4,
         latest: 2,
         edges: [
-          _edge(1, 2, fromSchema: 3, toSchema: 4, patchFormat: 4),
+          _edge(1, 2, fromSchema: 4, toSchema: 5, patchFormat: 4),
         ],
       );
       expect(p.kind, LibraryUpdatePlanKind.delta);
+    });
+
+    test('לקוח שתומך רק עד סכמה 4 דוחה edge לסכמה 5', () {
+      const schema4Client = LibraryUpdatePlanner(
+        supportedDbSchemaVersion: 4,
+        supportedPatchFormatVersion: 4,
+      );
+      final p = schema4Client.plan(
+        localVersion: 26,
+        localSchemaVersion: 4,
+        hasLocalVersionMeta: true,
+        latestVersion: 27,
+        edges: [
+          _edge(26, 27, fromSchema: 4, toSchema: 5, patchFormat: 4),
+        ],
+        latestFullDbAsset: _fullAsset,
+        latestReleaseTag: 'v27',
+      );
+      expect(p.kind, LibraryUpdatePlanKind.fullDownload);
+      expect(p.reason, contains('עדכון אפליקציה'));
     });
 
     test('סכמה נדרשת ואין DB מלא → blocked עם סיבת העדכון', () {

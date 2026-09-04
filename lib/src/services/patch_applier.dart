@@ -103,7 +103,8 @@ class PatchApplyException implements Exception {
 
 /// בוחר את סדר ה-hash לפי גרסת הסכמה: 1 → [kHashTableOrderSchema1] (33),
 /// 2 → [kHashTableOrderSchema2] (34), 3 → [kHashTableOrderSchema3] (35),
-/// 4 → [kHashTableOrder] (37, הנוכחי). כל ערך אחר → זריקה (fail loudly).
+/// 4 → [kHashTableOrderSchema4], 5 → [kHashTableOrder] (37, הנוכחי).
+/// כל ערך אחר → זריקה (fail loudly).
 List<String> hashTableOrderForSchemaVersion(int schemaVersion) {
   switch (schemaVersion) {
     case 1:
@@ -113,6 +114,8 @@ List<String> hashTableOrderForSchemaVersion(int schemaVersion) {
     case 3:
       return kHashTableOrderSchema3;
     case 4:
+      return kHashTableOrderSchema4;
+    case 5:
       return kHashTableOrder;
     default:
       throw PatchApplyException(

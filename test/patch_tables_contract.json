@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "fkOrder": [
     { "table": "source", "pk": ["id"], "updatable": true },
     { "table": "author", "pk": ["id"], "updatable": true },

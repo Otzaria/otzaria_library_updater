@@ -45,7 +45,7 @@ const List<PatchTableSpec> kPatchTablesInFkOrder = [
   // סכמה 4. טבלת מפתח טהורה — כל עמודותיה PK, אין מה לעדכן בהתנגשות.
   PatchTableSpec('line_ref', ['bookId', 'refKeyHash', 'lineIndex'],
       updatable: false),
-  // סכמה 4. אינדקס דיבורי-המתחיל — dhDisplay (הצורה המודפסת) נלווית למפתח.
+  // סכמה 5. אינדקס דיבורי-המתחיל — dhDisplay (הצורה המודפסת) נלווית למפתח.
   PatchTableSpec('line_dh', ['bookId', 'dhText', 'lineIndex'],
       updatable: true),
   PatchTableSpec('link', ['id'], updatable: true),
@@ -108,7 +108,7 @@ const List<String> kHashTableOrderSchema2 = [
 ];
 
 /// גרסת סכמת ה-DB הלוגית הגבוהה ביותר שה-hasher וה-planner מכירים.
-const int kSupportedDbSchemaVersion = 4;
+const int kSupportedDbSchemaVersion = 5;
 
 /// גרסת פורמט `patch.db` הגבוהה ביותר שה-applier יודע להחיל.
 ///
@@ -159,9 +159,9 @@ const List<String> kHashTableOrderSchema3 = [
   'schema_meta',
 ];
 
-/// סדר ה-hash הנוכחי (סכמה 4). `line_ref` ואחריה `line_dh` יושבות מיד אחרי
-/// `line_toc` — אותו מיקום בדיוק כמו בצד הקוטליני.
-const List<String> kHashTableOrder = [
+/// סדר ה-hash הקפוא של סכמה 4. סכמה 5 משנה עמודה ב-`line_dh`, לא את סדר
+/// הטבלאות; השם הנוכחי [kHashTableOrder] הוא alias לאותה רשימה קנונית.
+const List<String> kHashTableOrderSchema4 = [
   'source',
   'author',
   'topic',
@@ -200,6 +200,9 @@ const List<String> kHashTableOrder = [
   'default_targum',
   'schema_meta',
 ];
+
+/// סדר ה-hash הנוכחי (סכמה 5).
+const List<String> kHashTableOrder = kHashTableOrderSchema4;
 
 /// סדר ה-hash הקפוא של סכמה-1 (33 טבלאות, ללא `book_base_text`) — משחזר בדיוק
 /// את ה-hash של ארטיפקטי סכמה-1 ההיסטוריים. לעולם אין לערוך.
