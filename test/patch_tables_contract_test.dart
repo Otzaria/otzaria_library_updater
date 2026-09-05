@@ -39,10 +39,11 @@ void main() {
   group('חוזה טבלאות ה-patch', () {
     const fixturePath = 'test/patch_tables_contract.json';
 
-    // ה-fixture מתאר את החוזה הנוכחי (סכמה-4): hashOrder = 37 הטבלאות.
+    // ה-fixture מתאר את החוזה הנוכחי (סכמה-5): hashOrder = 37 הטבלאות.
     // הסדרים הקפואים של סכמות 1–3 הם היסטוריה — לא נכנסים ל-fixture.
     test('הסריאליזציה הקנונית תואמת ל-fixture המקומי', () {
-      final expected = File(fixturePath).readAsStringSync();
+      final expected =
+          File(fixturePath).readAsStringSync().replaceAll('\r\n', '\n');
       final actual = canonicalContract(
         kPatchTablesInFkOrder,
         kHashTableOrder,
@@ -53,7 +54,7 @@ void main() {
     });
 
     test('יכולות DB ופורמט artifact מפורשות ונפרדות', () {
-      expect(kSupportedDbSchemaVersion, 4);
+      expect(kSupportedDbSchemaVersion, 5);
       expect(kSupportedPatchFormatVersion, 4);
       expect(
         const PatchApplier().supportedPatchFormatVersion,

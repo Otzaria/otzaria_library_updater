@@ -1093,6 +1093,84 @@ void main() {
     });
   });
 
+  group('שדרוג סכמה 4→5 (line_dh.dhDisplay)', () {
+    test('המיגרציה רצה לפני snapshot מלא ומעדכנת שורות עם PK קיים', () {
+      final base = '${tmp.path}/schema4_v26.db';
+      final baseDb = sqlite3.sqlite3.open(base);
+      baseDb.execute('CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT)');
+      baseDb.execute("INSERT INTO schema_meta VALUES "
+          "('db_version','26'),('db_schema_version','4')");
+      baseDb.execute('CREATE TABLE line_dh ('
+          'bookId INTEGER NOT NULL, dhText TEXT NOT NULL, '
+          'lineIndex INTEGER NOT NULL, '
+          'PRIMARY KEY (bookId, dhText, lineIndex)) WITHOUT ROWID');
+      baseDb.execute("INSERT INTO line_dh VALUES "
+          "(1,'מאימתי קורין',0),(1,'משעה',1)");
+      baseDb.close();
+
+      final expected = '${tmp.path}/schema5_v27.db';
+      final expectedDb = sqlite3.sqlite3.open(expected);
+      expectedDb.execute('CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT)');
+      expectedDb.execute("INSERT INTO schema_meta VALUES "
+          "('db_version','27'),('db_schema_version','5')");
+      expectedDb.execute('CREATE TABLE line_dh ('
+          'bookId INTEGER NOT NULL, dhText TEXT NOT NULL, '
+          'lineIndex INTEGER NOT NULL, dhDisplay TEXT NOT NULL, '
+          'PRIMARY KEY (bookId, dhText, lineIndex)) WITHOUT ROWID');
+      expectedDb.execute("INSERT INTO line_dh VALUES "
+          "(1,'מאימתי קורין',0,'מאימתי קורין'),"
+          "(1,'משעה',1,'משעה שהכהנים')");
+      expectedDb.close();
+
+      final patch = '${tmp.path}/schema4-5.db';
+      final patchDb = sqlite3.sqlite3.open(patch);
+      patchDb.execute('CREATE TABLE patch_meta (key TEXT PRIMARY KEY, value TEXT)');
+      patchDb.execute("INSERT INTO patch_meta VALUES "
+          "('schema_version','4'),('from_version','26'),('to_version','27')");
+      patchDb.execute('CREATE TABLE migrations (version INTEGER PRIMARY KEY, sql TEXT)');
+      patchDb.execute('INSERT INTO migrations VALUES (1, ?)', [
+        "ALTER TABLE \"line_dh\" ADD COLUMN \"dhDisplay\" TEXT NOT NULL DEFAULT ''"
+      ]);
+      patchDb.execute(
+          'CREATE TABLE upsert_schema_meta (key TEXT PRIMARY KEY, value TEXT)');
+      patchDb.execute("INSERT INTO upsert_schema_meta VALUES "
+          "('db_version','27'),('db_schema_version','5')");
+      patchDb.execute('CREATE TABLE upsert_line_dh ('
+          'bookId INTEGER NOT NULL, dhText TEXT NOT NULL, '
+          'lineIndex INTEGER NOT NULL, dhDisplay TEXT NOT NULL, '
+          'PRIMARY KEY (bookId, dhText, lineIndex)) WITHOUT ROWID');
+      patchDb.execute("INSERT INTO upsert_line_dh VALUES "
+          "(1,'מאימתי קורין',0,'מאימתי קורין'),"
+          "(1,'משעה',1,'משעה שהכהנים')");
+      patchDb.close();
+
+      final manifest = _manifest(
+        from: 26,
+        to: 27,
+        fromSchema: 4,
+        toSchema: 5,
+        patchFormat: 4,
+        fromHash: _hashWithOrder(base, kHashTableOrderSchema4),
+        toHash: _hashWithOrder(expected, kHashTableOrder),
+      );
+      final result =
+          _applier.apply(dbPath: base, patchPath: patch, manifest: manifest);
+
+      expect(result.migrations, 1);
+      expect(result.upserts['line_dh'], 2);
+      expect(result.resultHash, manifest.toContentHash);
+      final applied = sqlite3.sqlite3.open(base);
+      expect(
+        applied
+            .select('SELECT dhDisplay FROM line_dh ORDER BY lineIndex')
+            .map((row) => row['dhDisplay'])
+            .toList(),
+        ['מאימתי קורין', 'משעה שהכהנים'],
+      );
+      applied.close();
+    });
+  });
+
   group('hashTableOrderForSchemaVersion', () {
     test('סכמה-1 → סדר 33 הישן (ללא book_base_text)', () {
       expect(hashTableOrderForSchemaVersion(1), same(kHashTableOrderSchema1));
@@ -1115,8 +1193,8 @@ void main() {
       expect(kHashTableOrderSchema3.indexOf('link_suppressed_side'),
           kHashTableOrderSchema3.indexOf('link_coverage') + 1);
     });
-    test('סכמה-4 → סדר 37 הנוכחי (כולל line_ref + line_dh)', () {
-      expect(hashTableOrderForSchemaVersion(4), same(kHashTableOrder));
+    test('סכמה-4 → סדר 37 הקפוא (כולל line_ref + line_dh)', () {
+      expect(hashTableOrderForSchemaVersion(4), same(kHashTableOrderSchema4));
       expect(kHashTableOrder.length, 37);
       // מיד אחרי line_toc — אותו מיקום כמו בצד הקוטליני.
       expect(kHashTableOrder.indexOf('line_ref'),
@@ -1124,10 +1202,14 @@ void main() {
       expect(kHashTableOrder.indexOf('line_dh'),
           kHashTableOrder.indexOf('line_ref') + 1);
     });
+    test('סכמה-5 → אותו סדר טבלאות, עם חוזה העמודות החדש', () {
+      expect(hashTableOrderForSchemaVersion(5), same(kHashTableOrder));
+      expect(kHashTableOrder, same(kHashTableOrderSchema4));
+    });
     test('גרסת סכמה לא מוכרת → זורק PatchApplyException', () {
       expect(() => hashTableOrderForSchemaVersion(0),
           throwsA(isA<PatchApplyException>()));
-      expect(() => hashTableOrderForSchemaVersion(5),
+      expect(() => hashTableOrderForSchemaVersion(6),
           throwsA(isA<PatchApplyException>()));
     });
   });
