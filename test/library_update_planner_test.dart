@@ -56,8 +56,10 @@ void main() {
     int? localSchema = 1,
     ReleaseAsset? full = _fullAsset,
     String? tag = 'v3',
+    int? localDbSize,
+    LibraryUpdatePlanner? using,
   }) =>
-      planner.plan(
+      (using ?? planner).plan(
         localVersion: local,
         localSchemaVersion: localSchema,
         hasLocalVersionMeta: hasMeta,
@@ -65,6 +67,7 @@ void main() {
         edges: edges,
         latestFullDbAsset: full,
         latestReleaseTag: tag,
+        localDbSizeBytes: localDbSize,
       );
 
   group('LibraryUpdatePlanner', () {
@@ -386,6 +389,126 @@ void main() {
         ],
       );
       expect(p.kind, LibraryUpdatePlanKind.fullDownload);
+    });
+  });
+
+  group('עלות ההחלה מול הורדה מלאה', () {
+    // _edge(1, 2, size: s) פורס s*2 בייטים.
+    const dbSize = 1000000;
+
+    test('דלתא מתחת לסף → delta רגילה, לא כבדה', () {
+      final p = plan(
+        local: 1,
+        latest: 2,
+        edges: [_edge(1, 2, size: 100000)], // פרוס 200KB = 20% מה-DB
+        localDbSize: dbSize,
+      );
+      expect(p.kind, LibraryUpdatePlanKind.delta);
+      expect(p.isHeavyDelta, isFalse);
+      expect(p.heavyDeltaReason, isNull);
+      expect(p.deltaUncompressedBytes, 200000);
+    });
+
+    test('דלתא מעל הסף עם DB מלא זמין → delta מסומנת ככבדה, עם נימוק', () {
+      final p = plan(
+        local: 1,
+        latest: 2,
+        edges: [_edge(1, 2, size: 300000)], // פרוס 600KB = 60% מה-DB
+        localDbSize: dbSize,
+      );
+      expect(p.kind, LibraryUpdatePlanKind.delta);
+      expect(p.isHeavyDelta, isTrue);
+      expect(p.heavyDeltaReason, contains('0.6 MB'));
+      expect(p.heavyDeltaReason, contains('1.0 MB'));
+      expect(p.heavyDeltaReason, contains('זמן רב'));
+      expect(p.deltaUncompressedBytes, 600000);
+      // הצרכן יכול להחליף מסלול — הנתונים להורדה מלאה נשארים זמינים.
+      expect(p.fullDbAsset, _fullAsset);
+      expect(p.fullDbReleaseTag, 'v3');
+    });
+
+    test('גדלים ב-GB מוצגים עם ספרה אחרי הנקודה', () {
+      final p = plan(
+        local: 1,
+        latest: 2,
+        edges: [_edge(1, 2, size: 750 * 1024 * 1024)], // פרוס 1.5 GB
+        localDbSize: 2 * 1024 * 1024 * 1024,
+      );
+      expect(p.isHeavyDelta, isTrue);
+      expect(p.heavyDeltaReason, contains('1.5 GB'));
+      expect(p.heavyDeltaReason, contains('2.0 GB'));
+    });
+
+    test('סכימת השלבים נבדקת, לא שלב בודד', () {
+      final p = plan(
+        local: 1,
+        latest: 3,
+        edges: [_edge(1, 2, size: 90000), _edge(2, 3, size: 90000)],
+        localDbSize: dbSize, // סה"כ פרוס 360KB = 36%
+      );
+      expect(p.kind, LibraryUpdatePlanKind.delta);
+      expect(p.isHeavyDelta, isTrue);
+    });
+
+    test('מעל הסף בלי DB מלא → delta כבדה (אזהרה בלבד)', () {
+      final p = plan(
+        local: 1,
+        latest: 2,
+        edges: [_edge(1, 2, size: 300000)],
+        localDbSize: dbSize,
+        full: null,
+        tag: null,
+      );
+      expect(p.kind, LibraryUpdatePlanKind.delta);
+      expect(p.isHeavyDelta, isTrue);
+      expect(p.fullDbAsset, isNull);
+      expect(p.toFullDownloadFallback(), isNull);
+    });
+
+    test('גודל DB לא ידוע (null) או 0 → התנהגות ללא שינוי', () {
+      for (final size in [null, 0]) {
+        final p = plan(
+          local: 1,
+          latest: 2,
+          edges: [_edge(1, 2, size: 300000)],
+          localDbSize: size,
+        );
+        expect(p.kind, LibraryUpdatePlanKind.delta, reason: 'size=$size');
+        expect(p.isHeavyDelta, isFalse, reason: 'size=$size');
+      }
+    });
+
+    test('יחס מותאם משנה את ההכרעה', () {
+      final p = plan(
+        local: 1,
+        latest: 2,
+        edges: [_edge(1, 2, size: 100000)], // 20%
+        localDbSize: dbSize,
+        using: const LibraryUpdatePlanner(maxDeltaUncompressedRatio: 0.1),
+      );
+      expect(p.kind, LibraryUpdatePlanKind.delta);
+      expect(p.isHeavyDelta, isTrue);
+    });
+
+    test('תוכנית שאינה דלתא → deltaUncompressedBytes אפס, לא כבדה', () {
+      final p = plan(local: 1, latest: 2, edges: []);
+      expect(p.kind, LibraryUpdatePlanKind.fullDownload);
+      expect(p.deltaUncompressedBytes, 0);
+      expect(p.isHeavyDelta, isFalse);
+    });
+
+    test('דלתא כבדה עדיין מאפשרת מעבר להורדה מלאה', () {
+      final p = plan(
+        local: 1,
+        latest: 2,
+        edges: [_edge(1, 2, size: 300000)],
+        localDbSize: dbSize,
+      );
+      final fb = p.toFullDownloadFallback(reason: 'x');
+      expect(fb, isNotNull);
+      expect(fb!.kind, LibraryUpdatePlanKind.fullDownload);
+      expect(fb.isHeavyDelta, isFalse);
+      expect(fb.fullDbAsset, _fullAsset);
     });
   });
 }

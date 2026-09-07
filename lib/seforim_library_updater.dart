@@ -20,7 +20,8 @@ export 'src/services/library_db_recovery_service.dart'
     show LibraryDbRecoveryService, RecoveryResult, RecoveryAction;
 export 'src/services/library_update_discovery.dart'
     show LibraryUpdateDiscovery, LibraryDiscoveryResult;
-export 'src/services/library_update_planner.dart' show LibraryUpdatePlanner;
+export 'src/services/library_update_planner.dart'
+    show LibraryUpdatePlanner, kDefaultMaxDeltaUncompressedRatio;
 export 'src/services/local_db_version_reader.dart'
     show LocalDbVersionReader, LocalDbVersion;
 export 'src/services/logical_content_hasher.dart'
@@ -32,6 +33,7 @@ export 'src/services/patch_applier.dart'
         PatchApplyException,
         PatchHashMismatchStage,
         hashTableOrderForSchemaVersion,
-        kBooksTouchedTables;
+        kBooksTouchedTables,
+        kDefaultApplyChunkSize;
 export 'src/services/patch_downloader.dart'
     show PatchDownloader, PatchDownloadException, PatchDownloadCancelled;

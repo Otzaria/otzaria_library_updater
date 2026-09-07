@@ -2,6 +2,11 @@ import '../models/library_release.dart';
 import '../models/library_update_plan.dart';
 import '../models/patch_table_spec.dart';
 
+/// היחס המרבי בין גודל הדלתא הפרוס לגודל ה-DB המקומי שעדיין משתלם.
+/// החלת upserts על DB מאונדקס עולה פי כמה מכתיבה סדרתית של קובץ, ולכן דלתא
+/// שגדולה מרבע ה-DB תיושם לאט יותר משיימשך להוריד DB מלא ולפרוס אותו.
+const double kDefaultMaxDeltaUncompressedRatio = 0.25;
+
 /// בוחר את תוכנית העדכון: מסלול דלתא, הורדה מלאה, none, או blocked.
 ///
 /// פונקציה טהורה — אינה ניגשת לרשת או ל-DB. מקבלת את כל המידע שכבר נאסף
@@ -13,11 +18,16 @@ class LibraryUpdatePlanner {
   /// גרסת פורמט patch.db הגבוהה ביותר שה-applier בצרכן יודע להחיל.
   final int supportedPatchFormatVersion;
 
+  /// ראו [kDefaultMaxDeltaUncompressedRatio].
+  final double maxDeltaUncompressedRatio;
+
   const LibraryUpdatePlanner({
     this.supportedDbSchemaVersion = kSupportedDbSchemaVersion,
     this.supportedPatchFormatVersion = kSupportedPatchFormatVersion,
+    this.maxDeltaUncompressedRatio = kDefaultMaxDeltaUncompressedRatio,
   })  : assert(supportedDbSchemaVersion >= 1),
-        assert(supportedPatchFormatVersion >= 1);
+        assert(supportedPatchFormatVersion >= 1),
+        assert(maxDeltaUncompressedRatio > 0);
 
   /// בונה תוכנית עדכון.
   ///
@@ -28,6 +38,9 @@ class LibraryUpdatePlanner {
   /// [latestVersion] — הגרסה הגבוהה ביותר הזמינה ב-releases.
   /// [edges] — כל ה-patches הזמינים.
   /// [latestFullDbAsset] / [latestReleaseTag] — ה-DB המלא ל-fallback.
+  /// [localDbSizeBytes] — גודל ה-DB המקומי; כשהוא ידוע, מסלול דלתא שעלות
+  /// ההחלה שלו גבוהה מדי מסומן ב-`isHeavyDelta` (ראו
+  /// [maxDeltaUncompressedRatio]) — הבחירה נשארת של המשתמש.
   LibraryUpdatePlan plan({
     required int localVersion,
     required int? localSchemaVersion,
@@ -36,6 +49,7 @@ class LibraryUpdatePlanner {
     required List<PatchEdge> edges,
     ReleaseAsset? latestFullDbAsset,
     String? latestReleaseTag,
+    int? localDbSizeBytes,
   }) {
     if (!hasLocalVersionMeta) {
       return _fullOrBlocked(
@@ -80,12 +94,23 @@ class LibraryUpdatePlanner {
       fromSchemaVersion: localSchemaVersion,
     );
     if (path != null && path.isNotEmpty) {
+      final deltaBytes =
+          path.fold<int>(0, (sum, e) => sum + e.uncompressedSize);
+      final dbBytes = (localDbSizeBytes != null && localDbSizeBytes > 0)
+          ? localDbSizeBytes
+          : null;
+      final isHeavy =
+          dbBytes != null && deltaBytes > dbBytes * maxDeltaUncompressedRatio;
       return LibraryUpdatePlan.delta(
         localVersion: localVersion,
         targetVersion: latestVersion,
         steps: path,
         fullDbAsset: latestFullDbAsset,
         fullDbReleaseTag: latestReleaseTag,
+        heavyDeltaReason: isHeavy
+            ? 'מסלול הדלתא פורס ${_size(deltaBytes)} לעומת DB מקומי בגודל '
+                '${_size(dbBytes)}, ושלב ההחלה עלול להימשך זמן רב'
+            : null,
       );
     }
 
@@ -110,6 +135,15 @@ class LibraryUpdatePlanner {
               'patch $supportedPatchFormatVersion) — נדרש עדכון אפליקציה'
           : 'אין מסלול דלתא רציף מגרסה $localVersion לגרסה $latestVersion',
     );
+  }
+
+  /// גודל קריא בטקסט LTR-בטוח: GB מעל ג'יגה-בייט אחד, אחרת MB.
+  String _size(int bytes) {
+    const mb = 1024 * 1024;
+    if (bytes >= 1024 * mb) {
+      return '${(bytes / (1024 * mb)).toStringAsFixed(1)} GB';
+    }
+    return '${(bytes / mb).toStringAsFixed(1)} MB';
   }
 
   LibraryUpdatePlan _fullOrBlocked({
