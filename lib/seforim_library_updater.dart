@@ -23,13 +23,15 @@ export 'src/services/library_update_discovery.dart'
 export 'src/services/library_update_planner.dart' show LibraryUpdatePlanner;
 export 'src/services/local_db_version_reader.dart'
     show LocalDbVersionReader, LocalDbVersion;
-export 'src/services/logical_content_hasher.dart' show LogicalContentHasher;
+export 'src/services/logical_content_hasher.dart'
+    show LogicalContentHasher, LogicalContentHashReport;
 export 'src/services/patch_applier.dart'
     show
         PatchApplier,
         PatchApplyResult,
         PatchApplyException,
         PatchHashMismatchStage,
+        hashTableOrderForSchemaVersion,
         kBooksTouchedTables;
 export 'src/services/patch_downloader.dart'
     show PatchDownloader, PatchDownloadException, PatchDownloadCancelled;

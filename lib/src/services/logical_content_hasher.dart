@@ -42,49 +42,98 @@ class LogicalContentHasher {
   /// [tableOrder] — סדר הטבלאות לשקלול ב-hash. ברירת מחדל: [kHashTableOrder]
   /// (34 טבלאות, סכמה-2). ה-caller בוחר את הסדר לפי גרסת הסכמה של ה-DB.
   String compute(sqlite3.Database db,
+          {List<String> tableOrder = kHashTableOrder,
+          void Function(int bytesHashed)? onProgress}) =>
+      _compute(db,
+          tableOrder: tableOrder,
+          onProgress: onProgress,
+          includeTableHashes: false).wholeHash!;
+
+  /// מחשב במעבר יחיד את ה-hash הכולל ואת ה-hash של כל טבלה בנפרד
+  /// (`tableHash(t) = sha256` של בדיוק הבתים שהטבלה תורמת לזרם הכולל).
+  ///
+  /// [only] — כשניתן, מחושבות רק הטבלאות שבו (בסדר [tableOrder]),
+  /// ו-[LogicalContentHashReport.wholeHash] יהיה null.
+  LogicalContentHashReport computeReport(sqlite3.Database db,
       {List<String> tableOrder = kHashTableOrder,
+      Set<String>? only,
+      void Function(int bytesHashed)? onProgress}) =>
+      _compute(db,
+          tableOrder: tableOrder,
+          only: only,
+          onProgress: onProgress,
+          includeTableHashes: true);
+
+  /// המימוש המשותף שומר על [compute] זול: המסלול הוותיק מחשב SHA יחיד בלבד.
+  /// hash לכל טבלה מחושב רק דרך [computeReport], שבו הוא נדרש בפועל.
+  LogicalContentHashReport _compute(sqlite3.Database db,
+      {required List<String> tableOrder,
+      required bool includeTableHashes,
+      Set<String>? only,
       void Function(int bytesHashed)? onProgress}) {
-    final digestSink = _DigestSink();
-    final shaSink = sha256.startChunkedConversion(digestSink);
-    final out = _BufferedByteSink(shaSink, onProgress: onProgress);
+    assert(includeTableHashes || only == null);
+    final wholeDigest = only == null ? _DigestSink() : null;
+    final wholeSink =
+        wholeDigest == null ? null : sha256.startChunkedConversion(wholeDigest);
+    final out = _BufferedByteSink(wholeSink, onProgress: onProgress);
+    final tableHashes = <String, String>{};
+    final tableBytes = <String, int>{};
 
     for (final table in tableOrder) {
+      if (only != null && !only.contains(table)) continue;
+      final tableDigest = includeTableHashes ? _DigestSink() : null;
+      final tableSink = tableDigest == null
+          ? null
+          : sha256.startChunkedConversion(tableDigest);
+      if (tableSink != null) out.beginTable(tableSink);
+
       out.addBytes(utf8.encode(' table:$table '));
       final cols = _readColumnsCanonical(db, table);
-      if (cols == null) continue;
-      out.addBytes(utf8.encode('cols:${cols.join(',')}'));
-      out.addByte(_nullTag);
+      if (cols != null) {
+        out.addBytes(utf8.encode('cols:${cols.join(',')}'));
+        out.addByte(_nullTag);
 
-      // ל-text קוראים את ה-bytes הגולמיים (CAST AS BLOB) כדי לא לאבד BOM
-      // מוביל — ה-decoder של Dart מסיר U+FEFF, ולכן String רגיל היה משנה את
-      // ה-hash. typeof קובע את בית-הסוג; ה-CASE מחזיר blob רק ל-text.
-      final selectCols = cols
-          .map((c) => 'typeof("$c"),CASE WHEN typeof("$c")=\'text\' '
-              'THEN CAST("$c" AS BLOB) ELSE "$c" END')
-          .join(',');
-      final orderBy =
-          cols.contains('id') ? 'id' : cols.map((c) => '"$c"').join(',');
-      final stmt =
-          db.prepare('SELECT $selectCols FROM "$table" ORDER BY $orderBy');
-      try {
-        final cursor = stmt.selectCursor(const []);
-        while (cursor.moveNext()) {
-          final values = cursor.current.values;
-          for (var i = 0; i < values.length; i += 2) {
-            _encodeCell(out, values[i] as String, values[i + 1]);
+        // ל-text קוראים את ה-bytes הגולמיים (CAST AS BLOB) כדי לא לאבד BOM
+        // מוביל — ה-decoder של Dart מסיר U+FEFF, ולכן String רגיל היה משנה את
+        // ה-hash. typeof קובע את בית-הסוג; ה-CASE מחזיר blob רק ל-text.
+        final selectCols = cols
+            .map((c) => 'typeof("$c"),CASE WHEN typeof("$c")=\'text\' '
+                'THEN CAST("$c" AS BLOB) ELSE "$c" END')
+            .join(',');
+        final orderBy =
+            cols.contains('id') ? 'id' : cols.map((c) => '"$c"').join(',');
+        final stmt =
+            db.prepare('SELECT $selectCols FROM "$table" ORDER BY $orderBy');
+        try {
+          final cursor = stmt.selectCursor(const []);
+          while (cursor.moveNext()) {
+            final values = cursor.current.values;
+            for (var i = 0; i < values.length; i += 2) {
+              _encodeCell(out, values[i] as String, values[i + 1]);
+            }
+            out.addByte(_rowSeparator);
           }
-          out.addByte(_rowSeparator);
+        } finally {
+          stmt.close();
         }
-      } finally {
-        stmt.close();
+      }
+
+      if (tableSink != null) {
+        tableBytes[table] = out.endTable();
+        tableSink.close();
+        tableHashes[table] = tableDigest!.digest.toString();
       }
     }
 
     out.flush();
     // דיווח סופי מדויק — מאפשר ל-caller לשמור את סך-הבתים האמיתי לריצה הבאה.
     onProgress?.call(out.totalHashed);
-    shaSink.close();
-    return digestSink.digest.toString();
+    wholeSink?.close();
+    return LogicalContentHashReport(
+      wholeHash: wholeDigest?.digest.toString(),
+      tableHashes: tableHashes,
+      tableBytes: tableBytes,
+    );
   }
 
   /// קורא את שמות העמודות ממוינים אלפביתית, או null אם הטבלה אינה קיימת.
@@ -116,12 +165,37 @@ class LogicalContentHasher {
   }
 }
 
+/// תוצאת [LogicalContentHasher.computeReport] — hash כולל, hash לכל טבלה
+/// ומספר הבתים שהוזרמו לכל טבלה (רמז התקדמות לריצה הבאה).
+class LogicalContentHashReport {
+  /// ה-hash של כל זרם הטבלאות ברצף. null כשבוקשה תת-קבוצה (`only`), כי אז
+  /// לא הוזרמו כל הטבלאות.
+  final String? wholeHash;
+
+  /// hash לכל טבלה שחושבה, לפי סדר ה-hash.
+  final Map<String, String> tableHashes;
+
+  /// מספר הבתים שהוזרמו ל-SHA עבור כל טבלה שחושבה.
+  final Map<String, int> tableBytes;
+
+  const LogicalContentHashReport({
+    required this.wholeHash,
+    required this.tableHashes,
+    required this.tableBytes,
+  });
+}
+
 /// חוצץ בינארי שמצטבר ומוזרם ל-SHA-256 מדי ~1MB. מחליף מיליוני `add` זעירים
 /// (בית/תא) בעדכונים גדולים בודדים, בלי לשנות את זרם הבתים.
 class _BufferedByteSink {
   _BufferedByteSink(this._sink, {this.onProgress});
 
-  final ByteConversionSink _sink;
+  /// ה-digest הכולל. null כשבוקשה תת-קבוצה של טבלאות ואין hash כולל.
+  final ByteConversionSink? _sink;
+
+  /// ה-digest של הטבלה הנוכחית — מקבל בדיוק את אותם טווחי בתים.
+  ByteConversionSink? _tableSink;
+  int _tableStart = 0;
   final void Function(int bytesHashed)? onProgress;
   static const int _capacity = 1 << 20; // 1MB
   static const int _progressInterval = 16 << 20; // 16MB
@@ -131,6 +205,21 @@ class _BufferedByteSink {
   int _lastReported = 0;
 
   int get totalHashed => _totalHashed;
+
+  /// פותח טבלה חדשה: מרוקן את החוצץ כדי שה-digest של הטבלה יקבל בדיוק את
+  /// הבתים שלה — SHA-256 אינו תלוי בגבולות ה-chunks, אז ה-hash הכולל לא משתנה.
+  void beginTable(ByteConversionSink sink) {
+    flush();
+    _tableSink = sink;
+    _tableStart = _totalHashed;
+  }
+
+  /// סוגר את הטבלה הנוכחית ומחזיר את מספר הבתים שהוזרמו עבורה.
+  int endTable() {
+    flush();
+    _tableSink = null;
+    return _totalHashed - _tableStart;
+  }
 
   void addByte(int byte) {
     if (_length == _capacity) flush();
@@ -144,7 +233,8 @@ class _BufferedByteSink {
     // חובה לפני, אחרת סדר הבתים ישתבש.
     if (len >= _capacity) {
       flush();
-      _sink.add(bytes);
+      _sink?.add(bytes);
+      _tableSink?.add(bytes);
       _totalHashed += len;
       _reportIfDue();
       return;
@@ -159,7 +249,9 @@ class _BufferedByteSink {
   /// ניתן לעשות שימוש חוזר ב-[_buffer] מיד אחרי.
   void flush() {
     if (_length == 0) return;
-    _sink.add(Uint8List.sublistView(_buffer, 0, _length));
+    final view = Uint8List.sublistView(_buffer, 0, _length);
+    _sink?.add(view);
+    _tableSink?.add(view);
     _length = 0;
     _reportIfDue();
   }

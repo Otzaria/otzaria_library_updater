@@ -61,6 +61,42 @@ void main() {
       expect(DeltaManifest.fromJson(json).patchFormatVersion, 4);
     });
 
+    test('מפענח את שתי מפות ה-hash לפי טבלה', () {
+      final json = jsonDecode(validJson) as Map<String, dynamic>;
+      json['fromTableContentHashes'] = {'source': 'aa', 'book': 'bb'};
+      json['toTableContentHashes'] = {'source': 'aa', 'book': 'cc'};
+      final m = DeltaManifest.fromJson(json);
+      expect(m.fromTableContentHashes, {'source': 'aa', 'book': 'bb'});
+      expect(m.toTableContentHashes, {'source': 'aa', 'book': 'cc'});
+    });
+
+    test('מפות חסרות → null', () {
+      final m =
+          DeltaManifest.fromJson(jsonDecode(validJson) as Map<String, dynamic>);
+      expect(m.fromTableContentHashes, isNull);
+      expect(m.toTableContentHashes, isNull);
+    });
+
+    test('רק אחת מהמפות קיימת → שתיהן null', () {
+      final json = jsonDecode(validJson) as Map<String, dynamic>;
+      json['toTableContentHashes'] = {'source': 'aa'};
+      final m = DeltaManifest.fromJson(json);
+      expect(m.toTableContentHashes, isNull);
+      expect(m.fromTableContentHashes, isNull);
+    });
+
+    test('מפה בטיפוס לא תקין → FormatException', () {
+      final json = jsonDecode(validJson) as Map<String, dynamic>;
+      json['fromTableContentHashes'] = ['source'];
+      expect(() => DeltaManifest.fromJson(json), throwsFormatException);
+
+      json['fromTableContentHashes'] = {'source': 1};
+      expect(() => DeltaManifest.fromJson(json), throwsFormatException);
+
+      json['fromTableContentHashes'] = {'source': ''};
+      expect(() => DeltaManifest.fromJson(json), throwsFormatException);
+    });
+
     test('סלחני לשדות לא מוכרים', () {
       final json = jsonDecode(validJson) as Map<String, dynamic>;
       json['someFutureField'] = {'a': 1};

@@ -33,6 +33,9 @@ class PatchApplyResult {
   final int migrations;
   final Map<String, int> upserts;
   final Map<String, int> deletes;
+
+  /// ה-hash הכולל של ה-DB אחרי ה-apply. באימות חלקי לא חושב בפועל — זה
+  /// `toContentHash` שבמניפסט.
   final String resultHash;
 
   /// מזהי הספרים שתוכן האינדקס שלהם הושפע מה-patch — שינויים בטבלאות
@@ -45,6 +48,16 @@ class PatchApplyResult {
   /// בטבלאות כאלה צריך להתייחס ל-[hasChangesOutsideBooksTouched] כ-trigger
   /// לרענון מלא.
   final Set<int> booksTouched;
+
+  /// הטבלאות שאומתו בפועל מול `toTableContentHashes`. באימות DB מלא — ריק.
+  final List<String> verifiedTables;
+
+  /// הטבלאות שדולגו כי ה-patch לא נגע בהן וה-hash שלהן זהה ב-from וב-to.
+  /// הצרכן יכול לאמת אותן אחרי ה-commit (ראו [PatchApplier.verifyTableHashes]).
+  final List<String> deferredTables;
+
+  /// מספר הבתים שהוזרמו ל-SHA לכל טבלה שאומתה — רמז התקדמות לריצה הבאה.
+  final Map<String, int> verifyTableBytes;
 
   /// האם ה-patch שינה טבלאות שאינן מכוסות ב-[booksTouched] (מלבד schema_meta,
   /// שמתעדכן בכל patch, ו-line_ref/line_dh, שאינן תוכן חיפוש — ראו
@@ -65,6 +78,9 @@ class PatchApplyResult {
     required this.deletes,
     required this.resultHash,
     this.booksTouched = const {},
+    this.verifiedTables = const [],
+    this.deferredTables = const [],
+    this.verifyTableBytes = const {},
   });
 }
 
@@ -92,10 +108,14 @@ class PatchApplyException implements Exception {
   /// null בכשל שאינו hash; אחרת מציין איזה אימות hash נכשל.
   final PatchHashMismatchStage? hashMismatchStage;
 
+  /// שמות הטבלאות שה-hash שלהן לא תאם, כשהאימות היה לפי טבלאות. null אחרת.
+  final List<String>? mismatchedTables;
+
   const PatchApplyException(
     this.message, {
     bool isContentMismatch = false,
     this.hashMismatchStage,
+    this.mismatchedTables,
   }) : isContentMismatch = isContentMismatch || hashMismatchStage != null;
   @override
   String toString() => 'PatchApplyException: $message';
@@ -149,6 +169,13 @@ class PatchApplier {
   /// [verifyFromHash] — אם פעיל, מחשב את ה-hash המקומי לפני apply ומשווה ל-
   /// `fromContentHash` (יקר אך מזהה DB ששונה ידנית/corruption).
   /// [checkForeignKeys] — אם פעיל, מוודא ש-`foreign_key_check` לא גדל.
+  /// [verifyTableBytesHint] — בתים לכל טבלה מריצה קודמת, למד התקדמות מדויק
+  /// כשהמניפסט מאפשר אימות חלקי (ראו [PatchApplyResult.deferredTables]).
+  /// [enablePartialTableVerification] — מאפשר להחליף את אימות ה-DB המלא
+  /// באימות הטבלאות שהשתנו ובדחיית היתר. ברירת המחדל היא false כדי לשמר את
+  /// חוזה [apply] עבור צרכנים קיימים: חזרה מוצלחת פירושה שה-DB כולו אומת
+  /// לפני ה-commit. צרכן שמפעיל זאת חייב להריץ [verifyTableHashes] על
+  /// [PatchApplyResult.deferredTables] אחרי ה-commit.
   PatchApplyResult apply({
     required String dbPath,
     required String patchPath,
@@ -158,6 +185,8 @@ class PatchApplier {
     void Function(String stage)? onStage,
     void Function(int hashedBytes, int totalBytes)? onVerifyProgress,
     int? verifyTotalBytesHint,
+    Map<String, int>? verifyTableBytesHint,
+    bool enablePartialTableVerification = false,
   }) {
     // ── preflight: שני סדרי ה-hash נפתרים לפני כל פתיחה/כתיבה — גרסת סכמה
     // לא מוכרת (from או to) זורקת כאן, גם כש-verifyFromHash כבוי.
@@ -258,19 +287,60 @@ class PatchApplier {
       }
 
       onStage?.call('verifyToHash');
-      if (verifyProgress != null) refreshTotal();
       // ה-DB *אחרי* apply הוא בסכמת היעד — הסדר נבחר לפי toSchemaVersion.
-      final resultHash = hasher.compute(
-        db,
-        tableOrder: toOrder,
-        onProgress: verifyProgress,
-      );
-      if (resultHash != manifest.toContentHash) {
-        throw PatchApplyException(
-          'ה-hash אחרי apply ($resultHash) אינו תואם ל-toContentHash '
-          '(${manifest.toContentHash})',
-          hashMismatchStage: PatchHashMismatchStage.toContentHash,
+      final toTables = enablePartialTableVerification
+          ? _tablesToVerify(db, manifest, fromOrder, toOrder)
+          : null;
+      final String resultHash;
+      var verifiedTables = const <String>[];
+      var deferredTables = const <String>[];
+      var verifyTableBytes = const <String, int>{};
+      if (toTables == null) {
+        if (verifyProgress != null) refreshTotal();
+        resultHash = hasher.compute(
+          db,
+          tableOrder: toOrder,
+          onProgress: verifyProgress,
         );
+        if (resultHash != manifest.toContentHash) {
+          throw PatchApplyException(
+            'ה-hash אחרי apply ($resultHash) אינו תואם ל-toContentHash '
+            '(${manifest.toContentHash})',
+            hashMismatchStage: PatchHashMismatchStage.toContentHash,
+          );
+        }
+      } else {
+        final expected = manifest.toTableContentHashes!;
+        if (verifyProgress != null) {
+          totalBytes = _hintedTotal(verifyTableBytesHint, toTables);
+          if (totalBytes == 0) refreshTotal();
+        }
+        final report = hasher.computeReport(
+          db,
+          tableOrder: toOrder,
+          only: toTables.toSet(),
+          onProgress: verifyProgress,
+        );
+        final mismatched = [
+          for (final t in toTables)
+            if (report.tableHashes[t] != expected[t]) t,
+        ];
+        if (mismatched.isNotEmpty) {
+          throw PatchApplyException(
+            'ה-hash אחרי apply אינו תואם ל-toTableContentHashes בטבלאות: '
+            '${mismatched.join(', ')}',
+            hashMismatchStage: PatchHashMismatchStage.toContentHash,
+            mismatchedTables: mismatched,
+          );
+        }
+        verifiedTables = toTables;
+        deferredTables = [
+          for (final t in toOrder)
+            if (!report.tableHashes.containsKey(t)) t,
+        ];
+        verifyTableBytes = report.tableBytes;
+        // אומת לפי טבלאות; ה-hash הכולל הצפוי הוא זה שבמניפסט.
+        resultHash = manifest.toContentHash;
       }
 
       onStage?.call('commit');
@@ -286,6 +356,9 @@ class PatchApplier {
         deletes: deletes,
         resultHash: resultHash,
         booksTouched: booksTouched,
+        verifiedTables: verifiedTables,
+        deferredTables: deferredTables,
+        verifyTableBytes: verifyTableBytes,
       );
     } catch (_) {
       if (inTransaction) {
@@ -302,6 +375,80 @@ class PatchApplier {
     } finally {
       db.close();
     }
+  }
+
+  /// מאמת את [tables] ב-DB שב-[dbPath] (חיבור קריאה-בלבד) מול [expected],
+  /// ומחזיר את שמות הטבלאות שלא תאמו (ריק = הכול תואם).
+  List<String> verifyTableHashes({
+    required String dbPath,
+    required int schemaVersion,
+    required Map<String, String> expected,
+    required List<String> tables,
+    void Function(int hashedBytes, int totalBytes)? onProgress,
+    Map<String, int>? tableBytesHint,
+  }) {
+    final order = hashTableOrderForSchemaVersion(schemaVersion);
+    final only = tables.toSet();
+    var totalBytes = _hintedTotal(tableBytesHint, tables);
+    if (totalBytes == 0) totalBytes = File(dbPath).lengthSync();
+    final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
+    try {
+      final report = hasher.computeReport(
+        db,
+        tableOrder: order,
+        only: only,
+        onProgress: onProgress == null
+            ? null
+            : (bytes) => onProgress(bytes, totalBytes),
+      );
+      return [
+        for (final t in order)
+          if (report.tableHashes.containsKey(t) &&
+              report.tableHashes[t] != expected[t])
+            t,
+      ];
+    } finally {
+      db.close();
+    }
+  }
+
+  /// סכום רמזי הבתים עבור [tables]; 0 כשאין רמז שימושי.
+  int _hintedTotal(Map<String, int>? hint, List<String> tables) {
+    if (hint == null) return 0;
+    var sum = 0;
+    for (final t in tables) {
+      sum += hint[t] ?? 0;
+    }
+    return sum;
+  }
+
+  /// רשימת הטבלאות לאימות לפי כלל האימות החלקי, או null כשהמניפסט אינו נושא
+  /// מפות עקביות — ואז מאמתים את ה-DB כולו כמו קודם.
+  List<String>? _tablesToVerify(sqlite3.Database db, DeltaManifest manifest,
+      List<String> fromOrder, List<String> toOrder) {
+    final from = manifest.fromTableContentHashes;
+    final to = manifest.toTableContentHashes;
+    if (from == null || to == null) return null;
+    if (!_sameKeys(from.keys, fromOrder) || !_sameKeys(to.keys, toOrder)) {
+      return null;
+    }
+    return [
+      for (final t in toOrder)
+        if (t == 'schema_meta' ||
+            from[t] != to[t] ||
+            _patchHasRows(db, 'upsert_$t') ||
+            _patchHasRows(db, 'delete_$t'))
+          t,
+    ];
+  }
+
+  bool _sameKeys(Iterable<String> keys, List<String> order) =>
+      keys.length == order.length && keys.toSet().containsAll(order);
+
+  /// האם ל-patch יש טבלת [name] עם שורה אחת לפחות.
+  bool _patchHasRows(sqlite3.Database db, String name) {
+    if (!_hasTable(db, 'patch', name)) return false;
+    return db.select('SELECT 1 FROM patch."$name" LIMIT 1').isNotEmpty;
   }
 
   void _assertPatchCompatible(sqlite3.Database db, DeltaManifest manifest) {

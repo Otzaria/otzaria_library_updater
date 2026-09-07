@@ -21,6 +21,18 @@ String _hashWithOrder(String dbPath, List<String> order) {
   }
 }
 
+/// ה-hash לכל טבלה בסדר סכמה-2 — הצורה שבה המניפסט נושא את המפות.
+Map<String, String> _tableHashesOf(String dbPath) {
+  final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
+  try {
+    return _hasher
+        .computeReport(db, tableOrder: kHashTableOrderSchema2)
+        .tableHashes;
+  } finally {
+    db.close();
+  }
+}
+
 String _hashOf(String dbPath) {
   final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
   try {
@@ -42,6 +54,8 @@ DeltaManifest _manifest({
   int toSchema = 2,
   int? patchFormat,
   bool omitPatchFormat = false,
+  Map<String, String>? fromTables,
+  Map<String, String>? toTables,
 }) =>
     DeltaManifest(
       fromVersion: from,
@@ -52,6 +66,8 @@ DeltaManifest _manifest({
           omitPatchFormat ? null : (patchFormat ?? (toSchema >= 4 ? 4 : null)),
       fromContentHash: fromHash,
       toContentHash: toHash,
+      fromTableContentHashes: fromTables,
+      toTableContentHashes: toTables,
       patchFiles: const [
         PatchFileEntry(
           file: 'p.db.zst',
@@ -1097,7 +1113,8 @@ void main() {
     test('המיגרציה רצה לפני snapshot מלא ומעדכנת שורות עם PK קיים', () {
       final base = '${tmp.path}/schema4_v26.db';
       final baseDb = sqlite3.sqlite3.open(base);
-      baseDb.execute('CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT)');
+      baseDb.execute(
+          'CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT)');
       baseDb.execute("INSERT INTO schema_meta VALUES "
           "('db_version','26'),('db_schema_version','4')");
       baseDb.execute('CREATE TABLE line_dh ('
@@ -1110,7 +1127,8 @@ void main() {
 
       final expected = '${tmp.path}/schema5_v27.db';
       final expectedDb = sqlite3.sqlite3.open(expected);
-      expectedDb.execute('CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT)');
+      expectedDb.execute(
+          'CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT)');
       expectedDb.execute("INSERT INTO schema_meta VALUES "
           "('db_version','27'),('db_schema_version','5')");
       expectedDb.execute('CREATE TABLE line_dh ('
@@ -1124,10 +1142,12 @@ void main() {
 
       final patch = '${tmp.path}/schema4-5.db';
       final patchDb = sqlite3.sqlite3.open(patch);
-      patchDb.execute('CREATE TABLE patch_meta (key TEXT PRIMARY KEY, value TEXT)');
+      patchDb.execute(
+          'CREATE TABLE patch_meta (key TEXT PRIMARY KEY, value TEXT)');
       patchDb.execute("INSERT INTO patch_meta VALUES "
           "('schema_version','4'),('from_version','26'),('to_version','27')");
-      patchDb.execute('CREATE TABLE migrations (version INTEGER PRIMARY KEY, sql TEXT)');
+      patchDb.execute(
+          'CREATE TABLE migrations (version INTEGER PRIMARY KEY, sql TEXT)');
       patchDb.execute('INSERT INTO migrations VALUES (1, ?)', [
         "ALTER TABLE \"line_dh\" ADD COLUMN \"dhDisplay\" TEXT NOT NULL DEFAULT ''"
       ]);
@@ -1168,6 +1188,422 @@ void main() {
         ['מאימתי קורין', 'משעה שהכהנים'],
       );
       applied.close();
+    });
+  });
+
+  group('אימות חלקי לפי טבלאות', () {
+    // כל ה-DB-ים כאן בסכמה-2, כדי שהמפות במניפסט יתאימו למפתחות
+    // [kHashTableOrderSchema2] — התנאי לבחירת המסלול החלקי.
+    String buildDb(
+      String name, {
+      required int version,
+      List<List> sourceRows = const [],
+      List<List>? bookRows,
+    }) {
+      final path = '${tmp.path}/$name.db';
+      final db = sqlite3.sqlite3.open(path);
+      db.execute('CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT)');
+      db.execute("INSERT INTO schema_meta VALUES ('db_version','$version'),"
+          "('db_schema_version','2')");
+      db.execute('CREATE TABLE source (id INTEGER PRIMARY KEY, name TEXT)');
+      for (final r in sourceRows) {
+        db.execute('INSERT INTO source VALUES (?,?)', [r[0], r[1]]);
+      }
+      if (bookRows != null) {
+        db.execute('CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT)');
+        for (final r in bookRows) {
+          db.execute('INSERT INTO book VALUES (?,?)', [r[0], r[1]]);
+        }
+      }
+      db.close();
+      return path;
+    }
+
+    test('מפות hash אינן משנות את אימות ברירת המחדל המלא', () {
+      final local = buildDb('default_full_local', version: 1, sourceRows: [
+        [1, 'aleph'],
+      ], bookRows: [
+        [1, 'סטה'],
+      ]);
+      final canonFrom = buildDb('default_full_from', version: 1, sourceRows: [
+        [1, 'aleph'],
+      ], bookRows: [
+        [1, 'קנוני'],
+      ]);
+      final canonTo = buildDb('default_full_to', version: 2, sourceRows: [
+        [1, 'aleph'],
+        [2, 'bet'],
+      ], bookRows: [
+        [1, 'קנוני'],
+      ]);
+      final before = _hashOf(local);
+      final patch = buildPatchDb(from: 1, to: 2, upsertSource: [
+        [2, 'bet'],
+      ]);
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: _hashOf(canonFrom),
+        toHash: _hashOf(canonTo),
+        fromTables: _tableHashesOf(canonFrom),
+        toTables: _tableHashesOf(canonTo),
+      );
+
+      expect(
+        () => _applier.apply(
+          dbPath: local,
+          patchPath: patch,
+          manifest: manifest,
+          verifyFromHash: false,
+        ),
+        throwsA(isA<PatchApplyException>()
+            .having((e) => e.mismatchedTables, 'mismatchedTables', isNull)),
+      );
+      expect(_hashOf(local), before);
+    });
+
+    test('מאמת רק את הטבלאות שהשתנו ומדווח על השאר כדחויות', () {
+      final base = buildDb('partial_base', version: 1, sourceRows: [
+        [1, 'aleph'],
+        [2, 'bet'],
+      ]);
+      final expected = buildDb('partial_expected', version: 2, sourceRows: [
+        [1, 'ALEPH'],
+        [2, 'bet'],
+      ]);
+      final patch = buildPatchDb(from: 1, to: 2, upsertSource: [
+        [1, 'ALEPH'],
+      ]);
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: _hashOf(base),
+        toHash: _hashOf(expected),
+        fromTables: _tableHashesOf(base),
+        toTables: _tableHashesOf(expected),
+      );
+
+      final result = _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: manifest,
+        enablePartialTableVerification: true,
+      );
+
+      // source השתנתה (וגם נגע בה ה-patch), schema_meta תמיד באימות.
+      expect(result.verifiedTables, ['source', 'schema_meta']);
+      expect(result.verifyTableBytes.keys, ['source', 'schema_meta']);
+      expect(result.deferredTables, isNot(contains('source')));
+      expect(result.deferredTables, contains('book'));
+      expect(
+        result.verifiedTables.length + result.deferredTables.length,
+        kHashTableOrderSchema2.length,
+      );
+      expect(result.resultHash, manifest.toContentHash);
+      expect(_hashOf(base), manifest.toContentHash);
+    });
+
+    test('טבלה שה-patch נגע בה בלי לשנות את ה-hash שלה עדיין מאומתת', () {
+      final base = buildDb('touched_same_base', version: 1, sourceRows: [
+        [1, 'aleph'],
+      ]);
+      final expected =
+          buildDb('touched_same_expected', version: 2, sourceRows: [
+        [1, 'aleph'],
+      ]);
+      // upsert של שורה זהה: from[source] == to[source], אך יש שורות ב-patch.
+      final patch = buildPatchDb(from: 1, to: 2, upsertSource: [
+        [1, 'aleph'],
+      ]);
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: _hashOf(base),
+        toHash: _hashOf(expected),
+        fromTables: _tableHashesOf(base),
+        toTables: _tableHashesOf(expected),
+      );
+
+      final result = _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: manifest,
+        enablePartialTableVerification: true,
+      );
+
+      expect(result.verifiedTables, contains('source'));
+      expect(result.deferredTables, isNot(contains('source')));
+    });
+
+    test('טבלה שה-hash שלה שונה במניפסט מאומתת גם בלי שורות ב-patch', () {
+      final base = buildDb('hash_only_base', version: 1, bookRows: [
+        [1, 'בראשית'],
+      ]);
+      final expected = buildDb('hash_only_expected', version: 2, bookRows: [
+        [1, 'בראשית'],
+      ]);
+      final patch = buildPatchDb(from: 1, to: 2);
+      // from[book] "אחר" מדמה שינוי שהגיע ממיגרציה ולא משורות patch.
+      final fromTables = Map.of(_tableHashesOf(base))..['book'] = 'stale';
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: _hashOf(base),
+        toHash: _hashOf(expected),
+        fromTables: fromTables,
+        toTables: _tableHashesOf(expected),
+      );
+
+      final result = _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: manifest,
+        enablePartialTableVerification: true,
+      );
+
+      expect(result.verifiedTables, contains('book'));
+      expect(result.deferredTables, isNot(contains('book')));
+    });
+
+    test('רמז הבתים לכל טבלה קובע את ה-total של מד ההתקדמות', () {
+      final base = buildDb('hint_base', version: 1, sourceRows: [
+        [1, 'aleph'],
+      ]);
+      final expected = buildDb('hint_expected', version: 2, sourceRows: [
+        [1, 'aleph'],
+        [2, 'bet'],
+      ]);
+      final patch = buildPatchDb(from: 1, to: 2, upsertSource: [
+        [2, 'bet'],
+      ]);
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: _hashOf(base),
+        toHash: _hashOf(expected),
+        fromTables: _tableHashesOf(base),
+        toTables: _tableHashesOf(expected),
+      );
+
+      var lastTotal = -1;
+      _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: manifest,
+        verifyFromHash: false,
+        enablePartialTableVerification: true,
+        onVerifyProgress: (_, total) => lastTotal = total,
+        verifyTableBytesHint: const {
+          'source': 100,
+          'schema_meta': 50,
+          'book': 999999,
+        },
+      );
+      expect(lastTotal, 150);
+    });
+
+    test('אי-התאמה בטבלה שה-patch נגע בה מדווחת בשמה ומגלגלת לאחור', () {
+      final base = buildDb('mismatch_base', version: 1, sourceRows: [
+        [1, 'aleph'],
+      ]);
+      final expected = buildDb('mismatch_expected', version: 2, sourceRows: [
+        [1, 'aleph'],
+        [2, 'bet'],
+      ]);
+      final before = _hashOf(base);
+      final patch = buildPatchDb(from: 1, to: 2, upsertSource: [
+        [2, 'bet'],
+      ]);
+      final toTables = _tableHashesOf(expected)
+        ..['source'] = List.filled(64, '0').join();
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: before,
+        toHash: _hashOf(expected),
+        fromTables: _tableHashesOf(base),
+        toTables: toTables,
+      );
+
+      expect(
+        () => _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifest,
+          enablePartialTableVerification: true,
+        ),
+        throwsA(isA<PatchApplyException>()
+            .having(
+          (e) => e.hashMismatchStage,
+          'hashMismatchStage',
+          PatchHashMismatchStage.toContentHash,
+        )
+            .having((e) => e.mismatchedTables, 'mismatchedTables', ['source'])),
+      );
+      expect(_hashOf(base), before);
+    });
+
+    test('סחיפה בטבלה שלא נגעו בה אינה מפילה את ה-apply ונשארת דחויה', () {
+      final local = buildDb('drift_local', version: 1, sourceRows: [
+        [1, 'aleph'],
+      ], bookRows: [
+        [1, 'סטה'],
+      ]);
+      final canonFrom = buildDb('drift_canon_from', version: 1, sourceRows: [
+        [1, 'aleph'],
+      ], bookRows: [
+        [1, 'קנוני'],
+      ]);
+      final canonTo = buildDb('drift_canon_to', version: 2, sourceRows: [
+        [1, 'aleph'],
+        [2, 'bet'],
+      ], bookRows: [
+        [1, 'קנוני'],
+      ]);
+      final patch = buildPatchDb(from: 1, to: 2, upsertSource: [
+        [2, 'bet'],
+      ]);
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: _hashOf(canonFrom),
+        toHash: _hashOf(canonTo),
+        fromTables: _tableHashesOf(canonFrom),
+        toTables: _tableHashesOf(canonTo),
+      );
+
+      final result = _applier.apply(
+        dbPath: local,
+        patchPath: patch,
+        manifest: manifest,
+        verifyFromHash: false,
+        enablePartialTableVerification: true,
+      );
+      expect(result.deferredTables, contains('book'));
+
+      final drifted = _applier.verifyTableHashes(
+        dbPath: local,
+        schemaVersion: 2,
+        expected: manifest.toTableContentHashes!,
+        tables: result.deferredTables,
+      );
+      expect(drifted, ['book']);
+      expect(
+        _applier.verifyTableHashes(
+          dbPath: local,
+          schemaVersion: 2,
+          expected: manifest.toTableContentHashes!,
+          tables: result.verifiedTables,
+        ),
+        isEmpty,
+      );
+    });
+
+    test('מניפסט ישן ללא מפות → אימות מלא תופס את אותה סחיפה', () {
+      final local = buildDb('old_local', version: 1, sourceRows: [
+        [1, 'aleph'],
+      ], bookRows: [
+        [1, 'סטה'],
+      ]);
+      final canonTo = buildDb('old_canon_to', version: 2, sourceRows: [
+        [1, 'aleph'],
+        [2, 'bet'],
+      ], bookRows: [
+        [1, 'קנוני'],
+      ]);
+      final before = _hashOf(local);
+      final patch = buildPatchDb(from: 1, to: 2, upsertSource: [
+        [2, 'bet'],
+      ]);
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: before,
+        toHash: _hashOf(canonTo),
+      );
+
+      expect(
+        () => _applier.apply(
+          dbPath: local,
+          patchPath: patch,
+          manifest: manifest,
+          verifyFromHash: false,
+        ),
+        throwsA(isA<PatchApplyException>()
+            .having(
+              (e) => e.hashMismatchStage,
+              'hashMismatchStage',
+              PatchHashMismatchStage.toContentHash,
+            )
+            .having((e) => e.mismatchedTables, 'mismatchedTables', isNull)),
+      );
+      expect(_hashOf(local), before);
+    });
+
+    test('מפות לא עקביות → אימות מלא תופס את הסחיפה', () {
+      final local = buildDb('bad_maps_local', version: 1, sourceRows: [
+        [1, 'aleph'],
+      ], bookRows: [
+        [1, 'סטה'],
+      ]);
+      final canonTo = buildDb('bad_maps_canon_to', version: 2, sourceRows: [
+        [1, 'aleph'],
+        [2, 'bet'],
+      ], bookRows: [
+        [1, 'קנוני'],
+      ]);
+      final full = _tableHashesOf(canonTo);
+      final patch = buildPatchDb(from: 1, to: 2, upsertSource: [
+        [2, 'bet'],
+      ]);
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: _hashOf(local),
+        toHash: _hashOf(canonTo),
+        // חלקיות במפתחות — לא סדר ה-hash המלא, ולכן חוזרים לאימות מלא.
+        fromTables: {'source': full['source']!},
+        toTables: {'source': full['source']!},
+      );
+
+      expect(
+        () => _applier.apply(
+          dbPath: local,
+          patchPath: patch,
+          manifest: manifest,
+          verifyFromHash: false,
+        ),
+        throwsA(isA<PatchApplyException>()
+            .having((e) => e.mismatchedTables, 'mismatchedTables', isNull)),
+      );
+    });
+
+    test('מפות לא עקביות על DB תקין → עובר בלי טבלאות דחויות', () {
+      final base = buildDb('bad_maps_ok_base', version: 1, sourceRows: [
+        [1, 'aleph'],
+      ]);
+      final expected = buildDb('bad_maps_ok_expected', version: 2, sourceRows: [
+        [1, 'aleph'],
+        [2, 'bet'],
+      ]);
+      final patch = buildPatchDb(from: 1, to: 2, upsertSource: [
+        [2, 'bet'],
+      ]);
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: _hashOf(base),
+        toHash: _hashOf(expected),
+        fromTables: const {'source': 'aa'},
+        toTables: const {'source': 'aa'},
+      );
+
+      final result =
+          _applier.apply(dbPath: base, patchPath: patch, manifest: manifest);
+      expect(result.resultHash, manifest.toContentHash);
+      expect(result.deferredTables, isEmpty);
+      expect(result.verifiedTables, isEmpty);
+      expect(result.verifyTableBytes, isEmpty);
     });
   });
 
