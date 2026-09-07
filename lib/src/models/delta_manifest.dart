@@ -79,6 +79,14 @@ class DeltaManifest extends Equatable {
   /// קבצי ה-patch להורדה והחלה (כרגע תמיד קובץ אחד).
   final List<PatchFileEntry> patchFiles;
 
+  /// hash לכל טבלה של ה-DB *לפני* ה-patch, לפי סדר ה-hash של
+  /// [fromSchemaVersion]. null במניפסט ישן, או כשרק אחת משתי המפות קיימת.
+  final Map<String, String>? fromTableContentHashes;
+
+  /// hash לכל טבלה של ה-DB *אחרי* ה-patch, לפי סדר ה-hash של
+  /// [toSchemaVersion]. מאפשר ללקוח לאמת רק את הטבלאות שהשתנו.
+  final Map<String, String>? toTableContentHashes;
+
   /// שדות אופציונליים עתידיים — נשמרים אם קיימים, אך אינם חובה.
   final List<int> booksTouched;
   final String? catalogBlobName;
@@ -91,6 +99,8 @@ class DeltaManifest extends Equatable {
     this.patchFormatVersion,
     required this.fromContentHash,
     required this.toContentHash,
+    this.fromTableContentHashes,
+    this.toTableContentHashes,
     required this.patchFiles,
     this.booksTouched = const [],
     this.catalogBlobName,
@@ -112,6 +122,14 @@ class DeltaManifest extends Equatable {
         'שדה חובה חסר במניפסט של schema 4+: patchFormatVersion',
       );
     }
+    // שתי המפות מגיעות כזוג; אחת בלבד היא מניפסט לא עקבי, ואז נופלים לאימות
+    // ה-DB המלא כאילו אינן קיימות.
+    var fromTables = _optionalStringMap(json, 'fromTableContentHashes');
+    var toTables = _optionalStringMap(json, 'toTableContentHashes');
+    if (fromTables == null || toTables == null) {
+      fromTables = null;
+      toTables = null;
+    }
     return DeltaManifest(
       fromVersion: _requireInt(json, 'fromVersion'),
       toVersion: _requireInt(json, 'toVersion'),
@@ -120,6 +138,8 @@ class DeltaManifest extends Equatable {
       patchFormatVersion: patchFormatVersion,
       fromContentHash: _requireString(json, 'fromContentHash'),
       toContentHash: _requireString(json, 'toContentHash'),
+      fromTableContentHashes: fromTables,
+      toTableContentHashes: toTables,
       patchFiles: patchFilesRaw
           .map((e) => PatchFileEntry.fromJson(e as Map<String, dynamic>))
           .toList(growable: false),
@@ -143,6 +163,8 @@ class DeltaManifest extends Equatable {
         patchFormatVersion,
         fromContentHash,
         toContentHash,
+        fromTableContentHashes,
+        toTableContentHashes,
         patchFiles,
         booksTouched,
         catalogBlobName,
@@ -163,6 +185,24 @@ int _requireInt(Map<String, dynamic> json, String key) {
     throw FormatException('שדה חובה חסר או לא תקין ב-manifest: $key');
   }
   return value.toInt();
+}
+
+/// מפענח מפת `<table> -> <hex>` אופציונלית. null כשהשדה חסר; [FormatException]
+/// כשהוא קיים אך אינו מפה של מחרוזות לא ריקות.
+Map<String, String>? _optionalStringMap(Map<String, dynamic> json, String key) {
+  if (!json.containsKey(key) || json[key] == null) return null;
+  final value = json[key];
+  if (value is! Map) {
+    throw FormatException('שדה אופציונלי לא תקין במניפסט: $key');
+  }
+  final result = <String, String>{};
+  value.forEach((k, v) {
+    if (k is! String || k.isEmpty || v is! String || v.isEmpty) {
+      throw FormatException('ערך לא תקין במפת ה-hash במניפסט: $key');
+    }
+    result[k] = v;
+  });
+  return result;
 }
 
 int? _optionalInt(Map<String, dynamic> json, String key) {

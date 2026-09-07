@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.4.0
+
+hash תוכן לוגי לכל טבלה — אימות אחרי apply רק על הטבלאות שהשתנו, במקום
+הזרמת כל ה-DB (‏~80% מ-6GB) בכל צעד בשרשרת.
+
+- `LogicalContentHasher.computeReport` — מעבר יחיד שמחזיר גם את ה-hash הכולל
+  וגם `tableHashes`/`tableBytes` לכל טבלה. `tableHash(t)` הוא sha256 של בדיוק
+  הבתים שהטבלה תורמת לזרם הכולל (כולל הקידומת `" table:<t> "`), ולכן
+  `wholeHash == sha256` של שרשור הזרמים. `compute` נשאר עם אותה חתימה ומאציל.
+  `only` מבקש תת-קבוצה של טבלאות, ואז `wholeHash` הוא null.
+- `DeltaManifest`: שדות אופציונליים `fromTableContentHashes` ו-
+  `toTableContentHashes` (מפה `<table> -> <hex>`). שניהם יחד או אף אחד —
+  מניפסט שנושא רק אחד מהם נקרא כאילו אין מפות; ערך קיים שאינו מפה של מחרוזות
+  לא ריקות זורק `FormatException`.
+- `PatchApplier.apply`: כשהמניפסט נושא שתי מפות שמפתחותיהן הם בדיוק סדרי
+  ה-hash של `fromSchemaVersion`/`toSchemaVersion`, שלב `verifyToHash` מאמת רק
+  `{טבלאות ש-from≠to} ∪ {טבלאות שה-patch נגע בהן} ∪ {schema_meta}`. אחרת —
+  אימות ה-DB המלא בדיוק כמו קודם.
+- `PatchApplyResult`: ‏`verifiedTables`, `deferredTables` (הטבלאות שדולגו,
+  לאימות אחרי ה-commit) ו-`verifyTableBytes` (רמז התקדמות לריצה הבאה).
+  `apply` מקבל `verifyTableBytesHint` שקובע את ה-total של מד ההתקדמות.
+- `PatchApplyException.mismatchedTables` — שמות הטבלאות שלא תאמו, כשהאימות
+  היה לפי טבלאות (null באימות מלא). כל אי-התאמה עדיין גוררת ROLLBACK.
+- `PatchApplier.verifyTableHashes` — אימות קריאה-בלבד של טבלאות נבחרות מול
+  מפה נתונה, ללא transaction. נועד לצרכן שרוצה לאמת את `deferredTables`
+  אחרי שה-commit הסתיים והספרייה כבר קריאה.
+- `test/logical_hash_contract.json` — oracle משותף עם צד ה-Kotlin (עותק זהה
+  אות-באות), נאכף ב-`contract.yml` ב-`cmp`.
+
 ## 0.3.0
 
 תמיכה בסכמת patch 4 — טבלאות `line_ref` (אינדקס הפניות קנוני) ו-`line_dh`
