@@ -5,6 +5,10 @@
 התקדמות אמיתית בהחלת patch, ותכנון שמביא בחשבון את עלות ההחלה ולא רק את
 גודל ההורדה (Otzaria issue #1211).
 
+- `PatchDownloader.downloadAndExtract`: פרמטר אופציונלי
+  `onVerifyProgress(bytesDone, bytesTotal)` לדיווח על קידום אימות ה-sha256 של
+  הקובץ המחולץ. המימוש הבסיסי אינו קורא לו; הוא קיים כדי שמימוש יורש (כמו
+  ההורדה הזורמת באוצריא) יוכל להציג מד על אימות קובץ של כמה GB.
 - `PatchApplier.apply`: פרמטר `onApplyProgress(rowsDone, rowsTotal)`.
   `rowsTotal` נספר פעם אחת לפני ה-transaction — סך השורות בכל טבלאות
   `upsert_*`/`delete_*` שיעובדו בפועל. הקריאה הראשונה היא `(0, rowsTotal)`
