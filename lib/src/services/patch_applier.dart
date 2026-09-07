@@ -171,6 +171,11 @@ class PatchApplier {
   /// [checkForeignKeys] — אם פעיל, מוודא ש-`foreign_key_check` לא גדל.
   /// [verifyTableBytesHint] — בתים לכל טבלה מריצה קודמת, למד התקדמות מדויק
   /// כשהמניפסט מאפשר אימות חלקי (ראו [PatchApplyResult.deferredTables]).
+  /// [enablePartialTableVerification] — מאפשר להחליף את אימות ה-DB המלא
+  /// באימות הטבלאות שהשתנו ובדחיית היתר. ברירת המחדל היא false כדי לשמר את
+  /// חוזה [apply] עבור צרכנים קיימים: חזרה מוצלחת פירושה שה-DB כולו אומת
+  /// לפני ה-commit. צרכן שמפעיל זאת חייב להריץ [verifyTableHashes] על
+  /// [PatchApplyResult.deferredTables] אחרי ה-commit.
   PatchApplyResult apply({
     required String dbPath,
     required String patchPath,
@@ -181,6 +186,7 @@ class PatchApplier {
     void Function(int hashedBytes, int totalBytes)? onVerifyProgress,
     int? verifyTotalBytesHint,
     Map<String, int>? verifyTableBytesHint,
+    bool enablePartialTableVerification = false,
   }) {
     // ── preflight: שני סדרי ה-hash נפתרים לפני כל פתיחה/כתיבה — גרסת סכמה
     // לא מוכרת (from או to) זורקת כאן, גם כש-verifyFromHash כבוי.
@@ -282,7 +288,9 @@ class PatchApplier {
 
       onStage?.call('verifyToHash');
       // ה-DB *אחרי* apply הוא בסכמת היעד — הסדר נבחר לפי toSchemaVersion.
-      final toTables = _tablesToVerify(db, manifest, fromOrder, toOrder);
+      final toTables = enablePartialTableVerification
+          ? _tablesToVerify(db, manifest, fromOrder, toOrder)
+          : null;
       final String resultHash;
       var verifiedTables = const <String>[];
       var deferredTables = const <String>[];

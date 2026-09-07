@@ -14,8 +14,9 @@ hash תוכן לוגי לכל טבלה — אימות אחרי apply רק על �
   `toTableContentHashes` (מפה `<table> -> <hex>`). שניהם יחד או אף אחד —
   מניפסט שנושא רק אחד מהם נקרא כאילו אין מפות; ערך קיים שאינו מפה של מחרוזות
   לא ריקות זורק `FormatException`.
-- `PatchApplier.apply`: כשהמניפסט נושא שתי מפות שמפתחותיהן הם בדיוק סדרי
-  ה-hash של `fromSchemaVersion`/`toSchemaVersion`, שלב `verifyToHash` מאמת רק
+- `PatchApplier.apply`: כש-`enablePartialTableVerification: true` והמניפסט
+  נושא שתי מפות שמפתחותיהן הם בדיוק סדרי ה-hash של
+  `fromSchemaVersion`/`toSchemaVersion`, שלב `verifyToHash` מאמת רק
   `{טבלאות ש-from≠to} ∪ {טבלאות שה-patch נגע בהן} ∪ {schema_meta}`. אחרת —
   אימות ה-DB המלא בדיוק כמו קודם.
 - `PatchApplyResult`: ‏`verifiedTables`, `deferredTables` (הטבלאות שדולגו,

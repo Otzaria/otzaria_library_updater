@@ -44,8 +44,10 @@ class LogicalContentHasher {
   String compute(sqlite3.Database db,
           {List<String> tableOrder = kHashTableOrder,
           void Function(int bytesHashed)? onProgress}) =>
-      computeReport(db, tableOrder: tableOrder, onProgress: onProgress)
-          .wholeHash!;
+      _compute(db,
+          tableOrder: tableOrder,
+          onProgress: onProgress,
+          includeTableHashes: false).wholeHash!;
 
   /// מחשב במעבר יחיד את ה-hash הכולל ואת ה-hash של כל טבלה בנפרד
   /// (`tableHash(t) = sha256` של בדיוק הבתים שהטבלה תורמת לזרם הכולל).
@@ -55,7 +57,21 @@ class LogicalContentHasher {
   LogicalContentHashReport computeReport(sqlite3.Database db,
       {List<String> tableOrder = kHashTableOrder,
       Set<String>? only,
+      void Function(int bytesHashed)? onProgress}) =>
+      _compute(db,
+          tableOrder: tableOrder,
+          only: only,
+          onProgress: onProgress,
+          includeTableHashes: true);
+
+  /// המימוש המשותף שומר על [compute] זול: המסלול הוותיק מחשב SHA יחיד בלבד.
+  /// hash לכל טבלה מחושב רק דרך [computeReport], שבו הוא נדרש בפועל.
+  LogicalContentHashReport _compute(sqlite3.Database db,
+      {required List<String> tableOrder,
+      required bool includeTableHashes,
+      Set<String>? only,
       void Function(int bytesHashed)? onProgress}) {
+    assert(includeTableHashes || only == null);
     final wholeDigest = only == null ? _DigestSink() : null;
     final wholeSink =
         wholeDigest == null ? null : sha256.startChunkedConversion(wholeDigest);
@@ -65,9 +81,11 @@ class LogicalContentHasher {
 
     for (final table in tableOrder) {
       if (only != null && !only.contains(table)) continue;
-      final tableDigest = _DigestSink();
-      final tableSink = sha256.startChunkedConversion(tableDigest);
-      out.beginTable(tableSink);
+      final tableDigest = includeTableHashes ? _DigestSink() : null;
+      final tableSink = tableDigest == null
+          ? null
+          : sha256.startChunkedConversion(tableDigest);
+      if (tableSink != null) out.beginTable(tableSink);
 
       out.addBytes(utf8.encode(' table:$table '));
       final cols = _readColumnsCanonical(db, table);
@@ -100,9 +118,11 @@ class LogicalContentHasher {
         }
       }
 
-      tableBytes[table] = out.endTable();
-      tableSink.close();
-      tableHashes[table] = tableDigest.digest.toString();
+      if (tableSink != null) {
+        tableBytes[table] = out.endTable();
+        tableSink.close();
+        tableHashes[table] = tableDigest!.digest.toString();
+      }
     }
 
     out.flush();

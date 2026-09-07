@@ -1219,6 +1219,49 @@ void main() {
       return path;
     }
 
+    test('מפות hash אינן משנות את אימות ברירת המחדל המלא', () {
+      final local = buildDb('default_full_local', version: 1, sourceRows: [
+        [1, 'aleph'],
+      ], bookRows: [
+        [1, 'סטה'],
+      ]);
+      final canonFrom = buildDb('default_full_from', version: 1, sourceRows: [
+        [1, 'aleph'],
+      ], bookRows: [
+        [1, 'קנוני'],
+      ]);
+      final canonTo = buildDb('default_full_to', version: 2, sourceRows: [
+        [1, 'aleph'],
+        [2, 'bet'],
+      ], bookRows: [
+        [1, 'קנוני'],
+      ]);
+      final before = _hashOf(local);
+      final patch = buildPatchDb(from: 1, to: 2, upsertSource: [
+        [2, 'bet'],
+      ]);
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: _hashOf(canonFrom),
+        toHash: _hashOf(canonTo),
+        fromTables: _tableHashesOf(canonFrom),
+        toTables: _tableHashesOf(canonTo),
+      );
+
+      expect(
+        () => _applier.apply(
+          dbPath: local,
+          patchPath: patch,
+          manifest: manifest,
+          verifyFromHash: false,
+        ),
+        throwsA(isA<PatchApplyException>()
+            .having((e) => e.mismatchedTables, 'mismatchedTables', isNull)),
+      );
+      expect(_hashOf(local), before);
+    });
+
     test('מאמת רק את הטבלאות שהשתנו ומדווח על השאר כדחויות', () {
       final base = buildDb('partial_base', version: 1, sourceRows: [
         [1, 'aleph'],
@@ -1240,8 +1283,12 @@ void main() {
         toTables: _tableHashesOf(expected),
       );
 
-      final result =
-          _applier.apply(dbPath: base, patchPath: patch, manifest: manifest);
+      final result = _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: manifest,
+        enablePartialTableVerification: true,
+      );
 
       // source השתנתה (וגם נגע בה ה-patch), schema_meta תמיד באימות.
       expect(result.verifiedTables, ['source', 'schema_meta']);
@@ -1277,8 +1324,12 @@ void main() {
         toTables: _tableHashesOf(expected),
       );
 
-      final result =
-          _applier.apply(dbPath: base, patchPath: patch, manifest: manifest);
+      final result = _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: manifest,
+        enablePartialTableVerification: true,
+      );
 
       expect(result.verifiedTables, contains('source'));
       expect(result.deferredTables, isNot(contains('source')));
@@ -1303,8 +1354,12 @@ void main() {
         toTables: _tableHashesOf(expected),
       );
 
-      final result =
-          _applier.apply(dbPath: base, patchPath: patch, manifest: manifest);
+      final result = _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: manifest,
+        enablePartialTableVerification: true,
+      );
 
       expect(result.verifiedTables, contains('book'));
       expect(result.deferredTables, isNot(contains('book')));
@@ -1336,6 +1391,7 @@ void main() {
         patchPath: patch,
         manifest: manifest,
         verifyFromHash: false,
+        enablePartialTableVerification: true,
         onVerifyProgress: (_, total) => lastTotal = total,
         verifyTableBytesHint: const {
           'source': 100,
@@ -1370,8 +1426,12 @@ void main() {
       );
 
       expect(
-        () =>
-            _applier.apply(dbPath: base, patchPath: patch, manifest: manifest),
+        () => _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifest,
+          enablePartialTableVerification: true,
+        ),
         throwsA(isA<PatchApplyException>()
             .having(
           (e) => e.hashMismatchStage,
@@ -1417,6 +1477,7 @@ void main() {
         patchPath: patch,
         manifest: manifest,
         verifyFromHash: false,
+        enablePartialTableVerification: true,
       );
       expect(result.deferredTables, contains('book'));
 
