@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.0
+
+ניסיון חוזר אוטומטי אחרי קטיעת רשת, עם המשך מהנקודה שנעצרה (Otzaria issue #1244).
+
+- `PatchDownloader`: פרמטר בנאי `networkRetryDelays` (ברירת מחדל
+  `defaultNetworkRetryDelays` = 2s, 5s, 15s). קטיעת רשת חולפת — `SocketException`, `HandshakeException`,
+  `HttpException`, `TimeoutException` (חיבור או זרם תקוע) או `http.ClientException`
+  — מנוסה שוב לפי הרשימה. ב-`downloadToFile` הניסיון החוזר ממשיך מהחלקי דרך
+  `Range`/`If-Range` כשהוא ניתן-לחידוש (validator שמור), ואחרת מתחיל מאפס;
+  ב-`downloadAndExtract` ה-patch הקטן מורד מחדש. ביטול נתפס גם באמצע ההשהיה.
+  שגיאות פרוטוקול ואימות (קוד HTTP, sha256, גודל) אינן מנוסות שוב.
+- `PatchNetworkException` (יורש מ-`PatchDownloadException`): נזרק כשגם הניסיונות
+  החוזרים נכשלו, עם `cause` = החריגה המקורית והודעה עברית קצרה. עד עכשיו החריגה
+  הגולמית של Dart הופצה לצרכן. קובץ חלקי ניתן-לחידוש נשמר, כך שקריאה חוזרת
+  ממשיכה אותו.
+- `PatchDownloader.isTransientNetworkError(error)` — הסיווג חשוף לצרכנים.
+
 ## 0.5.0
 
 התקדמות אמיתית בהחלת patch, ותכנון שמביא בחשבון את עלות ההחלה ולא רק את

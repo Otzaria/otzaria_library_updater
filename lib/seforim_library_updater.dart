@@ -36,4 +36,8 @@ export 'src/services/patch_applier.dart'
         kBooksTouchedTables,
         kDefaultApplyChunkSize;
 export 'src/services/patch_downloader.dart'
-    show PatchDownloader, PatchDownloadException, PatchDownloadCancelled;
+    show
+        PatchDownloader,
+        PatchDownloadException,
+        PatchDownloadCancelled,
+        PatchNetworkException;
