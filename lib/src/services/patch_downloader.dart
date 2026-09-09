@@ -25,10 +25,14 @@ class PatchDownloadCancelled implements Exception {
 
 /// נזרק כשהחיבור לרשת נקטע וגם הניסיונות החוזרים האוטומטיים לא הצליחו.
 /// קובץ חלקי ניתן-לחידוש נשמר, כך שקריאה חוזרת ממשיכה מהנקודה שנעצרה.
-class PatchNetworkException extends PatchDownloadException {
+///
+/// אינו יורש מ-[PatchDownloadException]: צרכנים ותיקים משתמשים בטיפוס ההוא
+/// לזיהוי נכס פגום ומוחקים בעקבותיו את הקובץ, בעוד שכשל רשת חייב לשמור partial.
+class PatchNetworkException implements Exception {
   final Object cause;
+  final String message;
   const PatchNetworkException(this.cause)
-      : super('החיבור לרשת נקטע במהלך ההורדה');
+      : message = 'החיבור לרשת נקטע במהלך ההורדה';
   @override
   String toString() => 'PatchNetworkException: $message ($cause)';
 }
@@ -73,6 +77,7 @@ class PatchDownloader {
   /// כשל רשת חולף: החיבור נסגר/אופס, או שהזרם נעצר מעבר ל-timeout. שגיאות
   /// פרוטוקול/אימות (קוד HTTP, sha256, גודל) אינן חולפות ואינן מנוסות שוב.
   static bool isTransientNetworkError(Object error) =>
+      error is PatchNetworkException ||
       error is SocketException ||
       error is HttpException ||
       error is HandshakeException ||
@@ -242,6 +247,9 @@ class PatchDownloader {
 
       var downloaded = offset;
       Digest? streamDigest;
+      // אחרי קטיעה אין טעם לקרוא ולגבות ב-hash את כל ה-partial לפני כל ניסיון
+      // נוסף. במסלול retry מאמתים את הקובץ השלם פעם אחת בלבד לאחר ההצלחה.
+      var retrying = false;
       if (!alreadyComplete) {
         final outcome = await _withNetworkRetry(
           () async {
@@ -257,7 +265,7 @@ class PatchDownloader {
               file: file,
               offset: offset,
               expectedSize: expectedSize,
-              computeHash: expectedSha256 != null,
+              computeHash: expectedSha256 != null && !retrying,
               validator: storedValidator,
               sidecarPath: resumeToken != null ? sidecarPath : null,
               resumeToken: resumeToken,
@@ -268,6 +276,7 @@ class PatchDownloader {
           isCancelled: isCancelled,
           // אחרי קטיעה ממשיכים מהחלקי רק כשהוא כבול ל-validator; אחרת מאפס.
           onRetry: () {
+            retrying = true;
             if (_partialIsResumable(
                 destPath, sidecarPath, expectedSize, resumeToken)) {
               storedValidator = _strongEtag(_readSidecar(sidecarPath)?.etag);
@@ -299,8 +308,8 @@ class PatchDownloader {
             'גודל ה-DB שהורד ($downloaded) אינו תואם לצפוי ($expectedSize)');
       }
       if (expectedSha256 != null) {
-        // ה-hash חושב בזרימה תוך כדי ההורדה; רק במסלול alreadyComplete (אין
-        // זרם) קוראים את הקובץ מהדיסק.
+        // בלי retry ה-hash מחושב בזרימה. במסלול alreadyComplete או אחרי retry
+        // קוראים את הקובץ המוגמר פעם אחת, במקום לקרוא כל partial בכל ניסיון.
         final actual = streamDigest?.toString() ??
             await _hashFileSha256(destPath, isCancelled);
         if (actual != expectedSha256.toLowerCase()) {
@@ -951,6 +960,7 @@ class PatchDownloader {
       try {
         return await run();
       } catch (e) {
+        if (e is PatchNetworkException) rethrow;
         if (!isTransientNetworkError(e)) rethrow;
         _throwIfCancelled(isCancelled);
         if (attempt >= networkRetryDelays.length) {

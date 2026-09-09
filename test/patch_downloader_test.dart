@@ -2114,6 +2114,15 @@ void main() {
     });
 
     group('ניסיון חוזר אוטומטי אחרי קטיעת רשת', () {
+      test('PatchNetworkException נפרדת משגיאת נכס ומסווגת ככשל חולף', () {
+        final error = PatchNetworkException(
+          const SocketException('connection reset'),
+        );
+        expect(error, isNot(isA<PatchDownloadException>()));
+        expect(PatchDownloader.isTransientNetworkError(error), isTrue);
+        expect(error.message, contains('החיבור לרשת'));
+      });
+
       http.StreamedResponse rangeResponse(http.BaseRequest req) {
         final range = req.headers['Range']!;
         final start =
