@@ -23,6 +23,20 @@ class PatchDownloadCancelled implements Exception {
   const PatchDownloadCancelled();
 }
 
+/// נזרק כשהחיבור לרשת נקטע וגם הניסיונות החוזרים האוטומטיים לא הצליחו.
+/// קובץ חלקי ניתן-לחידוש נשמר, כך שקריאה חוזרת ממשיכה מהנקודה שנעצרה.
+///
+/// אינו יורש מ-[PatchDownloadException]: צרכנים ותיקים משתמשים בטיפוס ההוא
+/// לזיהוי נכס פגום ומוחקים בעקבותיו את הקובץ, בעוד שכשל רשת חייב לשמור partial.
+class PatchNetworkException implements Exception {
+  final Object cause;
+  final String message;
+  const PatchNetworkException(this.cause)
+      : message = 'החיבור לרשת נקטע במהלך ההורדה';
+  @override
+  String toString() => 'PatchNetworkException: $message ($cause)';
+}
+
 /// מוריד קובץ patch דחוס, מאמת sha256 וגודל (דחוס ומחולץ), ומחלץ ל-`.db`.
 ///
 /// ה-patches קטנים (עד עשרות MB מחולצים), לכן ההורדה והחילוץ בזיכרון. אם
@@ -40,14 +54,35 @@ class PatchDownloader {
   final Duration connectTimeout;
   final Duration stallTimeout;
 
+  /// ההשהיות בין ניסיונות חוזרים אוטומטיים אחרי קטיעת רשת (חיבור שנסגר,
+  /// timeout). אורך הרשימה = מספר הניסיונות החוזרים; רשימה ריקה מבטלת אותם.
+  final List<Duration> networkRetryDelays;
+
+  static const List<Duration> defaultNetworkRetryDelays = [
+    Duration(seconds: 2),
+    Duration(seconds: 5),
+    Duration(seconds: 15),
+  ];
+
   PatchDownloader({
     required Future<Uint8List?> Function(Uint8List compressed) decompress,
     http.Client? httpClient,
     this.connectTimeout = const Duration(seconds: 20),
     this.stallTimeout = const Duration(seconds: 30),
+    this.networkRetryDelays = defaultNetworkRetryDelays,
   })  : _httpClient = httpClient ?? http.Client(),
         _ownsClient = httpClient == null,
         _decompress = decompress;
+
+  /// כשל רשת חולף: החיבור נסגר/אופס, או שהזרם נעצר מעבר ל-timeout. שגיאות
+  /// פרוטוקול/אימות (קוד HTTP, sha256, גודל) אינן חולפות ואינן מנוסות שוב.
+  static bool isTransientNetworkError(Object error) =>
+      error is PatchNetworkException ||
+      error is SocketException ||
+      error is HttpException ||
+      error is HandshakeException ||
+      error is TimeoutException ||
+      error is http.ClientException;
 
   /// מוריד ומחלץ את [patchFile] מ-[downloadUrl] לתיקייה [destDir].
   /// מחזיר את הנתיב לקובץ ה-`.db` המחולץ והמאומת.
@@ -122,6 +157,10 @@ class PatchDownloader {
   /// מוריד קובץ גדול ישירות לדיסק בזרימה (ללא טעינה ל-RAM) — ל-DB המלא
   /// (~1.1GB), עם תמיכה בחידוש הורדה (resume): קובץ חלקי קיים משמש כנקודת
   /// המשך דרך כותרת `Range`. מאמת sha256 אם [expectedSha256] סופק.
+  ///
+  /// קטיעת רשת (חיבור שנסגר, timeout) מנוסה שוב אוטומטית לפי
+  /// [networkRetryDelays], בהמשך מהחלקי כשהוא ניתן-לחידוש ואחרת מאפס; כשגם
+  /// הניסיונות נכשלו נזרק [PatchNetworkException].
   ///
   /// בהפרעה (ביטול/timeout/רשת) קובץ חלקי נשמר רק אם הוא באמת ניתן-לחידוש:
   /// יש טוקן **וגם** validator חזק בקובץ הצד (או שהקובץ כבר שלם). חלקי בלי
@@ -208,21 +247,51 @@ class PatchDownloader {
 
       var downloaded = offset;
       Digest? streamDigest;
+      // אחרי קטיעה אין טעם לקרוא ולגבות ב-hash את כל ה-partial לפני כל ניסיון
+      // נוסף. במסלול retry מאמתים את הקובץ השלם פעם אחת בלבד לאחר ההצלחה.
+      var retrying = false;
       if (!alreadyComplete) {
-        if (resumeToken != null) {
-          _writeSidecar(sidecarPath, resumeToken, storedValidator);
-        }
-        final outcome = await _streamToFile(
-          url: url,
-          file: file,
-          offset: offset,
-          expectedSize: expectedSize,
-          computeHash: expectedSha256 != null,
-          validator: storedValidator,
-          sidecarPath: resumeToken != null ? sidecarPath : null,
-          resumeToken: resumeToken,
-          onProgress: onProgress,
+        final outcome = await _withNetworkRetry(
+          () async {
+            // ניסיון חוזר עשוי למצוא שהקטיעה הגיעה אחרי הבייט האחרון.
+            if (expectedSize != null && offset >= expectedSize) {
+              return (downloaded: offset, digest: null);
+            }
+            if (resumeToken != null) {
+              _writeSidecar(sidecarPath, resumeToken, storedValidator);
+            }
+            return _streamToFile(
+              url: url,
+              file: file,
+              offset: offset,
+              expectedSize: expectedSize,
+              computeHash: expectedSha256 != null && !retrying,
+              validator: storedValidator,
+              sidecarPath: resumeToken != null ? sidecarPath : null,
+              resumeToken: resumeToken,
+              onProgress: onProgress,
+              isCancelled: isCancelled,
+            );
+          },
           isCancelled: isCancelled,
+          // אחרי קטיעה ממשיכים מהחלקי רק כשהוא כבול ל-validator; אחרת מאפס.
+          onRetry: () {
+            retrying = true;
+            if (_partialIsResumable(
+                destPath, sidecarPath, expectedSize, resumeToken)) {
+              storedValidator = _strongEtag(_readSidecar(sidecarPath)?.etag);
+              offset = file.lengthSync();
+              return;
+            }
+            if (file.existsSync()) {
+              _deleteRequired(
+                destPath,
+                'מחיקת קובץ חלקי לפני ניסיון חוזר נכשלה — לא ניתן להמשיך בהורדה',
+              );
+            }
+            storedValidator = null;
+            offset = 0;
+          },
         );
         downloaded = outcome.downloaded;
         streamDigest = outcome.digest;
@@ -239,8 +308,8 @@ class PatchDownloader {
             'גודל ה-DB שהורד ($downloaded) אינו תואם לצפוי ($expectedSize)');
       }
       if (expectedSha256 != null) {
-        // ה-hash חושב בזרימה תוך כדי ההורדה; רק במסלול alreadyComplete (אין
-        // זרם) קוראים את הקובץ מהדיסק.
+        // בלי retry ה-hash מחושב בזרימה. במסלול alreadyComplete או אחרי retry
+        // קוראים את הקובץ המוגמר פעם אחת, במקום לקרוא כל partial בכל ניסיון.
         final actual = streamDigest?.toString() ??
             await _hashFileSha256(destPath, isCancelled);
         if (actual != expectedSha256.toLowerCase()) {
@@ -790,6 +859,24 @@ class PatchDownloader {
     required int maxBytes,
     void Function(int downloaded, int? total)? onProgress,
     bool Function()? isCancelled,
+  }) {
+    // ה-patch קטן — קטיעת רשת פשוט מתחילה אותו מחדש (אין מה להמשיך).
+    return _withNetworkRetry(
+      () => _downloadOnce(
+        url,
+        maxBytes: maxBytes,
+        onProgress: onProgress,
+        isCancelled: isCancelled,
+      ),
+      isCancelled: isCancelled,
+    );
+  }
+
+  Future<({Uint8List bytes, Digest digest})> _downloadOnce(
+    String url, {
+    required int maxBytes,
+    void Function(int downloaded, int? total)? onProgress,
+    bool Function()? isCancelled,
   }) async {
     final request = http.Request('GET', Uri.parse(url))
       ..headers['Accept'] = 'application/octet-stream';
@@ -859,6 +946,46 @@ class PatchDownloader {
     if (isCancelled != null && isCancelled()) {
       throw const PatchDownloadCancelled();
     }
+  }
+
+  /// מריץ את [run] ומנסה שוב על כשל רשת חולף לפי [networkRetryDelays]. אחרי
+  /// הניסיון האחרון הכשל נזרק כ-[PatchNetworkException]; שאר החריגות מופצות כפי
+  /// שהן. [onRetry] רץ לפני כל ניסיון חוזר (לחישוב נקודת ההמשך).
+  Future<T> _withNetworkRetry<T>(
+    Future<T> Function() run, {
+    bool Function()? isCancelled,
+    FutureOr<void> Function()? onRetry,
+  }) async {
+    for (var attempt = 0;; attempt++) {
+      try {
+        return await run();
+      } catch (e) {
+        if (e is PatchNetworkException) rethrow;
+        if (!isTransientNetworkError(e)) rethrow;
+        _throwIfCancelled(isCancelled);
+        if (attempt >= networkRetryDelays.length) {
+          throw PatchNetworkException(e);
+        }
+        await _waitBeforeRetry(networkRetryDelays[attempt], isCancelled);
+        await onRetry?.call();
+      }
+    }
+  }
+
+  /// ממתין [delay] בפרוסות קצרות כדי שביטול יתפוס גם באמצע ההשהיה.
+  Future<void> _waitBeforeRetry(
+    Duration delay,
+    bool Function()? isCancelled,
+  ) async {
+    const slice = Duration(milliseconds: 200);
+    var remaining = delay;
+    while (remaining > Duration.zero) {
+      _throwIfCancelled(isCancelled);
+      final step = remaining < slice ? remaining : slice;
+      await Future<void>.delayed(step);
+      remaining -= step;
+    }
+    _throwIfCancelled(isCancelled);
   }
 
   void _deleteQuietly(String path) {

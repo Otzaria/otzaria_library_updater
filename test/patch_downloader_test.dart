@@ -298,6 +298,8 @@ void main() {
       List<http.BaseRequest> captured, {
       required Future<http.StreamedResponse> Function(http.BaseRequest req)
           handler,
+      // ברירת המחדל: ניסיון חוזר יחיד ומיידי — הבדיקות אינן ממתינות לשניות.
+      List<Duration> retryDelays = const [Duration.zero],
     }) {
       final mock = MockClient.streaming((request, bodyStream) async {
         captured.add(request);
@@ -306,6 +308,7 @@ void main() {
       return PatchDownloader(
         httpClient: mock,
         decompress: (c) async => full,
+        networkRetryDelays: retryDelays,
       );
     }
 
@@ -616,7 +619,7 @@ void main() {
           expectedSize: full.length,
           resumeToken: 'v-1',
         ),
-        throwsA(isA<SocketException>()),
+        throwsA(isA<PatchNetworkException>()),
       );
       // בלי validator החלקי אינו ניתן להמשך (כלל ה-entry ימחק אותו ממילא) —
       // נמחק מיד יחד עם קובץ הצד ולא נשאר תלוי על הדיסק.
@@ -631,6 +634,7 @@ void main() {
       File('$dest.resume').writeAsStringSync('v-1\n"e1"'); // validator שמור
       final downloader = downloaderThatCaptures(
         [],
+        retryDelays: const [], // הבדיקה עוסקת בניקוי אחרי הפרעה, לא בניסיון חוזר
         handler: (req) async => http.StreamedResponse(
           () async* {
             yield part2.sublist(0, 5); // עוד בייטים נכתבים ואז נפילה
@@ -647,7 +651,7 @@ void main() {
           expectedSize: full.length,
           resumeToken: 'v-1',
         ),
-        throwsA(isA<SocketException>()),
+        throwsA(isA<PatchNetworkException>()),
       );
       // יש validator חזק → החלקי ניתן לחידוש ונשמר יחד עם קובץ הצד.
       expect(File(dest).existsSync(), isTrue);
@@ -673,7 +677,7 @@ void main() {
           destPath: dest,
           expectedSize: full.length,
         ),
-        throwsA(isA<SocketException>()),
+        throwsA(isA<PatchNetworkException>()),
       );
       expect(File(dest).existsSync(), isFalse);
       expect(File('$dest.resume').existsSync(), isFalse);
@@ -1712,7 +1716,7 @@ void main() {
           expectedSize: full.length,
           resumeToken: 'v-1', // נשמר להמשך, אך ה-handle חייב להיסגר
         ),
-        throwsA(isA<SocketException>()),
+        throwsA(isA<PatchNetworkException>()),
       );
       expect(File(dest).existsSync(), isTrue);
       // אם ה-handle היה דלוף, deleteSync היה זורק ב-Windows.
@@ -2106,6 +2110,278 @@ void main() {
 
         // הריצה הבאה יכולה לשלוח If-Range עם ה-ETag שנשמר.
         expect(File('$dest.resume').readAsStringSync(), 'v-1\n"srv"');
+      });
+    });
+
+    group('ניסיון חוזר אוטומטי אחרי קטיעת רשת', () {
+      test('PatchNetworkException נפרדת משגיאת נכס ומסווגת ככשל חולף', () {
+        final error = PatchNetworkException(
+          const SocketException('connection reset'),
+        );
+        expect(error, isNot(isA<PatchDownloadException>()));
+        expect(PatchDownloader.isTransientNetworkError(error), isTrue);
+        expect(error.message, contains('החיבור לרשת'));
+      });
+
+      http.StreamedResponse rangeResponse(http.BaseRequest req) {
+        final range = req.headers['Range']!;
+        final start =
+            int.parse(range.substring('bytes='.length, range.length - 1));
+        return http.StreamedResponse(
+          Stream.value(Uint8List.fromList(full.sublist(start))),
+          206,
+          headers: {'content-range': 'bytes $start-39/40', 'etag': '"e1"'},
+        );
+      }
+
+      test(
+          'קטיעה עם validator → ממשיך מהאורך שנכתב עם Range+If-Range, sha תקין',
+          () async {
+        final dest = '${tmp.path}/seforim.db.zst';
+        final captured = <http.BaseRequest>[];
+        final downloader = downloaderThatCaptures(
+          captured,
+          handler: (req) async {
+            if (captured.length == 1) {
+              return http.StreamedResponse(
+                () async* {
+                  yield part1;
+                  yield part2.sublist(0, 5); // 20 בייטים נכתבו ואז נפילה
+                  throw const SocketException('network changed');
+                }(),
+                200,
+                contentLength: full.length,
+                headers: {'etag': '"e1"'},
+              );
+            }
+            return rangeResponse(req);
+          },
+        );
+        await downloader.downloadToFile(
+          url: 'https://x/seforim.db.zst',
+          destPath: dest,
+          expectedSize: full.length,
+          expectedSha256: fullHash,
+          resumeToken: 'v-1',
+        );
+        expect(captured, hasLength(2));
+        expect(captured[1].headers['Range'], 'bytes=20-');
+        expect(captured[1].headers['If-Range'], '"e1"');
+        expect(File(dest).readAsBytesSync(), full);
+      });
+
+      test('קטיעה בלי validator → ניסיון חוזר מאפס בלי Range', () async {
+        final dest = '${tmp.path}/seforim.db.zst';
+        final captured = <http.BaseRequest>[];
+        final downloader = downloaderThatCaptures(
+          captured,
+          handler: (req) async {
+            if (captured.length == 1) {
+              return http.StreamedResponse(
+                () async* {
+                  yield part1;
+                  throw const SocketException('network changed');
+                }(),
+                200, // בלי ETag → החלקי אינו ניתן להמשך
+                contentLength: full.length,
+              );
+            }
+            return http.StreamedResponse(Stream.value(full), 200,
+                contentLength: full.length);
+          },
+        );
+        await downloader.downloadToFile(
+          url: 'https://x/seforim.db.zst',
+          destPath: dest,
+          expectedSize: full.length,
+          expectedSha256: fullHash,
+          resumeToken: 'v-1',
+        );
+        expect(captured, hasLength(2));
+        expect(captured[1].headers.containsKey('Range'), isFalse);
+        expect(File(dest).readAsBytesSync(), full);
+      });
+
+      test('קטיעה אחרי הבייט האחרון → הניסיון החוזר מאמת מהדיסק בלי בקשה נוספת',
+          () async {
+        final dest = '${tmp.path}/seforim.db.zst';
+        final captured = <http.BaseRequest>[];
+        final downloader = downloaderThatCaptures(
+          captured,
+          handler: (req) async => http.StreamedResponse(
+            () async* {
+              yield full;
+              throw const SocketException('connection closed');
+            }(),
+            200,
+            contentLength: full.length,
+            headers: {'etag': '"e1"'},
+          ),
+        );
+        await downloader.downloadToFile(
+          url: 'https://x/seforim.db.zst',
+          destPath: dest,
+          expectedSize: full.length,
+          expectedSha256: fullHash,
+          resumeToken: 'v-1',
+        );
+        expect(captured, hasLength(1));
+        expect(File(dest).readAsBytesSync(), full);
+      });
+
+      test('כל הניסיונות נכשלו → PatchNetworkException עם הסיבה, החלקי נשמר',
+          () async {
+        final dest = '${tmp.path}/seforim.db.zst';
+        final captured = <http.BaseRequest>[];
+        final downloader = downloaderThatCaptures(
+          captured,
+          retryDelays: const [Duration.zero, Duration.zero],
+          handler: (req) async => http.StreamedResponse(
+            () async* {
+              yield part1.sublist(0, 5);
+              throw const SocketException('connection reset');
+            }(),
+            captured.length == 1 ? 200 : 206,
+            contentLength: captured.length == 1 ? full.length : null,
+            headers: {
+              'etag': '"e1"',
+              if (captured.length > 1)
+                'content-range': 'bytes ${(captured.length - 1) * 5}-39/40',
+            },
+          ),
+        );
+        await expectLater(
+          downloader.downloadToFile(
+            url: 'https://x/seforim.db.zst',
+            destPath: dest,
+            expectedSize: full.length,
+            resumeToken: 'v-1',
+          ),
+          throwsA(isA<PatchNetworkException>()
+              .having((e) => e.cause, 'cause', isA<SocketException>())
+              .having((e) => e.message, 'message', contains('החיבור לרשת'))),
+        );
+        expect(captured, hasLength(3)); // ניסיון ראשון + שני ניסיונות חוזרים
+        expect(File(dest).existsSync(), isTrue);
+        expect(File('$dest.resume').readAsStringSync(), 'v-1\n"e1"');
+      });
+
+      test('ביטול במהלך ההשהיה → PatchDownloadCancelled בלי בקשה נוספת',
+          () async {
+        final dest = '${tmp.path}/seforim.db.zst';
+        final captured = <http.BaseRequest>[];
+        var cancelled = false;
+        final downloader = downloaderThatCaptures(
+          captured,
+          retryDelays: const [Duration(seconds: 30)],
+          handler: (req) async => http.StreamedResponse(
+            () async* {
+              yield part1;
+              // הביטול מגיע באמצע ההשהיה — היא חייבת להיקטע מיד.
+              Future<void>.delayed(
+                  const Duration(milliseconds: 300), () => cancelled = true);
+              throw const SocketException('connection reset');
+            }(),
+            200,
+            contentLength: full.length,
+            headers: {'etag': '"e1"'},
+          ),
+        );
+        await expectLater(
+          downloader
+              .downloadToFile(
+                url: 'https://x/seforim.db.zst',
+                destPath: dest,
+                expectedSize: full.length,
+                resumeToken: 'v-1',
+                isCancelled: () => cancelled,
+              )
+              .timeout(const Duration(seconds: 5)),
+          throwsA(isA<PatchDownloadCancelled>()),
+        );
+        expect(captured, hasLength(1));
+      });
+
+      test('שגיאת HTTP (500) אינה כשל רשת ואינה מנוסה שוב', () async {
+        final dest = '${tmp.path}/seforim.db.zst';
+        final captured = <http.BaseRequest>[];
+        final downloader = downloaderThatCaptures(
+          captured,
+          handler: (req) async =>
+              http.StreamedResponse(Stream.value(part1), 500),
+        );
+        await expectLater(
+          downloader.downloadToFile(
+            url: 'https://x/seforim.db.zst',
+            destPath: dest,
+            expectedSize: full.length,
+          ),
+          throwsA(isA<PatchDownloadException>()
+              .having((e) => e, 'type', isNot(isA<PatchNetworkException>()))),
+        );
+        expect(captured, hasLength(1));
+      });
+
+      test('זרם שנתקע (stallTimeout) מנוסה שוב ומצליח', () async {
+        final dest = '${tmp.path}/seforim.db.zst';
+        var calls = 0;
+        final stuck = StreamController<List<int>>();
+        addTearDown(stuck.close);
+        final downloader = PatchDownloader(
+          httpClient: MockClient.streaming((request, bodyStream) async {
+            calls++;
+            if (calls == 1) {
+              return http.StreamedResponse(stuck.stream, 200,
+                  contentLength: full.length);
+            }
+            return http.StreamedResponse(Stream.value(full), 200,
+                contentLength: full.length);
+          }),
+          decompress: (c) async => full,
+          stallTimeout: const Duration(milliseconds: 100),
+          networkRetryDelays: const [Duration.zero],
+        );
+        await downloader
+            .downloadToFile(
+              url: 'https://x/seforim.db.zst',
+              destPath: dest,
+              expectedSize: full.length,
+              expectedSha256: fullHash,
+            )
+            .timeout(const Duration(seconds: 5));
+        expect(calls, 2);
+        expect(File(dest).readAsBytesSync(), full);
+      });
+
+      test('patch קטן (downloadAndExtract): קטיעה → הורדה מחדש מאפס מצליחה',
+          () async {
+        var calls = 0;
+        final downloader = PatchDownloader(
+          httpClient: MockClient.streaming((request, bodyStream) async {
+            calls++;
+            if (calls == 1) {
+              return http.StreamedResponse(
+                () async* {
+                  yield compressed.sublist(0, 10);
+                  throw const SocketException('network changed');
+                }(),
+                200,
+                contentLength: compressed.length,
+              );
+            }
+            return http.StreamedResponse(Stream.value(compressed), 200,
+                contentLength: compressed.length);
+          }),
+          decompress: (c) async => uncompressed,
+          networkRetryDelays: const [Duration.zero],
+        );
+        final path = await downloader.downloadAndExtract(
+          patchFile: entry(),
+          downloadUrl: 'https://x/patch-v1-v2.db.zst',
+          destDir: tmp,
+        );
+        expect(calls, 2);
+        expect(File(path).readAsBytesSync(), uncompressed);
       });
     });
   });
