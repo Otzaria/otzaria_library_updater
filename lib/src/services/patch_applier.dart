@@ -28,6 +28,29 @@ const Set<String> kBooksTouchedTables = {
   'book_acronym',
 };
 
+/// גודל מנת ה-upsert/delete בשורות. ראו [PatchApplier.applyChunkSize].
+const int kDefaultApplyChunkSize = 50000;
+
+/// מונה שורות ה-patch שהוחלו, משותף לשלבי ה-upserts וה-deletes.
+class _ApplyProgress {
+  final Map<String, int> _rowsPerTable;
+  final void Function(int rowsDone, int rowsTotal)? _callback;
+  final int total;
+  int _done = 0;
+
+  _ApplyProgress(this._rowsPerTable, this._callback)
+      : total = _rowsPerTable.values.fold<int>(0, (a, b) => a + b);
+
+  int tableRows(String patchTable) => _rowsPerTable[patchTable] ?? 0;
+
+  void advance(int rows) {
+    _done += rows;
+    emit();
+  }
+
+  void emit() => _callback?.call(_done, total);
+}
+
 /// תוצאת החלת patch מוצלחת.
 class PatchApplyResult {
   final int migrations;
@@ -159,16 +182,26 @@ class PatchApplier {
   /// גרסת פורמט patch.db הגבוהה ביותר שהאפליקציה יודעת להחיל.
   final int supportedPatchFormatVersion;
 
+  /// מספר שורות ה-patch שמוחלות בכל statement. הפיצול קיים כדי שדיווח
+  /// ההתקדמות יהיה רציף — patch של מיליוני שורות אינו קופץ מ-0 ל-100.
+  final int applyChunkSize;
+
   const PatchApplier({
     this.hasher = const LogicalContentHasher(),
     this.supportedPatchFormatVersion = kSupportedPatchFormatVersion,
-  }) : assert(supportedPatchFormatVersion >= 1);
+    this.applyChunkSize = kDefaultApplyChunkSize,
+  })  : assert(supportedPatchFormatVersion >= 1),
+        assert(applyChunkSize > 0);
 
   /// מחיל את ה-patch שב-[patchPath] על ה-DB שב-[dbPath] לפי [manifest].
   ///
   /// [verifyFromHash] — אם פעיל, מחשב את ה-hash המקומי לפני apply ומשווה ל-
   /// `fromContentHash` (יקר אך מזהה DB ששונה ידנית/corruption).
   /// [checkForeignKeys] — אם פעיל, מוודא ש-`foreign_key_check` לא גדל.
+  /// [onApplyProgress] — מדווח `(rowsDone, rowsTotal)` לאורך שלבי ה-upserts
+  /// וה-deletes. `rowsTotal` הוא סך שורות טבלאות ה-patch שיעובדו בפועל,
+  /// ונמדד פעם אחת לפני ה-transaction. הקריאה הראשונה היא `(0, rowsTotal)`
+  /// בתחילת ה-upserts; אחריה קריאה אחרי כל מנה. ויסות הוא באחריות הקורא.
   /// [verifyTableBytesHint] — בתים לכל טבלה מריצה קודמת, למד התקדמות מדויק
   /// כשהמניפסט מאפשר אימות חלקי (ראו [PatchApplyResult.deferredTables]).
   /// [enablePartialTableVerification] — מאפשר להחליף את אימות ה-DB המלא
@@ -184,6 +217,7 @@ class PatchApplier {
     bool checkForeignKeys = true,
     void Function(String stage)? onStage,
     void Function(int hashedBytes, int totalBytes)? onVerifyProgress,
+    void Function(int rowsDone, int rowsTotal)? onApplyProgress,
     int? verifyTotalBytesHint,
     Map<String, int>? verifyTableBytesHint,
     bool enablePartialTableVerification = false,
@@ -258,6 +292,12 @@ class PatchApplier {
 
       final preFk = checkForeignKeys ? _countFkViolations(db) : 0;
 
+      // הספירה היא מעבר מלא נוסף על קובץ ה-patch — בלי מאזין אין בשבילה צורך.
+      final progress = _ApplyProgress(
+        onApplyProgress == null ? const {} : _countPatchRows(db),
+        onApplyProgress,
+      );
+
       // ── transaction ──
       db.execute('BEGIN');
       inTransaction = true;
@@ -267,14 +307,15 @@ class PatchApplier {
       final migrations = _runMigrations(db);
 
       onStage?.call('upserts');
-      final upserts = _runUpserts(db);
+      progress.emit();
+      final upserts = _runUpserts(db, progress);
 
       // חייב לרוץ אחרי ה-upserts (שורות חדשות כבר ב-main עבור ה-JOINs)
       // ולפני ה-deletes (שורות שיימחקו עדיין קיימות למיפוי bookId).
       final booksTouched = _collectBooksTouched(db);
 
       onStage?.call('deletes');
-      final deletes = _runDeletes(db);
+      final deletes = _runDeletes(db, progress);
 
       if (checkForeignKeys) {
         onStage?.call('foreignKeyCheck');
@@ -495,7 +536,7 @@ class PatchApplier {
     return count;
   }
 
-  Map<String, int> _runUpserts(sqlite3.Database db) {
+  Map<String, int> _runUpserts(sqlite3.Database db, _ApplyProgress progress) {
     final counts = <String, int>{};
     for (final table in kPatchTablesInFkOrder) {
       final patchTable = 'upsert_${table.name}';
@@ -517,17 +558,22 @@ class PatchApplier {
         conflictClause = 'ON CONFLICT($pkCsv) DO UPDATE SET $assignments';
       }
 
-      // `WHERE true` נדרש כדי שה-parser ישייך את ON CONFLICT ל-INSERT ולא ל-SELECT.
-      db.execute(
-        'INSERT INTO "${table.name}" ($colsCsv) '
-        'SELECT $colsCsv FROM patch."$patchTable" WHERE true $conflictClause',
+      final head = 'INSERT INTO "${table.name}" ($colsCsv) '
+          'SELECT $colsCsv FROM patch."$patchTable"';
+      counts[table.name] = _runChunked(
+        db,
+        patchTable: patchTable,
+        progress: progress,
+        // תנאי ה-rowid ממלא גם את תפקיד `WHERE true` — בלעדיו ה-parser
+        // משייך את ON CONFLICT ל-SELECT ולא ל-INSERT.
+        chunkSql: (range) => '$head WHERE $range $conflictClause',
+        wholeSql: '$head WHERE true $conflictClause',
       );
-      counts[table.name] = db.updatedRows;
     }
     return counts;
   }
 
-  Map<String, int> _runDeletes(sqlite3.Database db) {
+  Map<String, int> _runDeletes(sqlite3.Database db, _ApplyProgress progress) {
     final counts = <String, int>{};
     for (final table in kPatchTablesInFkOrder.reversed) {
       final patchTable = 'delete_${table.name}';
@@ -535,17 +581,103 @@ class PatchApplier {
       if (table.primaryKey.isEmpty) continue;
 
       final pkCsv = table.primaryKey.map((c) => '"$c"').join(',');
-      final String sql;
-      if (table.primaryKey.length == 1) {
-        final k = '"${table.primaryKey.first}"';
-        sql = 'DELETE FROM "${table.name}" WHERE $k IN '
-            '(SELECT $k FROM patch."$patchTable")';
-      } else {
-        sql = 'DELETE FROM "${table.name}" WHERE ($pkCsv) IN '
-            '(SELECT $pkCsv FROM patch."$patchTable")';
+      final keys =
+          table.primaryKey.length == 1 ? '"${table.primaryKey.first}"' : pkCsv;
+      final target = table.primaryKey.length == 1 ? keys : '($pkCsv)';
+      String sql(String where) => 'DELETE FROM "${table.name}" WHERE $target '
+          'IN (SELECT $keys FROM patch."$patchTable"$where)';
+
+      counts[table.name] = _runChunked(
+        db,
+        patchTable: patchTable,
+        progress: progress,
+        chunkSql: (range) => sql(' WHERE $range'),
+        wholeSql: sql(''),
+      );
+    }
+    return counts;
+  }
+
+  /// מריץ [chunkSql] על מנות rowid רצופות של [patchTable] ומחזיר את סך
+  /// `updatedRows`. נופל ל-[wholeSql] כשלטבלת ה-patch אין rowid.
+  int _runChunked(
+    sqlite3.Database db, {
+    required String patchTable,
+    required _ApplyProgress progress,
+    required String Function(String rowidRange) chunkSql,
+    required String wholeSql,
+  }) {
+    final remaining = progress.tableRows(patchTable);
+    if (!_patchTableHasRowid(db, patchTable)) {
+      db.execute(wholeSql);
+      // נקרא לפני הדיווח — callback שיריץ SQL ידרוס את `updatedRows`.
+      final updated = db.updatedRows;
+      progress.advance(remaining);
+      return updated;
+    }
+
+    final bounds = db.select(
+        'SELECT min(rowid) AS lo, max(rowid) AS hi FROM patch."$patchTable"');
+    final maxRowid = bounds.isEmpty ? null : bounds.first['hi'];
+    if (maxRowid is! int) {
+      progress.advance(remaining);
+      return 0;
+    }
+    var lo = (bounds.first['lo'] as int) - 1;
+    var left = remaining;
+    var updated = 0;
+    while (true) {
+      final boundary = _chunkBoundary(db, patchTable, lo);
+      final hi = boundary ?? maxRowid;
+      db.execute(chunkSql('rowid > $lo AND rowid <= $hi'));
+      updated += db.updatedRows;
+      final done = boundary == null ? left : applyChunkSize;
+      left -= done;
+      progress.advance(done);
+      if (boundary == null) break;
+      lo = hi;
+    }
+    return updated;
+  }
+
+  /// ה-rowid של השורה ה-[applyChunkSize] אחרי [afterRowid], או null כשנותרו
+  /// פחות שורות — סימן שזו המנה האחרונה.
+  int? _chunkBoundary(sqlite3.Database db, String patchTable, int afterRowid) {
+    final rows = db.select(
+      'SELECT rowid AS r FROM patch."$patchTable" WHERE rowid > ? ORDER BY rowid '
+      'LIMIT 1 OFFSET ${applyChunkSize - 1}',
+      [afterRowid],
+    );
+    return rows.isEmpty ? null : rows.first['r'] as int;
+  }
+
+  bool _patchTableHasRowid(sqlite3.Database db, String patchTable) {
+    try {
+      db.select('SELECT rowid FROM patch."$patchTable" LIMIT 1');
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// סופר את שורות כל טבלאות ה-patch שיעובדו בפועל — אותם תנאי דילוג
+  /// כמו ב-[_runUpserts] וב-[_runDeletes], כדי ש-`rowsTotal` יהיה מדויק.
+  Map<String, int> _countPatchRows(sqlite3.Database db) {
+    final counts = <String, int>{};
+    void count(String patchTable) {
+      if (!_hasTable(db, 'patch', patchTable)) return;
+      final row =
+          db.select('SELECT count(*) AS c FROM patch."$patchTable"').first;
+      counts[patchTable] = row['c'] as int;
+    }
+
+    for (final table in kPatchTablesInFkOrder) {
+      final upsertTable = 'upsert_${table.name}';
+      if (_hasTable(db, 'patch', upsertTable) &&
+          _patchTableColumns(db, upsertTable).isNotEmpty) {
+        count(upsertTable);
       }
-      db.execute(sql);
-      counts[table.name] = db.updatedRows;
+      if (table.primaryKey.isNotEmpty) count('delete_${table.name}');
     }
     return counts;
   }

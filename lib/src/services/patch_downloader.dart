@@ -51,11 +51,15 @@ class PatchDownloader {
 
   /// מוריד ומחלץ את [patchFile] מ-[downloadUrl] לתיקייה [destDir].
   /// מחזיר את הנתיב לקובץ ה-`.db` המחולץ והמאומת.
+  ///
+  /// [onVerifyProgress] מדווח על קידום אימות ה-sha256 של הקובץ המחולץ
+  /// (בייטים שנקראו מתוך גודלו). במימוש הבסיסי האימות רץ בלי דיווח ביניים.
   Future<String> downloadAndExtract({
     required PatchFileEntry patchFile,
     required String downloadUrl,
     required Directory destDir,
     void Function(int downloaded, int? total)? onProgress,
+    void Function(int bytesDone, int bytesTotal)? onVerifyProgress,
     bool Function()? isCancelled,
   }) async {
     if (!destDir.existsSync()) {

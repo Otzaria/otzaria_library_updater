@@ -1771,4 +1771,120 @@ void main() {
       );
     }, timeout: const Timeout(Duration(minutes: 2)));
   });
+
+  group('החלה במנות (chunking)', () {
+    // fixture עם מספיק שורות כדי שמנה קטנה תפצל לכמה statements.
+    ({String base, String patch, DeltaManifest manifest}) buildFixture() {
+      final base = buildBaseDb(
+        version: 1,
+        sourceRows: [
+          for (var i = 1; i <= 200; i++) [i, 'name$i']
+        ],
+      );
+      final patch = buildPatchDb(
+        from: 1,
+        to: 2,
+        upsertSource: [
+          for (var i = 1; i <= 120; i++) [i, 'NAME$i'], // עדכון
+          for (var i = 201; i <= 350; i++) [i, 'new$i'], // הוספה
+        ],
+        deleteSource: [for (var i = 150; i <= 200; i++) i],
+      );
+      final expected = buildBaseDb(version: 2, sourceRows: [
+        for (var i = 1; i <= 120; i++) [i, 'NAME$i'],
+        for (var i = 121; i <= 149; i++) [i, 'name$i'],
+        for (var i = 201; i <= 350; i++) [i, 'new$i'],
+      ]);
+      return (
+        base: base,
+        patch: patch,
+        manifest: _manifest(
+          from: 1,
+          to: 2,
+          fromHash: _hashOf(base),
+          toHash: _hashOf(expected),
+        ),
+      );
+    }
+
+    test('מנות קטנות ו-statement יחיד מגיעים לאותו hash ולאותן ספירות', () {
+      final f = buildFixture();
+      final wholeBase = '${tmp.path}/whole_base.db';
+      File(f.base).copySync(wholeBase);
+
+      final a = const PatchApplier(applyChunkSize: 7)
+          .apply(dbPath: f.base, patchPath: f.patch, manifest: f.manifest);
+      final b = const PatchApplier(applyChunkSize: 1000000)
+          .apply(dbPath: wholeBase, patchPath: f.patch, manifest: f.manifest);
+
+      expect(_hashOf(f.base), _hashOf(wholeBase));
+      expect(_hashOf(f.base), f.manifest.toContentHash);
+      expect(a.resultHash, b.resultHash);
+      expect(a.upserts, b.upserts);
+      expect(a.deletes, b.deletes);
+    });
+
+    test('onApplyProgress עולה מ-0 עד rowsTotal של כל שורות ה-patch', () {
+      final f = buildFixture();
+      final seen = <(int, int)>[];
+      const PatchApplier(applyChunkSize: 7).apply(
+        dbPath: f.base,
+        patchPath: f.patch,
+        manifest: f.manifest,
+        onApplyProgress: (done, total) => seen.add((done, total)),
+      );
+
+      // 270 upsert_source + 1 upsert_schema_meta + 51 delete_source
+      const expectedTotal = 322;
+      expect(seen.first, (0, expectedTotal));
+      expect(seen.last, (expectedTotal, expectedTotal));
+      expect(seen.length, greaterThan(10), reason: 'מנות, לא קפיצה אחת');
+      for (var i = 1; i < seen.length; i++) {
+        expect(seen[i].$1, greaterThanOrEqualTo(seen[i - 1].$1));
+        expect(seen[i].$2, expectedTotal);
+      }
+    });
+
+    test('טבלת patch ללא rowid (WITHOUT ROWID) נופלת ל-statement יחיד', () {
+      final base = buildBaseDb(version: 1, sourceRows: [
+        [1, 'a'],
+        [2, 'b'],
+      ]);
+      final path = '${tmp.path}/patch_norowid.db';
+      final pdb = sqlite3.sqlite3.open(path);
+      pdb.execute('CREATE TABLE patch_meta (key TEXT PRIMARY KEY, value TEXT)');
+      pdb.execute("INSERT INTO patch_meta VALUES ('schema_version','1'),"
+          "('from_version','1'),('to_version','2')");
+      pdb.execute(
+          'CREATE TABLE migrations (version INTEGER PRIMARY KEY, sql TEXT)');
+      pdb.execute('CREATE TABLE upsert_schema_meta '
+          '(key TEXT PRIMARY KEY, value TEXT) WITHOUT ROWID');
+      pdb.execute("INSERT INTO upsert_schema_meta VALUES ('db_version','2')");
+      pdb.execute('CREATE TABLE upsert_source '
+          '(id INTEGER PRIMARY KEY, name TEXT) WITHOUT ROWID');
+      pdb.execute("INSERT INTO upsert_source VALUES (1,'A'),(3,'C')");
+      pdb.close();
+
+      final expected = buildBaseDb(version: 2, sourceRows: [
+        [1, 'A'],
+        [2, 'b'],
+        [3, 'C'],
+      ]);
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: _hashOf(base),
+        toHash: _hashOf(expected),
+      );
+      final seen = <(int, int)>[];
+      final r = const PatchApplier(applyChunkSize: 1).apply(
+        dbPath: base,
+        patchPath: path,
+        manifest: manifest,
+        onApplyProgress: (d, t) => seen.add((d, t)),
+      );
+      expect(r.resultHash, manifest.toContentHash);
+      expect(seen.last, (3, 3));
+    });
+  });
 }

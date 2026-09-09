@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.5.0
+
+התקדמות אמיתית בהחלת patch, ותכנון שמביא בחשבון את עלות ההחלה ולא רק את
+גודל ההורדה (Otzaria issue #1211).
+
+- `PatchDownloader.downloadAndExtract`: פרמטר אופציונלי
+  `onVerifyProgress(bytesDone, bytesTotal)` לדיווח על קידום אימות ה-sha256 של
+  הקובץ המחולץ. המימוש הבסיסי אינו קורא לו; הוא קיים כדי שמימוש יורש (כמו
+  ההורדה הזורמת באוצריא) יוכל להציג מד על אימות קובץ של כמה GB.
+- `PatchApplier.apply`: פרמטר `onApplyProgress(rowsDone, rowsTotal)`.
+  `rowsTotal` נספר פעם אחת לפני ה-transaction — סך השורות בכל טבלאות
+  `upsert_*`/`delete_*` שיעובדו בפועל. הקריאה הראשונה היא `(0, rowsTotal)`
+  בתחילת שלב `upserts`, ואחריה קריאה אחרי כל מנה, לאורך `upserts` ו-`deletes`
+  יחד. ויסות הדיווח הוא באחריות הקורא.
+- `PatchApplier`: פרמטר בנאי `applyChunkSize` (ברירת מחדל
+  `kDefaultApplyChunkSize` = 50,000). ה-upserts וה-deletes רצים כעת במנות של
+  טווחי `rowid` בטבלת ה-patch, באותו transaction ועם `defer_foreign_keys=ON`,
+  ולכן מצב הסיום זהה ל-statement יחיד. טבלת patch שהוגדרה `WITHOUT ROWID`
+  נופלת אוטומטית למסלול ה-statement היחיד.
+- `LibraryUpdatePlanner.plan`: פרמטר `localDbSizeBytes`. כשהוא ידוע ומסלול
+  הדלתא פורס יותר מ-`maxDeltaUncompressedRatio` מגודל ה-DB המקומי
+  (ברירת מחדל `kDefaultMaxDeltaUncompressedRatio` = 0.25), התוכנית נשארת
+  `delta` אך מסומנת ב-`heavyDeltaReason` — החלת upserts על DB מאונדקס יקרה
+  בהרבה מכתיבה סדרתית של קובץ. הבחירה בין דלתא ארוכה להורדה מלאה נשארת של
+  המשתמש; הסימון מוצג בין אם יש DB מלא זמין ובין אם לא. `localDbSizeBytes`
+  null או 0 — התנהגות ללא שינוי.
+- `LibraryUpdatePlan`: שדה `heavyDeltaReason` (טקסט עברי עם הגדלים) ו-
+  `isHeavyDelta`. `fullDbAsset`/`fullDbReleaseTag`/`toFullDownloadFallback`
+  זמינים גם בתוכנית כזו, כדי שהצרכן יוכל להחליף מסלול.
+- `LibraryUpdatePlanner`: שדה `maxDeltaUncompressedRatio`.
+- `LibraryUpdatePlan.deltaUncompressedBytes` ו-`PatchEdge.uncompressedSize` —
+  הגודל הפרוס, לתצוגה ולהחלטה. 0 בתוכנית שאינה דלתא.
+
 ## 0.4.0
 
 hash תוכן לוגי לכל טבלה — אימות אחרי apply רק על הטבלאות שהשתנו, במקום

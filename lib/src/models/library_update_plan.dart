@@ -26,6 +26,10 @@ class PatchEdge extends Equatable {
   /// גודל ההורדה הדחוס הכולל של קשת זו.
   int get compressedSize => manifest.totalCompressedSize;
 
+  /// גודל קבצי ה-patch אחרי פריסה — מדד לעלות ההחלה, לא להורדה.
+  int get uncompressedSize =>
+      manifest.patchFiles.fold<int>(0, (sum, f) => sum + f.uncompressedSize);
+
   @override
   List<Object?> get props => [manifest, patchFileUrls, manifestUrl];
 }
@@ -68,6 +72,10 @@ class LibraryUpdatePlan extends Equatable {
   /// הסבר קריא — חובה ל-[LibraryUpdatePlanKind.blocked], אופציונלי לאחרים.
   final String? reason;
 
+  /// נימוק לכך שהחלת הדלתא צפויה להיות יקרה מאוד. null בתוכנית דלתא רגילה
+  /// ובכל תוכנית שאינה דלתא. הבחירה נשארת של המשתמש — ראו [isHeavyDelta].
+  final String? heavyDeltaReason;
+
   const LibraryUpdatePlan._({
     required this.kind,
     required this.localVersion,
@@ -76,7 +84,11 @@ class LibraryUpdatePlan extends Equatable {
     this.fullDbAsset,
     this.fullDbReleaseTag,
     this.reason,
+    this.heavyDeltaReason,
   });
+
+  /// האם זו תוכנית דלתא שהחלתה צפויה להיות ארוכה במיוחד.
+  bool get isHeavyDelta => heavyDeltaReason != null;
 
   /// הספרייה מעודכנת — אין מה לעשות.
   factory LibraryUpdatePlan.none({
@@ -97,6 +109,7 @@ class LibraryUpdatePlan extends Equatable {
     required List<PatchEdge> steps,
     ReleaseAsset? fullDbAsset,
     String? fullDbReleaseTag,
+    String? heavyDeltaReason,
   }) =>
       LibraryUpdatePlan._(
         kind: LibraryUpdatePlanKind.delta,
@@ -105,6 +118,7 @@ class LibraryUpdatePlan extends Equatable {
         deltaSteps: List.unmodifiable(steps),
         fullDbAsset: fullDbAsset,
         fullDbReleaseTag: fullDbReleaseTag,
+        heavyDeltaReason: heavyDeltaReason,
       );
 
   /// מסלול הורדה מלאה.
@@ -165,6 +179,10 @@ class LibraryUpdatePlan extends Equatable {
     }
   }
 
+  /// סך גודל ה-patches אחרי פריסה — הערכת עלות ההחלה. 0 בתוכנית שאינה דלתא.
+  int get deltaUncompressedBytes =>
+      deltaSteps.fold<int>(0, (sum, e) => sum + e.uncompressedSize);
+
   @override
   List<Object?> get props => [
         kind,
@@ -174,5 +192,6 @@ class LibraryUpdatePlan extends Equatable {
         fullDbAsset,
         fullDbReleaseTag,
         reason,
+        heavyDeltaReason,
       ];
 }
