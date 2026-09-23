@@ -161,9 +161,10 @@ class LibraryDbRecoveryService {
   }
 
   /// מחזיר את הגיבוי אל [dbPath] ב-rename (אותה תיקייה — אטומי, ללא העתקה).
-  /// ה-sidecars של [dbPath] נמחקים קודם, כדי ש-journal של DB אחר לא יוחל עליו.
+  /// ה-sidecars שב-[dbPath] נמחקים רק כשיושב שם DB אחר, כדי שה-journal שלו לא
+  /// יוחל על המשוחזר; בלעדיו הם sidecars של הגיבוי עצמו (הזזה שנקטעה).
   void _restore(String backupPath, String dbPath) {
-    _deleteWithSidecars(dbPath);
+    if (File(dbPath).existsSync()) _deleteWithSidecars(dbPath);
     _renameWithSidecars(backupPath, dbPath);
   }
 

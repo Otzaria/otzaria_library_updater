@@ -89,10 +89,14 @@ void main() {
     expect(File(service.backupPathFor(dbPath)).readAsStringSync(), 'ORIGINAL');
     expect(File(service.markerPathFor(dbPath)).existsSync(), isTrue);
 
+    // ה-WAL שלא הספיק לזוז הוא של ה-DB שבגיבוי; מחיקתו = אובדן עסקה מאושרת.
+    expect(File('$dbPath-wal').readAsStringSync(), 'W');
+
     walDir.deleteSync(recursive: true);
     final result = await service.recoverIfNeeded(dbPath);
     expect(result.action, RecoveryAction.restored);
     expect(File(dbPath).readAsStringSync(), 'ORIGINAL');
+    expect(File('$dbPath-wal').readAsStringSync(), 'W');
   });
 
   test('beginApply לא מוחק גיבוי שהוא העותק היחיד (ה-DB חסר)', () async {
