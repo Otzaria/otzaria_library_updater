@@ -40,6 +40,8 @@ class LibraryUpdatePlanner {
   /// הערך עצמו nullable כאשר `db_schema_version` חסר ב-DB ישן.
   /// [hasLocalVersionMeta] — `false` אם `schema_meta.db_version` חסר.
   /// [latestVersion] — הגרסה הגבוהה ביותר הזמינה ב-releases.
+  /// [latestDbSchemaVersion] — סכמת ה-DB המלא שה-release האחרון מפרסם,
+  /// גם כשאינו נתמך (מתוך `LibraryDiscoveryResult.latestDbSchemaVersion`).
   /// [edges] — כל ה-patches הזמינים.
   /// [latestFullDbAsset] / [latestReleaseTag] — ה-DB המלא ל-fallback.
   /// [localDbSizeBytes] — גודל ה-DB המקומי; כשהוא ידוע, מסלול דלתא שעלות
@@ -51,6 +53,7 @@ class LibraryUpdatePlanner {
     required bool hasLocalVersionMeta,
     required int latestVersion,
     required List<PatchEdge> edges,
+    int? latestDbSchemaVersion,
     ReleaseAsset? latestFullDbAsset,
     String? latestReleaseTag,
     int? localDbSizeBytes,
@@ -60,13 +63,21 @@ class LibraryUpdatePlanner {
     final fullDbAsset = schema == null || schema <= supportedDbSchemaVersion
         ? latestFullDbAsset
         : null;
+    final advertisedSchema = latestDbSchemaVersion ?? schema;
+    final unsupportedLatest = advertisedSchema != null &&
+        advertisedSchema > supportedDbSchemaVersion &&
+        fullDbAsset == null;
+    final updateAppReason = 'הספרייה עברה לסכמת DB $advertisedSchema, '
+        'חדשה מהנתמך (DB $supportedDbSchemaVersion) — נדרש עדכון אפליקציה';
     if (!hasLocalVersionMeta) {
       return _fullOrBlocked(
         localVersion: localVersion,
         latestVersion: latestVersion,
         asset: fullDbAsset,
         tag: latestReleaseTag,
-        reason: 'גרסת ה-DB המקומי אינה ידועה (חסר schema_meta.db_version)',
+        reason: unsupportedLatest
+            ? updateAppReason
+            : 'גרסת ה-DB המקומי אינה ידועה (חסר schema_meta.db_version)',
       );
     }
 
@@ -122,6 +133,14 @@ class LibraryUpdatePlanner {
             ? 'מסלול הדלתא פורס ${_size(deltaBytes)} לעומת DB מקומי בגודל '
                 '${_size(dbBytes)}, ושלב ההחלה עלול להימשך זמן רב'
             : null,
+      );
+    }
+
+    if (unsupportedLatest) {
+      return LibraryUpdatePlan.blocked(
+        localVersion: localVersion,
+        targetVersion: latestVersion,
+        reason: updateAppReason,
       );
     }
 

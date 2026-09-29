@@ -523,6 +523,35 @@ void main() {
       downloadUrl: 'https://x/v29/seforim-schema6.db.zst',
       size: 900000000,
     );
+
+    test('unsupported full DB explains the block without version metadata', () {
+      final p = const LibraryUpdatePlanner().plan(
+        localVersion: 0,
+        localSchemaVersion: null,
+        hasLocalVersionMeta: false,
+        latestVersion: 29,
+        latestDbSchemaVersion: 6,
+        edges: [],
+      );
+      expect(p.kind, LibraryUpdatePlanKind.blocked);
+      expect(p.reason, contains('עדכון אפליקציה'));
+    });
+
+    test('a supported full variant is usable despite a newer advertised schema',
+        () {
+      final p = const LibraryUpdatePlanner().plan(
+        localVersion: 28,
+        localSchemaVersion: 5,
+        hasLocalVersionMeta: true,
+        latestVersion: 29,
+        latestDbSchemaVersion: 6,
+        edges: [],
+        latestFullDbAsset: _fullAsset,
+        latestReleaseTag: 'v29',
+      );
+      expect(p.kind, LibraryUpdatePlanKind.fullDownload);
+      expect(p.fullDbAsset, _fullAsset);
+    });
     PatchEdge barrier(int from, {int fromSchema = 5}) => _edge(from, 29,
         fromSchema: fromSchema,
         toSchema: 6,

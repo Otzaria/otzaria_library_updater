@@ -4,8 +4,10 @@ import 'package:test/test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:seforim_library_updater/src/models/library_release.dart';
+import 'package:seforim_library_updater/src/models/library_update_plan.dart';
 import 'package:seforim_library_updater/src/services/github_library_release_client.dart';
 import 'package:seforim_library_updater/src/services/library_update_discovery.dart';
+import 'package:seforim_library_updater/src/services/library_update_planner.dart';
 
 LibraryRelease _release({
   required String tag,
@@ -357,14 +359,41 @@ void main() {
       ],
     });
 
-    LibraryUpdateDiscovery build({int? supportedDbSchemaVersion}) {
+    LibraryUpdateDiscovery build({
+      int? supportedDbSchemaVersion,
+      bool fullOnly = false,
+      int manifestStatus = 200,
+      List<String>? latestAssetNames,
+      bool schemaSixDelta = false,
+    }) {
+      final releaseData = jsonDecode(releasesJson) as List;
+      if (latestAssetNames != null) {
+        releaseData.first['assets'] = [
+          for (final name in latestAssetNames)
+            {
+              'name': name,
+              'browser_download_url': 'https://x/v29/$name',
+              'size': 9
+            },
+        ];
+      }
+      if (fullOnly) {
+        (releaseData.first['assets'] as List)
+            .removeWhere((a) => (a['name'] as String).startsWith('patch-'));
+      }
+      final manifestData = jsonDecode(barrierJson);
+      if (schemaSixDelta) {
+        manifestData['fromSchemaVersion'] = 6;
+        manifestData['patchFormatVersion'] = 4;
+        manifestData['fullRebase'] = false;
+      }
       final mock = MockClient((request) async {
         final url = request.url.toString();
         if (url.contains('/releases?') || url.endsWith('/releases')) {
-          return http.Response(releasesJson, 200);
+          return http.Response(jsonEncode(releaseData), 200);
         }
         if (url.endsWith('patch-v28-v29.db.zst.manifest.json')) {
-          return http.Response(barrierJson, 200);
+          return http.Response(jsonEncode(manifestData), manifestStatus);
         }
         return http.Response('not found', 404);
       });
@@ -399,6 +428,110 @@ void main() {
       expect(result.latestVersion, 29);
       expect(result.latestFullDbAsset, isNull);
       expect(result.latestReleaseTag, isNull);
+    });
+
+    for (final fullOnly in [false, true]) {
+      test(
+          fullOnly
+              ? 'full-only schema 6 remains visible to schema 5'
+              : 'manifest failure cannot hide a schema 6 release', () async {
+        final result = await build(fullOnly: fullOnly, manifestStatus: 503)
+            .discover(allowPrerelease: false);
+        expect(result.latestVersion, 29);
+        expect(result.latestDbSchemaVersion, 6);
+        expect(result.edges, isEmpty);
+        expect(result.latestFullDbAsset, isNull);
+        expect(result.latestReleaseTag, isNull);
+
+        for (final localVersion in [27, 28]) {
+          final plan = const LibraryUpdatePlanner().plan(
+            localVersion: localVersion,
+            localSchemaVersion: 5,
+            hasLocalVersionMeta: true,
+            latestVersion: result.latestVersion,
+            latestDbSchemaVersion: result.latestDbSchemaVersion,
+            edges: result.edges,
+            latestFullDbAsset: result.latestFullDbAsset,
+            latestReleaseTag: result.latestReleaseTag,
+          );
+          expect(plan.kind, LibraryUpdatePlanKind.blocked);
+          expect(plan.targetVersion, 29);
+          expect(plan.reason, contains('עדכון אפליקציה'));
+          expect(plan.fullDbAsset, isNull);
+        }
+      });
+    }
+
+    test('supported schema 6 uses the latest full DB after manifest failure',
+        () async {
+      final result =
+          await build(supportedDbSchemaVersion: 6, manifestStatus: 503)
+              .discover(allowPrerelease: false);
+      final plan = const LibraryUpdatePlanner(supportedDbSchemaVersion: 6).plan(
+        localVersion: 28,
+        localSchemaVersion: 5,
+        hasLocalVersionMeta: true,
+        latestVersion: result.latestVersion,
+        latestDbSchemaVersion: result.latestDbSchemaVersion,
+        edges: result.edges,
+        latestFullDbAsset: result.latestFullDbAsset,
+        latestReleaseTag: result.latestReleaseTag,
+      );
+      expect(plan.kind, LibraryUpdatePlanKind.fullDownload);
+      expect(plan.targetVersion, 29);
+      expect(plan.fullDbAsset?.name, 'seforim-schema6.db.zst');
+    });
+
+    for (final delta in [false, true]) {
+      test(
+          'schema 7 variant does not block a compatible schema 6 '
+          '${delta ? 'delta' : 'full download'}', () async {
+        final result = await build(
+          supportedDbSchemaVersion: 6,
+          schemaSixDelta: delta,
+          latestAssetNames: [
+            'seforim-schema7.db.zst',
+            'seforim-schema6.db.zst',
+            if (delta) ...[
+              'patch-v28-v29.db.zst',
+              'patch-v28-v29.db.zst.manifest.json',
+            ],
+          ],
+        ).discover(allowPrerelease: false);
+        expect(result.latestVersion, 29);
+        expect(result.latestDbSchemaVersion, 6);
+        final plan =
+            const LibraryUpdatePlanner(supportedDbSchemaVersion: 6).plan(
+          localVersion: 28,
+          localSchemaVersion: 6,
+          hasLocalVersionMeta: true,
+          latestVersion: result.latestVersion,
+          latestDbSchemaVersion: result.latestDbSchemaVersion,
+          edges: result.edges,
+          latestFullDbAsset: result.latestFullDbAsset,
+          latestReleaseTag: result.latestReleaseTag,
+        );
+        expect(
+            plan.kind,
+            delta
+                ? LibraryUpdatePlanKind.delta
+                : LibraryUpdatePlanKind.fullDownload);
+        expect(plan.fullDbAsset?.name, 'seforim-schema6.db.zst');
+      });
+    }
+
+    test('a release with only pipeline artifacts does not become latest',
+        () async {
+      final result = await build(latestAssetNames: [
+        'catalog.pb',
+        'release-info.json',
+        'lucene-index.tar.zst',
+        'patch-index.db.zst.manifest.json',
+      ]).discover(allowPrerelease: false);
+      expect(result.latestVersion, 28);
+      expect(result.latestReleaseTag, 'v28');
+      expect(result.latestDbSchemaVersion, 5);
+      expect(result.latestFullDbAsset?.name, 'seforim.db.zst');
     });
   });
 }

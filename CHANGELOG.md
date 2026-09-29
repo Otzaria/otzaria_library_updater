@@ -18,6 +18,11 @@
   `fullDbAsset` בוחר את הסכמה הגבוהה ביותר שנתמכת.
 - `LibraryUpdateDiscovery`: פרמטר `supportedDbSchemaVersion`; release שה-DB
   המלא היחיד שלו בסכמה לא נתמכת אינו מספק fallback מלא.
+- גילוי הגרסה האחרונה אינו תלוי בסכמה נתמכת או בהצלחת הורדת מניפסט:
+  release עם DB מלא בלבד או מניפסט שאינו זמין עדיין מזוהה. להעברת סיבת
+  "נדרש עדכון אפליקציה" ללא edge, מעבירים את
+  `LibraryDiscoveryResult.latestDbSchemaVersion` לפרמטר האופציונלי
+  `LibraryUpdatePlanner.plan(latestDbSchemaVersion:)`.
 - מניפסט מחסום (`fullRebase: true`): לעולם אינו שלב במסלול דלתא. כשהוא יוצא
   מהמצב המקומי ואין מסלול רגיל, ה-planner מחזיר הורדה מלאה עם סיבה מפורשת,
   או סיבת "נדרש עדכון אפליקציה" כשסכמת היעד אינה נתמכת. לקוח ישן רואה את
