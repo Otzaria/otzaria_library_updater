@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.8.0
+
+סכמת DB 6: פיצול `line` לטבלה צרה ול-`line_content(id, content)`, ו-
+`version_line.content` שמותר בה NULL (NULL = זהה לטקסט הבסיס).
+
+- `kSupportedDbSchemaVersion` = 6, ומיוצא עכשיו מה-barrel — כדי שהצרכן ידחה DB
+  מלא שסכמתו חדשה מהנתמך ויבחר את שם ה-asset בהתקנה ראשונה.
+- `kPatchTablesInFkOrder`: `line_content` (PK `id`, updatable) מיד אחרי `line`.
+  patch של סכמה 5 אינו כולל `upsert_line_content` ומדולג כרגיל.
+- סדרי hash קפואים: `kHashTableOrderSchema5` (זהה לסכמה 4) ו-
+  `kHashTableOrderSchema6` (38 טבלאות, `line_content` אחרי `line`);
+  `kHashTableOrder` מצביע על סכמה 6, ו-`hashTableOrderForSchemaVersion(6)` נתמך.
+- שם ה-DB המלא: `seforim.db.zst` שמור לסכמה 5 ומטה; מסכמה 6 —
+  `seforim-schema<N>.db.zst`. חדשים: `fullDbArchiveNameForSchema`,
+  `ReleaseAsset.fullDbSchemaVersion`, `LibraryRelease.fullDbAssetFor`.
+  `fullDbAsset` בוחר את הסכמה הגבוהה ביותר שנתמכת.
+- `LibraryUpdateDiscovery`: פרמטר `supportedDbSchemaVersion`; release שה-DB
+  המלא היחיד שלו בסכמה לא נתמכת אינו מספק fallback מלא.
+- גילוי הגרסה האחרונה אינו תלוי בסכמה נתמכת או בהצלחת הורדת מניפסט:
+  release עם DB מלא בלבד או מניפסט שאינו זמין עדיין מזוהה. להעברת סיבת
+  "נדרש עדכון אפליקציה" ללא edge, מעבירים את
+  `LibraryDiscoveryResult.latestDbSchemaVersion` לפרמטר האופציונלי
+  `LibraryUpdatePlanner.plan(latestDbSchemaVersion:)`.
+- מניפסט מחסום (`fullRebase: true`): לעולם אינו שלב במסלול דלתא. כשהוא יוצא
+  מהמצב המקומי ואין מסלול רגיל, ה-planner מחזיר הורדה מלאה עם סיבה מפורשת,
+  או סיבת "נדרש עדכון אפליקציה" כשסכמת היעד אינה נתמכת. לקוח ישן רואה את
+  המחסום כ-edge לא נתמך (פורמט 999) ונחסם — לעולם לא מוריד סכמה 6.
+- fixtures החוזה (`patch_tables_contract.json`, `logical_hash_contract.json`)
+  עודכנו לסכמה 6.
+- תמיכה בסכמה 6 היא הצהרה של הצרכן: ברירת המחדל של `LibraryUpdatePlanner`,
+  `LibraryUpdateDiscovery` ו-`LibraryRelease.fullDbAsset` היא
+  `kDefaultConsumerDbSchemaVersion` = 5. אפליקציה שקוראת `line_content` מעבירה
+  `supportedDbSchemaVersion: 6`. build של קוד אפליקציה ישן מול `ref: main` צף
+  לא יוריד DB בסכמה 6. ה-planner גם מתעלם מ-DB מלא בסכמה שאינה נתמכת.
+
 ## 0.7.0
 
 החלת patch מהירה יותר, ו-sqlite_stat1 מגיע גם ללקוחות שמתעדכנים בדלתא.

@@ -97,6 +97,38 @@ void main() {
       expect(() => DeltaManifest.fromJson(json), throwsFormatException);
     });
 
+    test('fullRebase אופציונלי: ברירת מחדל false, דוחה טיפוס לא בוליאני', () {
+      final json = jsonDecode(validJson) as Map<String, dynamic>;
+      expect(DeltaManifest.fromJson(json).fullRebase, isFalse);
+
+      json['fullRebase'] = true;
+      expect(DeltaManifest.fromJson(json).fullRebase, isTrue);
+
+      json['fullRebase'] = 'true';
+      expect(() => DeltaManifest.fromJson(json), throwsFormatException);
+      json['fullRebase'] = 1;
+      expect(() => DeltaManifest.fromJson(json), throwsFormatException);
+    });
+
+    test('מניפסט מחסום של סכמה 6 מתפרש', () {
+      final json = jsonDecode(validJson) as Map<String, dynamic>;
+      json
+        ..['fromVersion'] = 28
+        ..['toVersion'] = 29
+        ..['fromSchemaVersion'] = 5
+        ..['toSchemaVersion'] = 6
+        ..['patchFormatVersion'] = 999
+        ..['fullRebase'] = true
+        ..['fromContentHash'] = 'full-rebase'
+        ..['toContentHash'] = 'full-rebase';
+      final m = DeltaManifest.fromJson(json);
+      expect(m.fullRebase, isTrue);
+      expect(m.toSchemaVersion, 6);
+      expect(m.patchFormatVersion, 999);
+      expect(m,
+          isNot(equals(DeltaManifest.fromJson(json..['fullRebase'] = false))));
+    });
+
     test('סלחני לשדות לא מוכרים', () {
       final json = jsonDecode(validJson) as Map<String, dynamic>;
       json['someFutureField'] = {'a': 1};

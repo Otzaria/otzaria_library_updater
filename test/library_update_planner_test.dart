@@ -2,6 +2,7 @@ import 'package:test/test.dart';
 import 'package:seforim_library_updater/src/models/delta_manifest.dart';
 import 'package:seforim_library_updater/src/models/library_release.dart';
 import 'package:seforim_library_updater/src/models/library_update_plan.dart';
+import 'package:seforim_library_updater/src/models/patch_table_spec.dart';
 import 'package:seforim_library_updater/src/services/library_update_planner.dart';
 
 /// בונה PatchEdge פיקטיבי מ-[from] ל-[to] בגודל דחוס [size].
@@ -12,6 +13,7 @@ PatchEdge _edge(
   int fromSchema = 1,
   int toSchema = 1,
   int? patchFormat,
+  bool fullRebase = false,
 }) {
   final file = 'patch-v$from-v$to.db.zst';
   return PatchEdge(
@@ -21,6 +23,7 @@ PatchEdge _edge(
       fromSchemaVersion: fromSchema,
       toSchemaVersion: toSchema,
       patchFormatVersion: patchFormat,
+      fullRebase: fullRebase,
       fromContentHash: 'hash$from',
       toContentHash: 'hash$to',
       patchFiles: [
@@ -509,6 +512,155 @@ void main() {
       expect(fb!.kind, LibraryUpdatePlanKind.fullDownload);
       expect(fb.isHeavyDelta, isFalse);
       expect(fb.fullDbAsset, _fullAsset);
+    });
+  });
+
+  group('מחסום סכמה 6 (fullRebase)', () {
+    const planner = LibraryUpdatePlanner(
+        supportedDbSchemaVersion: kSupportedDbSchemaVersion);
+    const schema6Full = ReleaseAsset(
+      name: 'seforim-schema6.db.zst',
+      downloadUrl: 'https://x/v29/seforim-schema6.db.zst',
+      size: 900000000,
+    );
+
+    test('unsupported full DB explains the block without version metadata', () {
+      final p = const LibraryUpdatePlanner().plan(
+        localVersion: 0,
+        localSchemaVersion: null,
+        hasLocalVersionMeta: false,
+        latestVersion: 29,
+        latestDbSchemaVersion: 6,
+        edges: [],
+      );
+      expect(p.kind, LibraryUpdatePlanKind.blocked);
+      expect(p.reason, contains('עדכון אפליקציה'));
+    });
+
+    test('a supported full variant is usable despite a newer advertised schema',
+        () {
+      final p = const LibraryUpdatePlanner().plan(
+        localVersion: 28,
+        localSchemaVersion: 5,
+        hasLocalVersionMeta: true,
+        latestVersion: 29,
+        latestDbSchemaVersion: 6,
+        edges: [],
+        latestFullDbAsset: _fullAsset,
+        latestReleaseTag: 'v29',
+      );
+      expect(p.kind, LibraryUpdatePlanKind.fullDownload);
+      expect(p.fullDbAsset, _fullAsset);
+    });
+    PatchEdge barrier(int from, {int fromSchema = 5}) => _edge(from, 29,
+        fromSchema: fromSchema,
+        toSchema: 6,
+        patchFormat: 999,
+        fullRebase: true,
+        size: 50);
+
+    LibraryUpdatePlan planV29({
+      required int local,
+      required int localSchema,
+      required List<PatchEdge> edges,
+      ReleaseAsset? full = schema6Full,
+      LibraryUpdatePlanner? using,
+    }) =>
+        (using ?? planner).plan(
+          localVersion: local,
+          localSchemaVersion: localSchema,
+          hasLocalVersionMeta: true,
+          latestVersion: 29,
+          edges: edges,
+          latestFullDbAsset: full,
+          latestReleaseTag: full == null ? null : 'v29',
+        );
+
+    test('לקוח סכמה 6 על v28 סכמה 5 → הורדה מלאה עם סיבה מפורשת', () {
+      final p = planV29(local: 28, localSchema: 5, edges: [barrier(28)]);
+      expect(p.kind, LibraryUpdatePlanKind.fullDownload);
+      expect(p.fullDbAsset, schema6Full);
+      expect(p.reason, contains('סכמת DB 6'));
+      expect(p.reason, contains('הורדה מלאה'));
+      expect(p.reason, isNot(contains('עדכון אפליקציה')));
+    });
+
+    test('המחסום לעולם אינו שלב בדלתא, גם כשהתמיכה נראית מספקת', () {
+      // פורמט 4 במחסום — עדיין לא נכנס למסלול.
+      final fake = _edge(28, 29,
+          fromSchema: 5, toSchema: 6, patchFormat: 4, fullRebase: true);
+      final p = planV29(local: 28, localSchema: 5, edges: [fake]);
+      expect(p.kind, LibraryUpdatePlanKind.fullDownload);
+      expect(p.deltaSteps, isEmpty);
+    });
+
+    test('מחסום מסכמה מקומית אחרת עדיין מחייב, כל עוד המקומית < 6', () {
+      final p = planV29(
+          local: 20, localSchema: 4, edges: [barrier(20, fromSchema: 5)]);
+      expect(p.kind, LibraryUpdatePlanKind.fullDownload);
+      expect(p.reason, contains('סכמת DB 6'));
+    });
+
+    test('מסלול דלתא רגיל גובר על מחסום (לקוח שכבר בסכמה 6)', () {
+      final p = planV29(local: 28, localSchema: 6, edges: [
+        barrier(28),
+        _edge(28, 29, fromSchema: 6, toSchema: 6, patchFormat: 4, size: 10),
+      ]);
+      expect(p.kind, LibraryUpdatePlanKind.delta);
+      expect(p.deltaSteps.single.manifest.fullRebase, isFalse);
+    });
+
+    test('מחסום אינו חל על DB מקומי שכבר בסכמה 6 — אין מסלול רגיל', () {
+      final p = planV29(local: 28, localSchema: 6, edges: [barrier(28)]);
+      expect(p.kind, LibraryUpdatePlanKind.fullDownload);
+      expect(p.reason, contains('אין מסלול דלתא רציף'));
+    });
+
+    test('מחסום לסכמה שאינה נתמכת → סיבת עדכון אפליקציה', () {
+      const schema5Client = LibraryUpdatePlanner(
+        supportedDbSchemaVersion: 5,
+        supportedPatchFormatVersion: 4,
+      );
+      final p = planV29(
+          local: 28,
+          localSchema: 5,
+          edges: [barrier(28)],
+          full: null,
+          using: schema5Client);
+      expect(p.kind, LibraryUpdatePlanKind.blocked);
+      expect(p.reason, contains('עדכון אפליקציה'));
+    });
+
+    test('planner שאינו מצהיר על סכמה נחסם במחסום ואינו מוריד סכמה 6', () {
+      final p = planV29(
+          local: 28,
+          localSchema: 5,
+          edges: [barrier(28)],
+          using: const LibraryUpdatePlanner());
+      expect(kDefaultConsumerDbSchemaVersion, 5);
+      expect(p.kind, LibraryUpdatePlanKind.blocked);
+      expect(p.reason, contains('עדכון אפליקציה'));
+    });
+
+    // מתעד את הלקוח הישן (upstream/main לפני סכמה 6): הוא מתעלם מ-fullRebase,
+    // ולא רואה את seforim-schema6.db.zst כ-DB מלא (latestFullDbAsset: null).
+    test('לקוח ישן: המחסום הוא edge תקין אך לא נתמך → blocked, בלי הורדת 6',
+        () {
+      const oldClient = LibraryUpdatePlanner(
+        supportedDbSchemaVersion: 5,
+        supportedPatchFormatVersion: 4,
+      );
+      final asSeenByOldClient = _edge(28, 29,
+          fromSchema: 5, toSchema: 6, patchFormat: 999, fullRebase: false);
+      final p = planV29(
+          local: 28,
+          localSchema: 5,
+          edges: [asSeenByOldClient],
+          full: null,
+          using: oldClient);
+      expect(p.kind, LibraryUpdatePlanKind.blocked);
+      expect(p.fullDbAsset, isNull);
+      expect(p.reason, contains('נדרש עדכון אפליקציה'));
     });
   });
 }

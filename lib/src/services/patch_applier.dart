@@ -12,10 +12,11 @@ import 'logical_content_hasher.dart';
 /// `line_ref` ו-`line_dh` (סכמה 4) מוחרגות במכוון: הן אינדקסים נגזרים
 /// (הפניה→שורה, דיבור-המתחיל→שורה) ולא תוכן שנכנס לאינדקס החיפוש, ושינוי
 /// בהן לבדן לא צריך לגרור רענון אינדקס לספר — שינוי תוכן אמיתי מגיע תמיד
-/// דרך שורות `line` שכבר מכוסות.
+/// דרך `line` / `line_content` שכבר מכוסות.
 const Set<String> kBooksTouchedTables = {
   'book',
   'line',
+  'line_content',
   'tocEntry',
   'line_toc',
   'tocText',
@@ -178,7 +179,8 @@ class PatchApplyException implements Exception {
 
 /// בוחר את סדר ה-hash לפי גרסת הסכמה: 1 → [kHashTableOrderSchema1] (33),
 /// 2 → [kHashTableOrderSchema2] (34), 3 → [kHashTableOrderSchema3] (35),
-/// 4 → [kHashTableOrderSchema4], 5 → [kHashTableOrder] (37, הנוכחי).
+/// 4 → [kHashTableOrderSchema4], 5 → [kHashTableOrderSchema5] (37),
+/// 6 → [kHashTableOrderSchema6] (38, הנוכחי).
 /// כל ערך אחר → זריקה (fail loudly).
 List<String> hashTableOrderForSchemaVersion(int schemaVersion) {
   switch (schemaVersion) {
@@ -191,7 +193,9 @@ List<String> hashTableOrderForSchemaVersion(int schemaVersion) {
     case 4:
       return kHashTableOrderSchema4;
     case 5:
-      return kHashTableOrder;
+      return kHashTableOrderSchema5;
+    case 6:
+      return kHashTableOrderSchema6;
     default:
       throw PatchApplyException(
         'גרסת סכמה $schemaVersion אינה נתמכת לבחירת סדר hash',
@@ -828,6 +832,12 @@ class PatchApplier {
       collect(
           '${op}_line',
           'SELECT DISTINCT l.bookId FROM patch.${op}_line p '
+              'JOIN main.line l ON l.id = p.id',
+          joins: const ['line']);
+      // סכמה 6: תוכן השורה ב-line_content, באותו id של line.
+      collect(
+          '${op}_line_content',
+          'SELECT DISTINCT l.bookId FROM patch.${op}_line_content p '
               'JOIN main.line l ON l.id = p.id',
           joins: const ['line']);
       collect(

@@ -14,7 +14,8 @@ const double kDefaultMaxDeltaUncompressedRatio = 0.25;
 /// פונקציה טהורה — אינה ניגשת לרשת או ל-DB. מקבלת את כל המידע שכבר נאסף
 /// (גרסה מקומית, edges, ו-DB מלא ל-fallback) ומחזירה [LibraryUpdatePlan].
 class LibraryUpdatePlanner {
-  /// גרסת סכמת ה-DB הלוגית הגבוהה ביותר שהצרכן יודע לאמת.
+  /// סכמת ה-DB הגבוהה ביותר שהצרכן יודע לקרוא ולאמת; ברירת המחדל
+  /// [kDefaultConsumerDbSchemaVersion], לכל היותר [kSupportedDbSchemaVersion].
   final int supportedDbSchemaVersion;
 
   /// גרסת פורמט patch.db הגבוהה ביותר שה-applier בצרכן יודע להחיל.
@@ -24,10 +25,11 @@ class LibraryUpdatePlanner {
   final double maxDeltaUncompressedRatio;
 
   const LibraryUpdatePlanner({
-    this.supportedDbSchemaVersion = kSupportedDbSchemaVersion,
+    this.supportedDbSchemaVersion = kDefaultConsumerDbSchemaVersion,
     this.supportedPatchFormatVersion = kSupportedPatchFormatVersion,
     this.maxDeltaUncompressedRatio = kDefaultMaxDeltaUncompressedRatio,
   })  : assert(supportedDbSchemaVersion >= 1),
+        assert(supportedDbSchemaVersion <= kSupportedDbSchemaVersion),
         assert(supportedPatchFormatVersion >= 1),
         assert(maxDeltaUncompressedRatio > 0);
 
@@ -38,6 +40,8 @@ class LibraryUpdatePlanner {
   /// הערך עצמו nullable כאשר `db_schema_version` חסר ב-DB ישן.
   /// [hasLocalVersionMeta] — `false` אם `schema_meta.db_version` חסר.
   /// [latestVersion] — הגרסה הגבוהה ביותר הזמינה ב-releases.
+  /// [latestDbSchemaVersion] — סכמת ה-DB המלא שה-release האחרון מפרסם,
+  /// גם כשאינו נתמך (מתוך `LibraryDiscoveryResult.latestDbSchemaVersion`).
   /// [edges] — כל ה-patches הזמינים.
   /// [latestFullDbAsset] / [latestReleaseTag] — ה-DB המלא ל-fallback.
   /// [localDbSizeBytes] — גודל ה-DB המקומי; כשהוא ידוע, מסלול דלתא שעלות
@@ -49,17 +53,31 @@ class LibraryUpdatePlanner {
     required bool hasLocalVersionMeta,
     required int latestVersion,
     required List<PatchEdge> edges,
+    int? latestDbSchemaVersion,
     ReleaseAsset? latestFullDbAsset,
     String? latestReleaseTag,
     int? localDbSizeBytes,
   }) {
+    // DB מלא בסכמה שהצרכן אינו קורא לעולם אינו fallback, גם כשהועבר לכאן.
+    final schema = latestFullDbAsset?.fullDbSchemaVersion;
+    final fullDbAsset = schema == null || schema <= supportedDbSchemaVersion
+        ? latestFullDbAsset
+        : null;
+    final advertisedSchema = latestDbSchemaVersion ?? schema;
+    final unsupportedLatest = advertisedSchema != null &&
+        advertisedSchema > supportedDbSchemaVersion &&
+        fullDbAsset == null;
+    final updateAppReason = 'הספרייה עברה לסכמת DB $advertisedSchema, '
+        'חדשה מהנתמך (DB $supportedDbSchemaVersion) — נדרש עדכון אפליקציה';
     if (!hasLocalVersionMeta) {
       return _fullOrBlocked(
         localVersion: localVersion,
         latestVersion: latestVersion,
-        asset: latestFullDbAsset,
+        asset: fullDbAsset,
         tag: latestReleaseTag,
-        reason: 'גרסת ה-DB המקומי אינה ידועה (חסר schema_meta.db_version)',
+        reason: unsupportedLatest
+            ? updateAppReason
+            : 'גרסת ה-DB המקומי אינה ידועה (חסר schema_meta.db_version)',
       );
     }
 
@@ -72,7 +90,9 @@ class LibraryUpdatePlanner {
 
     // חוזה ה-DB וחוזה פורמט ה-patch נבדקים בנפרד. מניפסטים היסטוריים אינם
     // כוללים patchFormatVersion; בהם ה-applier נשאר שער ה-preflight.
+    // מחסום סכמה (fullRebase) אינו patch אמיתי — לעולם לא שלב במסלול.
     final validEdges = edges.where((e) {
+      if (e.manifest.fullRebase) return false;
       final fromSchema = e.manifest.fromSchemaVersion;
       final toSchema = e.manifest.toSchemaVersion;
       final patchFormat = e.manifest.patchFormatVersion;
@@ -107,12 +127,35 @@ class LibraryUpdatePlanner {
         localVersion: localVersion,
         targetVersion: latestVersion,
         steps: path,
-        fullDbAsset: latestFullDbAsset,
+        fullDbAsset: fullDbAsset,
         fullDbReleaseTag: latestReleaseTag,
         heavyDeltaReason: isHeavy
             ? 'מסלול הדלתא פורס ${_size(deltaBytes)} לעומת DB מקומי בגודל '
                 '${_size(dbBytes)}, ושלב ההחלה עלול להימשך זמן רב'
             : null,
+      );
+    }
+
+    if (unsupportedLatest) {
+      return LibraryUpdatePlan.blocked(
+        localVersion: localVersion,
+        targetVersion: latestVersion,
+        reason: updateAppReason,
+      );
+    }
+
+    final barrier = _barrierFrom(edges, localVersion, localSchemaVersion);
+    if (barrier != null) {
+      final toSchema = barrier.manifest.toSchemaVersion;
+      return _fullOrBlocked(
+        localVersion: localVersion,
+        latestVersion: latestVersion,
+        asset: fullDbAsset,
+        tag: latestReleaseTag,
+        reason: toSchema <= supportedDbSchemaVersion
+            ? 'הספרייה עברה לסכמת DB $toSchema; המעבר מחייב הורדה מלאה'
+            : 'הספרייה עברה לסכמת DB $toSchema, חדשה מהנתמך '
+                '(DB $supportedDbSchemaVersion) — נדרש עדכון אפליקציה',
       );
     }
 
@@ -129,7 +172,7 @@ class LibraryUpdatePlanner {
     return _fullOrBlocked(
       localVersion: localVersion,
       latestVersion: latestVersion,
-      asset: latestFullDbAsset,
+      asset: fullDbAsset,
       tag: latestReleaseTag,
       reason: blockedByCapability
           ? 'מסלול הדלתא לגרסה $latestVersion דורש סכמת DB או פורמט patch '
@@ -137,6 +180,30 @@ class LibraryUpdatePlanner {
               'patch $supportedPatchFormatVersion) — נדרש עדכון אפליקציה'
           : 'אין מסלול דלתא רציף מגרסה $localVersion לגרסה $latestVersion',
     );
+  }
+
+  /// מחסום הסכמה שיוצא מהמצב המקומי, עם סכמת היעד הגבוהה ביותר; null אם אין.
+  /// מחסום מסכמה אחרת תקף כל עוד הסכמה המקומית נמוכה מסכמת היעד שלו.
+  PatchEdge? _barrierFrom(
+    List<PatchEdge> edges,
+    int localVersion,
+    int? localSchemaVersion,
+  ) {
+    PatchEdge? best;
+    for (final edge in edges) {
+      final m = edge.manifest;
+      if (!m.fullRebase || m.fromVersion != localVersion) continue;
+      if (m.toVersion <= localVersion) continue;
+      if (localSchemaVersion != null &&
+          m.fromSchemaVersion != localSchemaVersion &&
+          localSchemaVersion >= m.toSchemaVersion) {
+        continue;
+      }
+      if (best == null || m.toSchemaVersion > best.manifest.toSchemaVersion) {
+        best = edge;
+      }
+    }
+    return best;
   }
 
   /// גודל קריא בטקסט LTR-בטוח: GB מעל ג'יגה-בייט אחד, אחרת MB.

@@ -6,6 +6,8 @@ import 'package:sqlite3/sqlite3.dart';
 import 'package:seforim_library_updater/seforim_library_updater.dart'
     show LogicalContentHasher;
 
+import 'src/db_hash_order.dart';
+
 void main(List<String> args) {
   final dbPath = args.isNotEmpty
       ? args[0]
@@ -18,12 +20,14 @@ void main(List<String> args) {
     return;
   }
 
+  final order = hashTableOrderForDbFile(dbPath);
   final db = sqlite3.open(dbPath, mode: OpenMode.readOnly);
 
   var reports = 0;
   var last = 0;
   final sw = Stopwatch()..start();
-  final hash = const LogicalContentHasher().compute(db, onProgress: (bytes) {
+  final hash = const LogicalContentHasher().compute(db, tableOrder: order,
+      onProgress: (bytes) {
     reports++;
     last = bytes;
     if (reports % 20 == 0) {

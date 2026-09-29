@@ -18,7 +18,8 @@ void main() {
       a.execute("INSERT INTO source VALUES (1,'aleph'),(2,'bet'),(3,'gimel')");
       b.execute("INSERT INTO source VALUES (3,'gimel'),(1,'aleph'),(2,'bet')");
 
-      expect(_hasher.compute(a), _hasher.compute(b));
+      expect(_hasher.compute(a, tableOrder: kHashTableOrder),
+          _hasher.compute(b, tableOrder: kHashTableOrder));
       a.close();
       b.close();
     });
@@ -32,7 +33,8 @@ void main() {
       }
       b.execute("UPDATE source SET name='changed' WHERE id=2");
 
-      expect(_hasher.compute(a), isNot(_hasher.compute(b)));
+      expect(_hasher.compute(a, tableOrder: kHashTableOrder),
+          isNot(_hasher.compute(b, tableOrder: kHashTableOrder)));
       a.close();
       b.close();
     });
@@ -46,7 +48,8 @@ void main() {
       // ב-a הערך הוא טקסט "1", ב-b הוא מספר 1 — צריך hash שונה (type tag).
       a.execute("INSERT INTO source VALUES (1,'1')");
       b.execute('INSERT INTO source VALUES (1,1)');
-      expect(_hasher.compute(a), isNot(_hasher.compute(b)));
+      expect(_hasher.compute(a, tableOrder: kHashTableOrder),
+          isNot(_hasher.compute(b, tableOrder: kHashTableOrder)));
       a.close();
       b.close();
     });
@@ -56,7 +59,8 @@ void main() {
       db.execute('CREATE TABLE source (id INTEGER PRIMARY KEY, name TEXT)');
       db.execute("INSERT INTO source VALUES (1,'x')");
       // שאר הטבלאות ב-kHashTableOrder חסרות — אסור שזה יזרוק.
-      expect(() => _hasher.compute(db), returnsNormally);
+      expect(() => _hasher.compute(db, tableOrder: kHashTableOrder),
+          returnsNormally);
       db.close();
     });
   });
@@ -68,10 +72,10 @@ void main() {
       db.execute('CREATE TABLE source (id INTEGER PRIMARY KEY, name TEXT)');
       db.execute("INSERT INTO source VALUES (1,'aleph'),(2,'bet'),(3,'gimel')");
       expect(
-        _hasher.compute(db),
-        // 37 טבלאות ב-kHashTableOrder (סכמה 4) — כל שם נכתב כ-
+        _hasher.compute(db, tableOrder: kHashTableOrder),
+        // 38 טבלאות ב-kHashTableOrder (סכמה 6) — כל שם נכתב כ-
         // marker גם כשהטבלה נעדרת, לכן ה-golden מתעדכן עם סנכרון הרשימה.
-        '493bda433e8a8a154b69645c148240159365bca99d3386afd8e113c75b1d59ed',
+        '11db2956a9a57b9b458fb661f8a99d9a1f5960dc1c369ac6e17ec74e0df7f992',
       );
       // הסדר הקפוא של סכמה-3 חייב להמשיך לשחזר את ה-golden ההיסטורי —
       // מוכיח שההקפאה נאמנה בית-בבית לרשימה שלפני הוספת line_ref ו-line_dh.
@@ -90,7 +94,8 @@ void main() {
       }
       withBom.execute('INSERT INTO source VALUES (1, ?)', ['﻿aleph']);
       without.execute("INSERT INTO source VALUES (1,'aleph')");
-      expect(_hasher.compute(withBom), isNot(_hasher.compute(without)));
+      expect(_hasher.compute(withBom, tableOrder: kHashTableOrder),
+          isNot(_hasher.compute(without, tableOrder: kHashTableOrder)));
       withBom.close();
       without.close();
     });
