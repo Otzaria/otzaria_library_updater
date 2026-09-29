@@ -939,7 +939,7 @@ void main() {
         fromSchema: 3,
         toSchema: 4,
         fromHash: _hashWithOrder(base, kHashTableOrderSchema3),
-        toHash: _hashWithOrder(expected, kHashTableOrder),
+        toHash: _hashWithOrder(expected, kHashTableOrderSchema4),
       );
 
       final result = _applier.apply(
@@ -1172,7 +1172,7 @@ void main() {
         toSchema: 5,
         patchFormat: 4,
         fromHash: _hashWithOrder(base, kHashTableOrderSchema4),
-        toHash: _hashWithOrder(expected, kHashTableOrder),
+        toHash: _hashWithOrder(expected, kHashTableOrderSchema5),
       );
       final result =
           _applier.apply(dbPath: base, patchPath: patch, manifest: manifest);
@@ -1632,21 +1632,30 @@ void main() {
     });
     test('סכמה-4 → סדר 37 הקפוא (כולל line_ref + line_dh)', () {
       expect(hashTableOrderForSchemaVersion(4), same(kHashTableOrderSchema4));
-      expect(kHashTableOrder.length, 37);
+      expect(kHashTableOrderSchema4.length, 37);
       // מיד אחרי line_toc — אותו מיקום כמו בצד הקוטליני.
-      expect(kHashTableOrder.indexOf('line_ref'),
-          kHashTableOrder.indexOf('line_toc') + 1);
-      expect(kHashTableOrder.indexOf('line_dh'),
-          kHashTableOrder.indexOf('line_ref') + 1);
+      expect(kHashTableOrderSchema4.indexOf('line_ref'),
+          kHashTableOrderSchema4.indexOf('line_toc') + 1);
+      expect(kHashTableOrderSchema4.indexOf('line_dh'),
+          kHashTableOrderSchema4.indexOf('line_ref') + 1);
     });
     test('סכמה-5 → אותו סדר טבלאות, עם חוזה העמודות החדש', () {
-      expect(hashTableOrderForSchemaVersion(5), same(kHashTableOrder));
-      expect(kHashTableOrder, same(kHashTableOrderSchema4));
+      expect(hashTableOrderForSchemaVersion(5), same(kHashTableOrderSchema5));
+      expect(kHashTableOrderSchema5, same(kHashTableOrderSchema4));
+    });
+    test('סכמה-6 → סדר 38 הנוכחי, line_content מיד אחרי line', () {
+      expect(hashTableOrderForSchemaVersion(6), same(kHashTableOrderSchema6));
+      expect(kHashTableOrder, same(kHashTableOrderSchema6));
+      expect(kHashTableOrderSchema6.length, 38);
+      expect(kHashTableOrderSchema6.indexOf('line_content'),
+          kHashTableOrderSchema6.indexOf('line') + 1);
+      expect([...kHashTableOrderSchema6]..remove('line_content'),
+          kHashTableOrderSchema5);
     });
     test('גרסת סכמה לא מוכרת → זורק PatchApplyException', () {
       expect(() => hashTableOrderForSchemaVersion(0),
           throwsA(isA<PatchApplyException>()));
-      expect(() => hashTableOrderForSchemaVersion(6),
+      expect(() => hashTableOrderForSchemaVersion(7),
           throwsA(isA<PatchApplyException>()));
     });
   });
