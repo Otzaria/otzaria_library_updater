@@ -2004,6 +2004,37 @@ void main() {
       expect(readOnlyFileUri(patch), endsWith('p %232.db?mode=ro'));
     });
 
+    // הצרכן מציע הורדה מלאה רק על PatchApplyException.
+    void expectOpenFailure(String patchPath) {
+      final base = buildBaseDb(version: 1, sourceRows: [
+        [1, 'a'],
+      ]);
+      final before = _hashOf(base);
+      expect(
+        () => _applier.apply(
+          dbPath: base,
+          patchPath: patchPath,
+          manifest: _manifest(from: 1, to: 2, fromHash: before, toHash: 'x'),
+        ),
+        throwsA(isA<PatchApplyException>()
+            .having((e) => e.cause, 'cause', isA<sqlite3.SqliteException>())
+            .having((e) => e.message, 'message', contains(patchPath))),
+      );
+      expect(_hashOf(base), before);
+    }
+
+    test('נתיב patch שלא קיים נזרק כ-PatchApplyException ולא נוצר', () {
+      final missing = '${tmp.path}/missing.db';
+      expectOpenFailure(missing);
+      expect(File(missing).existsSync(), isFalse);
+    });
+
+    test('קובץ patch שאינו SQLite נזרק כ-PatchApplyException', () {
+      final garbage = File('${tmp.path}/garbage.db')
+        ..writeAsBytesSync(List.filled(8192, 0x5A));
+      expectOpenFailure(garbage.path);
+    });
+
     test('נתיב UNC נשמר כ-file:////host/share', () {
       expect(readOnlyFileUri(r'\\server\share\dir\p.db'),
           'file:////server/share/dir/p.db?mode=ro');

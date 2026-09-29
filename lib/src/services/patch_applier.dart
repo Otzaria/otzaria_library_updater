@@ -162,11 +162,15 @@ class PatchApplyException implements Exception {
   /// שמות הטבלאות שה-hash שלהן לא תאם, כשהאימות היה לפי טבלאות. null אחרת.
   final List<String>? mismatchedTables;
 
+  /// השגיאה המקורית, כשהכשל עטוף (למשל פתיחת קובץ ה-patch).
+  final Object? cause;
+
   const PatchApplyException(
     this.message, {
     bool isContentMismatch = false,
     this.hashMismatchStage,
     this.mismatchedTables,
+    this.cause,
   }) : isContentMismatch = isContentMismatch || hashMismatchStage != null;
   @override
   String toString() => 'PatchApplyException: $message';
@@ -330,7 +334,7 @@ class PatchApplier {
 
       // ── ATTACH (חייב להיות מחוץ ל-transaction) ──
       onStage?.call('attach');
-      db.execute('ATTACH DATABASE ? AS patch', [readOnlyFileUri(patchPath)]);
+      _attachPatch(db, patchPath);
       attached = true;
       _assertPatchCompatible(db, manifest);
 
@@ -536,6 +540,24 @@ class PatchApplier {
     if (!_hasTable(db, 'patch', name)) return false;
     return db.select('SELECT 1 FROM patch."$name" LIMIT 1').isNotEmpty;
   }
+
+  /// כשל פתיחה נזרק כ-[PatchApplyException], כדי שהצרכן יציע הורדה מלאה.
+  /// ATTACH פותח בעצלות: קובץ שאינו SQLite נכשל רק בקריאה הראשונה.
+  void _attachPatch(sqlite3.Database db, String patchPath) {
+    try {
+      db.execute('ATTACH DATABASE ? AS patch', [readOnlyFileUri(patchPath)]);
+      db.select('SELECT 1 FROM patch.sqlite_master LIMIT 1');
+    } on sqlite3.SqliteException catch (e) {
+      if (_isAttached(db, 'patch')) db.execute('DETACH DATABASE patch');
+      throw PatchApplyException(
+        'לא ניתן לפתוח את קובץ ה-patch ($patchPath): ${e.message}',
+        cause: e,
+      );
+    }
+  }
+
+  static bool _isAttached(sqlite3.Database db, String name) => db.select(
+      'SELECT 1 FROM pragma_database_list WHERE name = ?', [name]).isNotEmpty;
 
   void _assertPatchCompatible(sqlite3.Database db, DeltaManifest manifest) {
     final schemaVersion = _readPatchMetaInt(db, 'schema_version');

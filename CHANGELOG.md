@@ -13,6 +13,8 @@
   וברישיות, כמו ה-hash. `PatchApplyResult.upserts` סופר רק שורות שנוספו או
   השתנו בפועל.
 - ה-patch מוצמד לקריאה בלבד (`mode=ro`), והחיבור נפתח עם `uri: true`.
+  כשל בפתיחת ה-patch (קובץ חסר או שאינו SQLite) נזרק כ-`PatchApplyException`,
+  והשגיאה המקורית נשמרת ב-`cause` החדש.
 - מעבר ה-`count(*)` הנפרד הוסר: גבולות המנות וספירת השורות נאספים יחד לפני
   ה-transaction. חוזה `onApplyProgress` לא השתנה.
 - טבלת `stat1_snapshot` ב-patch (אופציונלית) מחליפה את `sqlite_stat1` בתוך
