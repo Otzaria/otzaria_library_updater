@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.7.0
+
+החלת patch מהירה יותר, ו-sqlite_stat1 מגיע גם ללקוחות שמתעדכנים בדלתא.
+
+- `PatchApplier`: פרמטרי בנאי `cacheSizeKib` (ברירת מחדל 256MB, לשלב
+  ה-upserts/deletes) ו-`hashCacheSizeKib` (ברירת מחדל 64MB, לחישובי ה-hash),
+  ו-`temp_store=FILE`. מיון ה-hash של `version_line` לא נשמר עוד כולו בזיכרון.
+  ב-Android רק כש-`sqlite3.tempDirectory` (או `TMPDIR`) מוגדר, אחרת SQLite
+  לא מוצא היכן לפתוח קובץ זמני.
+- upsert של שורה זהה לקיימת כבר לא כותב אותה. ההשוואה מבחינה גם בסוג הערך
+  וברישיות, כמו ה-hash. `PatchApplyResult.upserts` סופר רק שורות שנוספו או
+  השתנו בפועל.
+- ה-patch מוצמד לקריאה בלבד (`mode=ro`), והחיבור נפתח עם `uri: true`.
+  כשל בפתיחת ה-patch (קובץ חסר או שאינו SQLite) נזרק כ-`PatchApplyException`,
+  והשגיאה המקורית נשמרת ב-`cause` החדש.
+- מעבר ה-`count(*)` הנפרד הוסר: גבולות המנות וספירת השורות נאספים יחד לפני
+  ה-transaction. חוזה `onApplyProgress` לא השתנה.
+- טבלת `stat1_snapshot` ב-patch (אופציונלית) מחליפה את `sqlite_stat1` בתוך
+  ה-transaction. patch בלעדיה משאיר את הסטטיסטיקות הקיימות, ו-applier ישן
+  מתעלם ממנה.
+
 ## 0.6.0
 
 ניסיון חוזר אוטומטי אחרי קטיעת רשת, עם המשך מהנקודה שנעצרה (Otzaria issue #1244).

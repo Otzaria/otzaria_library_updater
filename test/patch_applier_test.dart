@@ -5,6 +5,7 @@ import 'package:seforim_library_updater/src/models/delta_manifest.dart';
 import 'package:seforim_library_updater/src/models/patch_table_spec.dart';
 import 'package:seforim_library_updater/src/services/logical_content_hasher.dart';
 import 'package:seforim_library_updater/src/services/patch_applier.dart';
+import 'package:seforim_library_updater/src/sqlite/sqlite3_api.dart' as api;
 import 'package:sqlite3/sqlite3.dart' as sqlite3;
 
 const _hasher = LogicalContentHasher();
@@ -1887,4 +1888,342 @@ void main() {
       expect(seen.last, (3, 3));
     });
   });
+
+  group('upsert ללא שינוי', () {
+    // source עם NOCASE ועמודה בלי affinity: שני המקרים ש-IS NOT לבדו מחמיץ.
+    String buildTypedDb(String name, int version, List<List> rows) {
+      final path = '${tmp.path}/$name.db';
+      final db = sqlite3.sqlite3.open(path);
+      db.execute('CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT)');
+      db.execute("INSERT INTO schema_meta VALUES ('db_version','$version'),"
+          "('db_schema_version','2')");
+      db.execute('CREATE TABLE source '
+          '(id INTEGER PRIMARY KEY, name TEXT COLLATE NOCASE, weight)');
+      for (final r in rows) {
+        db.execute('INSERT INTO source VALUES (?,?,?)', r);
+      }
+      // מחוץ לסדר ה-hash — סופר עדכונים שבוצעו בפועל.
+      db.execute('CREATE TABLE update_log (id INTEGER)');
+      db.execute('CREATE TRIGGER source_upd AFTER UPDATE ON source '
+          'BEGIN INSERT INTO update_log VALUES (new.id); END');
+      db.close();
+      return path;
+    }
+
+    test('שורה זהה לא מתעדכנת, ושינוי רישיות או 2→2.0 כן', () {
+      final base = buildTypedDb('noop_base', 1, [
+        [1, 'abc', 1],
+        [2, 'same', 5],
+        [3, 'null', null],
+        [5, 'w', 2],
+      ]);
+      final expected = buildTypedDb('noop_expected', 2, [
+        [1, 'ABC', 1],
+        [2, 'same', 5],
+        [3, 'null', null],
+        [4, 'new', 1],
+        [5, 'w', 2.0],
+      ]);
+      final patch = '${tmp.path}/noop_patch.db';
+      final p = sqlite3.sqlite3.open(patch);
+      p.execute('CREATE TABLE patch_meta (key TEXT PRIMARY KEY, value TEXT)');
+      p.execute("INSERT INTO patch_meta VALUES ('schema_version','1'),"
+          "('from_version','1'),('to_version','2')");
+      p.execute(
+          'CREATE TABLE migrations (version INTEGER PRIMARY KEY, sql TEXT)');
+      p.execute(
+          'CREATE TABLE upsert_schema_meta (key TEXT PRIMARY KEY, value TEXT)');
+      p.execute("INSERT INTO upsert_schema_meta VALUES ('db_version','2')");
+      p.execute('CREATE TABLE upsert_source '
+          '(id INTEGER PRIMARY KEY, name TEXT, weight)');
+      for (final r in [
+        [1, 'ABC', 1],
+        [2, 'same', 5],
+        [3, 'null', null],
+        [4, 'new', 1],
+        [5, 'w', 2.0],
+      ]) {
+        p.execute('INSERT INTO upsert_source VALUES (?,?,?)', r);
+      }
+      p.close();
+
+      final result = _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: _manifest(
+          from: 1,
+          to: 2,
+          fromHash: _hashOf(base),
+          toHash: _hashOf(expected),
+        ),
+      );
+
+      expect(result.resultHash, _hashOf(expected));
+      expect(result.upserts['source'], 3, reason: 'שני עדכונים + הוספה');
+      final db = sqlite3.sqlite3.open(base, mode: sqlite3.OpenMode.readOnly);
+      try {
+        final updated = db
+            .select('SELECT id FROM update_log ORDER BY id')
+            .map((r) => r['id'])
+            .toList();
+        expect(updated, [1, 5]);
+      } finally {
+        db.close();
+      }
+    });
+  });
+
+  group('חיבור ה-apply', () {
+    test('ה-patch מוצמד לקריאה בלבד גם בנתיב עם רווח, # ו-%', () {
+      final base = buildBaseDb(version: 1, sourceRows: [
+        [1, 'a'],
+      ]);
+      final built = buildPatchDb(from: 1, to: 2, upsertSource: [
+        [1, 'b'],
+      ]);
+      final dir = Directory('${tmp.path}/dir #1 %20')..createSync();
+      final patch = File(built).renameSync('${dir.path}/p #2.db').path;
+      final before = File(patch).readAsBytesSync();
+      final expected = buildBaseDb(version: 2, sourceRows: [
+        [1, 'b'],
+      ]);
+
+      final r = _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: _manifest(
+          from: 1,
+          to: 2,
+          fromHash: _hashOf(base),
+          toHash: _hashOf(expected),
+        ),
+      );
+
+      expect(r.resultHash, _hashOf(expected));
+      expect(File(patch).readAsBytesSync(), before);
+      expect(readOnlyFileUri(patch), endsWith('p %232.db?mode=ro'));
+    });
+
+    // הצרכן מציע הורדה מלאה רק על PatchApplyException.
+    void expectOpenFailure(String patchPath) {
+      final base = buildBaseDb(version: 1, sourceRows: [
+        [1, 'a'],
+      ]);
+      final before = _hashOf(base);
+      expect(
+        () => _applier.apply(
+          dbPath: base,
+          patchPath: patchPath,
+          manifest: _manifest(from: 1, to: 2, fromHash: before, toHash: 'x'),
+        ),
+        throwsA(isA<PatchApplyException>()
+            .having((e) => e.cause, 'cause', isA<sqlite3.SqliteException>())
+            .having((e) => e.message, 'message', contains(patchPath))),
+      );
+      expect(_hashOf(base), before);
+    }
+
+    test('נתיב patch שלא קיים נזרק כ-PatchApplyException ולא נוצר', () {
+      final missing = '${tmp.path}/missing.db';
+      expectOpenFailure(missing);
+      expect(File(missing).existsSync(), isFalse);
+    });
+
+    test('קובץ patch שאינו SQLite נזרק כ-PatchApplyException', () {
+      final garbage = File('${tmp.path}/garbage.db')
+        ..writeAsBytesSync(List.filled(8192, 0x5A));
+      expectOpenFailure(garbage.path);
+    });
+
+    test('נתיב UNC נשמר כ-file:////host/share', () {
+      expect(readOnlyFileUri(r'\\server\share\dir\p.db'),
+          'file:////server/share/dir/p.db?mode=ro');
+    }, testOn: 'windows');
+
+    test('מחוץ ל-Windows לוכסן הפוך נשאר חלק משם הקובץ', () {
+      expect(readOnlyFileUri(r'/data/a\b.db'), 'file:///data/a\\b.db?mode=ro');
+    }, testOn: '!windows');
+
+    test('ה-hash רץ עם temp_store=FILE ו-cache_size של שלב ה-hash', () {
+      final base = buildBaseDb(version: 1, sourceRows: [
+        [1, 'a'],
+      ]);
+      final patch = buildPatchDb(from: 1, to: 2, upsertSource: [
+        [1, 'b'],
+      ]);
+      final expected = buildBaseDb(version: 2, sourceRows: [
+        [1, 'b'],
+      ]);
+      final probe = _PragmaProbeHasher();
+      final r = PatchApplier(
+              hasher: probe, cacheSizeKib: 8192, hashCacheSizeKib: 4096)
+          .apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: _manifest(
+          from: 1,
+          to: 2,
+          fromHash: _hashOf(base),
+          toHash: _hashOf(expected),
+        ),
+      );
+      expect(r.resultHash, _hashOf(expected));
+      // 1 = FILE; cache_size שלילי = KiB.
+      expect(probe.seen, everyElement((tempStore: 1, cacheSize: -4096)));
+      expect(probe.seen, hasLength(2), reason: 'from ו-to');
+    });
+  });
+
+  group('סטטיסטיקות מתכנן (stat1_snapshot)', () {
+    String buildIndexedDb(String name, int version, {bool withStats = false}) {
+      final path = buildBaseDb(version: version, sourceRows: [
+        for (var i = 1; i <= 20; i++) [i, 'n${i % 3}']
+      ]);
+      final target = '${tmp.path}/$name.db';
+      File(path).renameSync(target);
+      final db = sqlite3.sqlite3.open(target);
+      db.execute('CREATE INDEX idx_source_name ON source(name)');
+      if (withStats) {
+        db.execute('ANALYZE');
+        db.execute("UPDATE sqlite_stat1 SET stat = '999 1'");
+      }
+      db.close();
+      return target;
+    }
+
+    String buildStatPatch(String name, {List<List>? stats}) {
+      final path = buildPatchDb(from: 1, to: 2, upsertSource: [
+        [1, 'x'],
+      ]);
+      final target = '${tmp.path}/$name.db';
+      File(path).renameSync(target);
+      if (stats != null) {
+        final db = sqlite3.sqlite3.open(target);
+        db.execute('CREATE TABLE $kPatchStat1SnapshotTable '
+            '(tbl TEXT NOT NULL, idx TEXT, stat TEXT NOT NULL)');
+        for (final s in stats) {
+          db.execute('INSERT INTO $kPatchStat1SnapshotTable VALUES (?,?,?)', s);
+        }
+        db.close();
+      }
+      return target;
+    }
+
+    List<List<Object?>> statsOf(String dbPath) {
+      final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
+      try {
+        final exists = db.select("SELECT 1 FROM sqlite_master "
+            "WHERE name = 'sqlite_stat1'");
+        if (exists.isEmpty) return const [];
+        return db
+            .select('SELECT tbl, idx, stat FROM sqlite_stat1 ORDER BY tbl, idx')
+            .map((r) => r.values)
+            .toList();
+      } finally {
+        db.close();
+      }
+    }
+
+    const snapshot = [
+      ['source', 'idx_source_name', '20 7'],
+      ['schema_meta', 'sqlite_autoindex_schema_meta_1', '2 1'],
+    ];
+
+    DeltaManifest manifestFor(String base, String expected) => _manifest(
+          from: 1,
+          to: 2,
+          fromHash: _hashOf(base),
+          toHash: _hashOf(expected),
+        );
+
+    String expectedDb() {
+      final e = buildIndexedDb('stat_expected', 2);
+      final db = sqlite3.sqlite3.open(e);
+      db.execute("UPDATE source SET name = 'x' WHERE id = 1");
+      db.close();
+      return e;
+    }
+
+    test('DB בלי sqlite_stat1 מקבל את ה-snapshot, וה-hash לא משתנה', () {
+      final base = buildIndexedDb('stat_base', 1);
+      final expected = expectedDb();
+      final patch = buildStatPatch('stat_patch', stats: snapshot);
+
+      final r = _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifestFor(base, expected));
+
+      expect(r.resultHash, _hashOf(expected));
+      expect(statsOf(base), [
+        ['schema_meta', 'sqlite_autoindex_schema_meta_1', '2 1'],
+        ['source', 'idx_source_name', '20 7'],
+      ]);
+    });
+
+    test('snapshot מחליף סטטיסטיקות קיימות', () {
+      final base = buildIndexedDb('stat_base_old', 1, withStats: true);
+      final expected = expectedDb();
+      final patch = buildStatPatch('stat_patch2', stats: [snapshot.first]);
+
+      _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifestFor(base, expected));
+
+      expect(statsOf(base), [
+        ['source', 'idx_source_name', '20 7'],
+      ]);
+    });
+
+    test('patch בלי snapshot משאיר את הסטטיסטיקות הקיימות', () {
+      final base = buildIndexedDb('stat_base_keep', 1, withStats: true);
+      final before = statsOf(base);
+      final expected = expectedDb();
+      final patch = buildStatPatch('stat_patch3');
+
+      _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifestFor(base, expected));
+
+      expect(before, isNotEmpty);
+      expect(statsOf(base), before);
+    });
+
+    test('כשל toContentHash מגלגל לאחור גם את הסטטיסטיקות', () {
+      final base = buildIndexedDb('stat_base_rb', 1, withStats: true);
+      final before = statsOf(base);
+      final patch = buildStatPatch('stat_patch4', stats: snapshot);
+
+      expect(
+        () => _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: _manifest(
+              from: 1, to: 2, fromHash: _hashOf(base), toHash: 'wrong'),
+        ),
+        throwsA(isA<PatchApplyException>()),
+      );
+      expect(statsOf(base), before);
+    });
+  });
+}
+
+/// רושם את הגדרות החיבור בכל חישוב hash, ומאציל לחישוב האמיתי.
+class _PragmaProbeHasher extends LogicalContentHasher {
+  final seen = <({int tempStore, int cacheSize})>[];
+
+  void _record(api.Database db) => seen.add((
+        tempStore: db.select('PRAGMA temp_store').first.values.first as int,
+        cacheSize: db.select('PRAGMA cache_size').first.values.first as int,
+      ));
+
+  @override
+  String compute(api.Database db,
+      {List<String> tableOrder = kHashTableOrder,
+      void Function(int bytesHashed)? onProgress}) {
+    _record(db);
+    return super.compute(db, tableOrder: tableOrder, onProgress: onProgress);
+  }
 }
