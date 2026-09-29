@@ -105,9 +105,9 @@ class LibraryRelease extends Equatable {
   List<ReleaseAsset> get deltaManifestAssets =>
       assets.where((a) => a.isDeltaManifest).toList(growable: false);
 
-  /// ה-DB המלא הדחוס שסכמתו נתמכת ב-[kSupportedDbSchemaVersion], אם קיים.
+  /// ה-DB המלא הדחוס בסכמה [kDefaultConsumerDbSchemaVersion] ומטה, אם קיים.
   ReleaseAsset? get fullDbAsset =>
-      fullDbAssetFor(maxSchemaVersion: kSupportedDbSchemaVersion);
+      fullDbAssetFor(maxSchemaVersion: kDefaultConsumerDbSchemaVersion);
 
   /// ה-DB המלא בעל הסכמה הגבוהה ביותר שאינה עולה על [maxSchemaVersion].
   /// `seforim.db.zst` נחשב סכמה 5.

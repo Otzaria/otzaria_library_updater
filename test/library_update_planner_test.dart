@@ -2,6 +2,7 @@ import 'package:test/test.dart';
 import 'package:seforim_library_updater/src/models/delta_manifest.dart';
 import 'package:seforim_library_updater/src/models/library_release.dart';
 import 'package:seforim_library_updater/src/models/library_update_plan.dart';
+import 'package:seforim_library_updater/src/models/patch_table_spec.dart';
 import 'package:seforim_library_updater/src/services/library_update_planner.dart';
 
 /// בונה PatchEdge פיקטיבי מ-[from] ל-[to] בגודל דחוס [size].
@@ -515,6 +516,8 @@ void main() {
   });
 
   group('מחסום סכמה 6 (fullRebase)', () {
+    const planner = LibraryUpdatePlanner(
+        supportedDbSchemaVersion: kSupportedDbSchemaVersion);
     const schema6Full = ReleaseAsset(
       name: 'seforim-schema6.db.zst',
       downloadUrl: 'https://x/v29/seforim-schema6.db.zst',
@@ -595,6 +598,17 @@ void main() {
           edges: [barrier(28)],
           full: null,
           using: schema5Client);
+      expect(p.kind, LibraryUpdatePlanKind.blocked);
+      expect(p.reason, contains('עדכון אפליקציה'));
+    });
+
+    test('planner שאינו מצהיר על סכמה נחסם במחסום ואינו מוריד סכמה 6', () {
+      final p = planV29(
+          local: 28,
+          localSchema: 5,
+          edges: [barrier(28)],
+          using: const LibraryUpdatePlanner());
+      expect(kDefaultConsumerDbSchemaVersion, 5);
       expect(p.kind, LibraryUpdatePlanKind.blocked);
       expect(p.reason, contains('עדכון אפליקציה'));
     });

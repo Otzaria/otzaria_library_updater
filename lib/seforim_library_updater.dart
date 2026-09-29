@@ -18,6 +18,7 @@ export 'src/models/patch_table_spec.dart'
         PatchTableSpec,
         kPatchTablesInFkOrder,
         kHashTableOrder,
+        kDefaultConsumerDbSchemaVersion,
         kSupportedDbSchemaVersion;
 export 'src/services/github_library_release_client.dart'
     show GithubLibraryReleaseClient;

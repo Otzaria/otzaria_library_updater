@@ -378,11 +378,19 @@ void main() {
     }
 
     test('לקוח סכמה 6 מקבל את seforim-schema6.db.zst של latest', () async {
-      final result = await build().discover(allowPrerelease: false);
+      final result = await build(supportedDbSchemaVersion: 6)
+          .discover(allowPrerelease: false);
       expect(result.latestVersion, 29);
       expect(result.edges.single.manifest.fullRebase, isTrue);
       expect(result.latestFullDbAsset?.name, 'seforim-schema6.db.zst');
       expect(result.latestReleaseTag, 'v29');
+    });
+
+    // build של אפליקציה ישנה מול ref: main צף אינו מצהיר על סכמה.
+    test('צרכן שאינו מצהיר נשאר בסכמה 5 — אין fallback מלא לסכמה 6', () async {
+      final result = await build().discover(allowPrerelease: false);
+      expect(result.latestVersion, 29);
+      expect(result.latestFullDbAsset, isNull);
     });
 
     test('לקוח סכמה 5 — אין fallback מלא (latest לא נתמך, v28 ישן)', () async {

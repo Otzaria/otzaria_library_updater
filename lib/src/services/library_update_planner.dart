@@ -14,7 +14,8 @@ const double kDefaultMaxDeltaUncompressedRatio = 0.25;
 /// פונקציה טהורה — אינה ניגשת לרשת או ל-DB. מקבלת את כל המידע שכבר נאסף
 /// (גרסה מקומית, edges, ו-DB מלא ל-fallback) ומחזירה [LibraryUpdatePlan].
 class LibraryUpdatePlanner {
-  /// גרסת סכמת ה-DB הלוגית הגבוהה ביותר שהצרכן יודע לאמת.
+  /// סכמת ה-DB הגבוהה ביותר שהצרכן יודע לקרוא ולאמת; ברירת המחדל
+  /// [kDefaultConsumerDbSchemaVersion], לכל היותר [kSupportedDbSchemaVersion].
   final int supportedDbSchemaVersion;
 
   /// גרסת פורמט patch.db הגבוהה ביותר שה-applier בצרכן יודע להחיל.
@@ -24,10 +25,11 @@ class LibraryUpdatePlanner {
   final double maxDeltaUncompressedRatio;
 
   const LibraryUpdatePlanner({
-    this.supportedDbSchemaVersion = kSupportedDbSchemaVersion,
+    this.supportedDbSchemaVersion = kDefaultConsumerDbSchemaVersion,
     this.supportedPatchFormatVersion = kSupportedPatchFormatVersion,
     this.maxDeltaUncompressedRatio = kDefaultMaxDeltaUncompressedRatio,
   })  : assert(supportedDbSchemaVersion >= 1),
+        assert(supportedDbSchemaVersion <= kSupportedDbSchemaVersion),
         assert(supportedPatchFormatVersion >= 1),
         assert(maxDeltaUncompressedRatio > 0);
 
@@ -53,11 +55,16 @@ class LibraryUpdatePlanner {
     String? latestReleaseTag,
     int? localDbSizeBytes,
   }) {
+    // DB מלא בסכמה שהצרכן אינו קורא לעולם אינו fallback, גם כשהועבר לכאן.
+    final schema = latestFullDbAsset?.fullDbSchemaVersion;
+    final fullDbAsset = schema == null || schema <= supportedDbSchemaVersion
+        ? latestFullDbAsset
+        : null;
     if (!hasLocalVersionMeta) {
       return _fullOrBlocked(
         localVersion: localVersion,
         latestVersion: latestVersion,
-        asset: latestFullDbAsset,
+        asset: fullDbAsset,
         tag: latestReleaseTag,
         reason: 'גרסת ה-DB המקומי אינה ידועה (חסר schema_meta.db_version)',
       );
@@ -109,7 +116,7 @@ class LibraryUpdatePlanner {
         localVersion: localVersion,
         targetVersion: latestVersion,
         steps: path,
-        fullDbAsset: latestFullDbAsset,
+        fullDbAsset: fullDbAsset,
         fullDbReleaseTag: latestReleaseTag,
         heavyDeltaReason: isHeavy
             ? 'מסלול הדלתא פורס ${_size(deltaBytes)} לעומת DB מקומי בגודל '
@@ -124,7 +131,7 @@ class LibraryUpdatePlanner {
       return _fullOrBlocked(
         localVersion: localVersion,
         latestVersion: latestVersion,
-        asset: latestFullDbAsset,
+        asset: fullDbAsset,
         tag: latestReleaseTag,
         reason: toSchema <= supportedDbSchemaVersion
             ? 'הספרייה עברה לסכמת DB $toSchema; המעבר מחייב הורדה מלאה'
@@ -146,7 +153,7 @@ class LibraryUpdatePlanner {
     return _fullOrBlocked(
       localVersion: localVersion,
       latestVersion: latestVersion,
-      asset: latestFullDbAsset,
+      asset: fullDbAsset,
       tag: latestReleaseTag,
       reason: blockedByCapability
           ? 'מסלול הדלתא לגרסה $latestVersion דורש סכמת DB או פורמט patch '

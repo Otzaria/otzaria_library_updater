@@ -1,5 +1,8 @@
 import 'package:seforim_library_updater/seforim_library_updater.dart'
-    show fullDbArchiveNameForSchema, kSupportedDbSchemaVersion;
+    show
+        fullDbArchiveNameForSchema,
+        kDefaultConsumerDbSchemaVersion,
+        kSupportedDbSchemaVersion;
 import 'package:seforim_library_updater/src/models/library_release.dart';
 import 'package:test/test.dart';
 
@@ -66,13 +69,19 @@ void main() {
       expect(release.fullDbAssetFor(maxSchemaVersion: 5), isNull);
     });
 
-    test('fullDbAsset מאציל ל-kSupportedDbSchemaVersion', () {
-      expect(kSupportedDbSchemaVersion, 6);
+    test('fullDbAsset נשאר בסכמת ברירת המחדל של הצרכן (5)', () {
+      expect(kDefaultConsumerDbSchemaVersion, 5);
       expect(
           _releaseWith(['seforim.db.zst']).fullDbAsset?.name, 'seforim.db.zst');
       expect(
           _releaseWith(['seforim.db.zst', 'seforim-schema6.db.zst'])
               .fullDbAsset
+              ?.name,
+          'seforim.db.zst');
+      expect(_releaseWith(['seforim-schema6.db.zst']).fullDbAsset, isNull);
+      expect(
+          _releaseWith(['seforim.db.zst', 'seforim-schema6.db.zst'])
+              .fullDbAssetFor(maxSchemaVersion: kSupportedDbSchemaVersion)
               ?.name,
           'seforim-schema6.db.zst');
     });

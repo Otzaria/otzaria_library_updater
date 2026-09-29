@@ -48,8 +48,7 @@ const List<PatchTableSpec> kPatchTablesInFkOrder = [
   PatchTableSpec('line_ref', ['bookId', 'refKeyHash', 'lineIndex'],
       updatable: false),
   // סכמה 5. אינדקס דיבורי-המתחיל — dhDisplay (הצורה המודפסת) נלווית למפתח.
-  PatchTableSpec('line_dh', ['bookId', 'dhText', 'lineIndex'],
-      updatable: true),
+  PatchTableSpec('line_dh', ['bookId', 'dhText', 'lineIndex'], updatable: true),
   PatchTableSpec('link', ['id'], updatable: true),
   PatchTableSpec('link_anchor', ['linkId', 'side', 'charStart'],
       updatable: true),
@@ -111,6 +110,10 @@ const List<String> kHashTableOrderSchema2 = [
 
 /// גרסת סכמת ה-DB הלוגית הגבוהה ביותר שה-hasher וה-planner מכירים.
 const int kSupportedDbSchemaVersion = 6;
+
+/// הסכמה שצרכן מקבל כשאינו מצהיר אחרת. קורא `line_content` (סכמה 6) מצהיר
+/// במפורש, כך ש-build של אפליקציה ישנה מול `ref: main` צף לא יוריד DB שאינו קורא.
+const int kDefaultConsumerDbSchemaVersion = 5;
 
 /// גרסת פורמט `patch.db` הגבוהה ביותר שה-applier יודע להחיל.
 ///

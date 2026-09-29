@@ -24,12 +24,13 @@ class LibraryDiscoveryResult {
 class LibraryUpdateDiscovery {
   final GithubLibraryReleaseClient client;
 
-  /// הסכמה הגבוהה ביותר של DB מלא שמותר לבחור כ-fallback.
+  /// הסכמה הגבוהה ביותר של DB מלא שמותר לבחור כ-fallback; ראו
+  /// [kDefaultConsumerDbSchemaVersion].
   final int supportedDbSchemaVersion;
 
   const LibraryUpdateDiscovery({
     required this.client,
-    this.supportedDbSchemaVersion = kSupportedDbSchemaVersion,
+    this.supportedDbSchemaVersion = kDefaultConsumerDbSchemaVersion,
   });
 
   static final RegExp _manifestVersionPattern =

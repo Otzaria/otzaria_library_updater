@@ -24,6 +24,11 @@
   המחסום כ-edge לא נתמך (פורמט 999) ונחסם — לעולם לא מוריד סכמה 6.
 - fixtures החוזה (`patch_tables_contract.json`, `logical_hash_contract.json`)
   עודכנו לסכמה 6.
+- תמיכה בסכמה 6 היא הצהרה של הצרכן: ברירת המחדל של `LibraryUpdatePlanner`,
+  `LibraryUpdateDiscovery` ו-`LibraryRelease.fullDbAsset` היא
+  `kDefaultConsumerDbSchemaVersion` = 5. אפליקציה שקוראת `line_content` מעבירה
+  `supportedDbSchemaVersion: 6`. build של קוד אפליקציה ישן מול `ref: main` צף
+  לא יוריד DB בסכמה 6. ה-planner גם מתעלם מ-DB מלא בסכמה שאינה נתמכת.
 
 ## 0.7.0
 
