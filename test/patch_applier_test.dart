@@ -396,6 +396,48 @@ void main() {
       expect(result.hasChangesOutsideBooksTouched, isFalse);
     });
 
+    test('booksTouched ממפה שינוי תוכן בלבד ב-line_content (סכמה 6)', () {
+      void createTables(sqlite3.Database db) {
+        db.execute('CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT)');
+        db.execute(
+            'CREATE TABLE line (id INTEGER PRIMARY KEY, bookId INTEGER, heRef TEXT)');
+        db.execute(
+            'CREATE TABLE line_content (id INTEGER PRIMARY KEY, content TEXT NOT NULL)');
+        db.execute("INSERT INTO book VALUES (1,'א'),(2,'ב')");
+        db.execute("INSERT INTO line VALUES (10,1,'א א'),(20,2,'ב א')");
+      }
+
+      final base = buildBaseDb(version: 1, sourceRows: []);
+      final bdb = sqlite3.sqlite3.open(base);
+      createTables(bdb);
+      bdb.execute("INSERT INTO line_content VALUES (10,'x'),(20,'y')");
+      bdb.close();
+
+      final patch = buildPatchDb(from: 1, to: 2);
+      final pdb = sqlite3.sqlite3.open(patch);
+      pdb.execute(
+          'CREATE TABLE upsert_line_content (id INTEGER PRIMARY KEY, content TEXT NOT NULL)');
+      pdb.execute("INSERT INTO upsert_line_content VALUES (20,'Y2')");
+      pdb.close();
+
+      final expected = buildBaseDb(version: 2, sourceRows: []);
+      final edb = sqlite3.sqlite3.open(expected);
+      createTables(edb);
+      edb.execute("INSERT INTO line_content VALUES (10,'x'),(20,'Y2')");
+      edb.close();
+
+      final manifest = _manifest(
+        from: 1,
+        to: 2,
+        fromHash: _hashOf(base),
+        toHash: _hashOf(expected),
+      );
+      final result =
+          _applier.apply(dbPath: base, patchPath: patch, manifest: manifest);
+      expect(result.booksTouched, {2});
+      expect(result.hasChangesOutsideBooksTouched, isFalse);
+    });
+
     test('booksTouched ממפה tocText משותף ו-junction של מטא-דאטה לספרים', () {
       final base = buildBaseDb(version: 1, sourceRows: []);
       final bdb = sqlite3.sqlite3.open(base);
