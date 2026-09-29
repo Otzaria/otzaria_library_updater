@@ -306,4 +306,91 @@ void main() {
       expect(result.latestReleaseTag, isNull);
     });
   });
+
+  group('discover — DB מלא לפי סכמה', () {
+    // v29 בסכמה 6: DB מלא בשם החדש בלבד + מחסום מ-v28. v28 בסכמה 5.
+    final releasesJson = jsonEncode([
+      {
+        'tag_name': 'v29',
+        'prerelease': false,
+        'draft': false,
+        'assets': [
+          for (final n in [
+            'seforim-schema6.db.zst',
+            'patch-v28-v29.db.zst',
+            'patch-v28-v29.db.zst.manifest.json',
+          ])
+            {'name': n, 'browser_download_url': 'https://x/v29/$n', 'size': 9},
+        ],
+      },
+      {
+        'tag_name': 'v28',
+        'prerelease': false,
+        'draft': false,
+        'assets': [
+          {
+            'name': 'seforim.db.zst',
+            'browser_download_url': 'https://x/v28/seforim.db.zst',
+            'size': 9
+          },
+        ],
+      },
+    ]);
+    final barrierJson = jsonEncode({
+      'fromVersion': 28,
+      'toVersion': 29,
+      'fromSchemaVersion': 5,
+      'toSchemaVersion': 6,
+      'patchFormatVersion': 999,
+      'fullRebase': true,
+      'fromContentHash': 'full-rebase',
+      'toContentHash': 'full-rebase',
+      'patchFiles': [
+        {
+          'file': 'patch-v28-v29.db.zst',
+          'compression': 'zstd',
+          'sha256': 'c',
+          'size': 9,
+          'uncompressedSha256': 'u',
+          'uncompressedSize': 9,
+        }
+      ],
+    });
+
+    LibraryUpdateDiscovery build({int? supportedDbSchemaVersion}) {
+      final mock = MockClient((request) async {
+        final url = request.url.toString();
+        if (url.contains('/releases?') || url.endsWith('/releases')) {
+          return http.Response(releasesJson, 200);
+        }
+        if (url.endsWith('patch-v28-v29.db.zst.manifest.json')) {
+          return http.Response(barrierJson, 200);
+        }
+        return http.Response('not found', 404);
+      });
+      final client = GithubLibraryReleaseClient(httpClient: mock);
+      return supportedDbSchemaVersion == null
+          ? LibraryUpdateDiscovery(client: client)
+          : LibraryUpdateDiscovery(
+              client: client,
+              supportedDbSchemaVersion: supportedDbSchemaVersion,
+            );
+    }
+
+    test('לקוח סכמה 6 מקבל את seforim-schema6.db.zst של latest', () async {
+      final result = await build().discover(allowPrerelease: false);
+      expect(result.latestVersion, 29);
+      expect(result.edges.single.manifest.fullRebase, isTrue);
+      expect(result.latestFullDbAsset?.name, 'seforim-schema6.db.zst');
+      expect(result.latestReleaseTag, 'v29');
+    });
+
+    test('לקוח סכמה 5 — אין fallback מלא (latest לא נתמך, v28 ישן)', () async {
+      final result = await build(supportedDbSchemaVersion: 5)
+          .discover(allowPrerelease: false);
+      expect(result.latestVersion, 29);
+      expect(result.latestFullDbAsset, isNull);
+      expect(result.latestReleaseTag, isNull);
+    });
+  });
 }

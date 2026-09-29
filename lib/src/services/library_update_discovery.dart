@@ -1,5 +1,6 @@
 import '../models/library_release.dart';
 import '../models/library_update_plan.dart';
+import '../models/patch_table_spec.dart';
 import 'github_library_release_client.dart';
 
 /// תוצאת סריקת ה-releases: הגרסה האחרונה, ה-edges הזמינים, וה-DB המלא
@@ -23,7 +24,13 @@ class LibraryDiscoveryResult {
 class LibraryUpdateDiscovery {
   final GithubLibraryReleaseClient client;
 
-  const LibraryUpdateDiscovery({required this.client});
+  /// הסכמה הגבוהה ביותר של DB מלא שמותר לבחור כ-fallback.
+  final int supportedDbSchemaVersion;
+
+  const LibraryUpdateDiscovery({
+    required this.client,
+    this.supportedDbSchemaVersion = kSupportedDbSchemaVersion,
+  });
 
   static final RegExp _manifestVersionPattern =
       RegExp(r'^patch-v(\d+)-v(\d+)\.db\.zst\.manifest\.json$');
@@ -68,13 +75,14 @@ class LibraryUpdateDiscovery {
       if (edge.toVersion > maxEdgeVersion) maxEdgeVersion = edge.toVersion;
     }
 
-    // ה-DB המלא ל-fallback: מה-release בעל הגרסה הגבוהה ביותר שיש לו
-    // seforim.db.zst.
+    // ה-DB המלא ל-fallback: מה-release בעל הגרסה הגבוהה ביותר שיש לו DB מלא
+    // בסכמה נתמכת. release שכל ה-DB המלא שלו בסכמה חדשה מדי לא נספר.
     ReleaseAsset? latestFull;
     String? latestTag;
     var bestFullVersion = -1;
     for (final release in releases) {
-      final full = release.fullDbAsset;
+      final full =
+          release.fullDbAssetFor(maxSchemaVersion: supportedDbSchemaVersion);
       if (full == null) continue;
       final version = _releaseVersion(release);
       if (version > bestFullVersion) {

@@ -72,7 +72,9 @@ class LibraryUpdatePlanner {
 
     // חוזה ה-DB וחוזה פורמט ה-patch נבדקים בנפרד. מניפסטים היסטוריים אינם
     // כוללים patchFormatVersion; בהם ה-applier נשאר שער ה-preflight.
+    // מחסום סכמה (fullRebase) אינו patch אמיתי — לעולם לא שלב במסלול.
     final validEdges = edges.where((e) {
+      if (e.manifest.fullRebase) return false;
       final fromSchema = e.manifest.fromSchemaVersion;
       final toSchema = e.manifest.toSchemaVersion;
       final patchFormat = e.manifest.patchFormatVersion;
@@ -116,6 +118,21 @@ class LibraryUpdatePlanner {
       );
     }
 
+    final barrier = _barrierFrom(edges, localVersion, localSchemaVersion);
+    if (barrier != null) {
+      final toSchema = barrier.manifest.toSchemaVersion;
+      return _fullOrBlocked(
+        localVersion: localVersion,
+        latestVersion: latestVersion,
+        asset: latestFullDbAsset,
+        tag: latestReleaseTag,
+        reason: toSchema <= supportedDbSchemaVersion
+            ? 'הספרייה עברה לסכמת DB $toSchema; המעבר מחייב הורדה מלאה'
+            : 'הספרייה עברה לסכמת DB $toSchema, חדשה מהנתמך '
+                '(DB $supportedDbSchemaVersion) — נדרש עדכון אפליקציה',
+      );
+    }
+
     // מבחין בין "אין מסלול בכלל" ל"יש מסלול אך הוא דורש עדכון אפליקציה" —
     // ההודעה השנייה אומרת למשתמש מה יתקן את זה לצמיתות.
     final blockedByCapability = supportedEdges.length != validEdges.length &&
@@ -137,6 +154,30 @@ class LibraryUpdatePlanner {
               'patch $supportedPatchFormatVersion) — נדרש עדכון אפליקציה'
           : 'אין מסלול דלתא רציף מגרסה $localVersion לגרסה $latestVersion',
     );
+  }
+
+  /// מחסום הסכמה שיוצא מהמצב המקומי, עם סכמת היעד הגבוהה ביותר; null אם אין.
+  /// מחסום מסכמה אחרת תקף כל עוד הסכמה המקומית נמוכה מסכמת היעד שלו.
+  PatchEdge? _barrierFrom(
+    List<PatchEdge> edges,
+    int localVersion,
+    int? localSchemaVersion,
+  ) {
+    PatchEdge? best;
+    for (final edge in edges) {
+      final m = edge.manifest;
+      if (!m.fullRebase || m.fromVersion != localVersion) continue;
+      if (m.toVersion <= localVersion) continue;
+      if (localSchemaVersion != null &&
+          m.fromSchemaVersion != localSchemaVersion &&
+          localSchemaVersion >= m.toSchemaVersion) {
+        continue;
+      }
+      if (best == null || m.toSchemaVersion > best.manifest.toSchemaVersion) {
+        best = edge;
+      }
+    }
+    return best;
   }
 
   /// גודל קריא בטקסט LTR-בטוח: GB מעל ג'יגה-בייט אחד, אחרת MB.

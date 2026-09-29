@@ -87,6 +87,10 @@ class DeltaManifest extends Equatable {
   /// [toSchemaVersion]. מאפשר ללקוח לאמת רק את הטבלאות שהשתנו.
   final Map<String, String>? toTableContentHashes;
 
+  /// מניפסט "מחסום" של מעבר סכמה: אינו patch אמיתי ולעולם אינו שלב במסלול
+  /// דלתא — מסמן שהמעבר מ-[fromVersion] מחייב הורדת DB מלא.
+  final bool fullRebase;
+
   /// שדות אופציונליים עתידיים — נשמרים אם קיימים, אך אינם חובה.
   final List<int> booksTouched;
   final String? catalogBlobName;
@@ -102,6 +106,7 @@ class DeltaManifest extends Equatable {
     this.fromTableContentHashes,
     this.toTableContentHashes,
     required this.patchFiles,
+    this.fullRebase = false,
     this.booksTouched = const [],
     this.catalogBlobName,
   });
@@ -143,6 +148,7 @@ class DeltaManifest extends Equatable {
       patchFiles: patchFilesRaw
           .map((e) => PatchFileEntry.fromJson(e as Map<String, dynamic>))
           .toList(growable: false),
+      fullRebase: _optionalBool(json, 'fullRebase') ?? false,
       booksTouched: booksTouchedRaw is List
           ? booksTouchedRaw.map((e) => (e as num).toInt()).toList()
           : const [],
@@ -166,6 +172,7 @@ class DeltaManifest extends Equatable {
         fromTableContentHashes,
         toTableContentHashes,
         patchFiles,
+        fullRebase,
         booksTouched,
         catalogBlobName,
       ];
@@ -203,6 +210,15 @@ Map<String, String>? _optionalStringMap(Map<String, dynamic> json, String key) {
     result[k] = v;
   });
   return result;
+}
+
+bool? _optionalBool(Map<String, dynamic> json, String key) {
+  if (!json.containsKey(key) || json[key] == null) return null;
+  final value = json[key];
+  if (value is! bool) {
+    throw FormatException('שדה אופציונלי לא תקין במניפסט: $key');
+  }
+  return value;
 }
 
 int? _optionalInt(Map<String, dynamic> json, String key) {

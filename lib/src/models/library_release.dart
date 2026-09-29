@@ -1,5 +1,17 @@
 import 'package:equatable/equatable.dart';
 
+import 'patch_table_spec.dart';
+
+/// שם ה-asset של ה-DB המלא לסכמה נתונה. `seforim.db.zst` שמור לסכמה 5 ומטה
+/// לתמיד — לקוחות ישנים מתאימים לשם המדויק ואסור שיקבלו סכמה חדשה מהם.
+String fullDbArchiveNameForSchema(int schemaVersion) => schemaVersion <= 5
+    ? _legacyFullDbArchiveName
+    : 'seforim-schema$schemaVersion.db.zst';
+
+const String _legacyFullDbArchiveName = 'seforim.db.zst';
+const int _legacyFullDbSchemaCeiling = 5;
+final RegExp _schemaFullDbPattern = RegExp(r'^seforim-schema(\d+)\.db\.zst$');
+
 /// קובץ מצורף בודד ב-release של GitHub.
 class ReleaseAsset extends Equatable {
   final String name;
@@ -40,8 +52,19 @@ class ReleaseAsset extends Equatable {
   bool get isDeltaManifest =>
       name.startsWith('patch-') && name.endsWith('.db.zst.manifest.json');
 
-  /// `true` אם זהו ה-DB המלא הדחוס (`seforim.db.zst`).
-  bool get isFullDbArchive => name == 'seforim.db.zst';
+  /// `true` אם זהו DB מלא דחוס: `seforim.db.zst` או `seforim-schema<N>.db.zst`.
+  bool get isFullDbArchive =>
+      name == _legacyFullDbArchiveName || fullDbSchemaVersion != null;
+
+  /// סכמת ה-DB המלא לפי שם ה-asset: N עבור `seforim-schema<N>.db.zst`
+  /// (N ≥ 6, בכתיב קנוני), null עבור `seforim.db.zst` (סכמה ≤ 5) ולכל שם אחר.
+  int? get fullDbSchemaVersion {
+    final match = _schemaFullDbPattern.firstMatch(name);
+    if (match == null) return null;
+    final schema = int.tryParse(match.group(1)!);
+    if (schema == null || schema <= _legacyFullDbSchemaCeiling) return null;
+    return fullDbArchiveNameForSchema(schema) == name ? schema : null;
+  }
 
   @override
   List<Object?> get props => [name, downloadUrl, size, id, updatedAt, digest];
@@ -82,12 +105,23 @@ class LibraryRelease extends Equatable {
   List<ReleaseAsset> get deltaManifestAssets =>
       assets.where((a) => a.isDeltaManifest).toList(growable: false);
 
-  /// ה-DB המלא הדחוס ב-release זה, אם קיים.
-  ReleaseAsset? get fullDbAsset {
+  /// ה-DB המלא הדחוס שסכמתו נתמכת ב-[kSupportedDbSchemaVersion], אם קיים.
+  ReleaseAsset? get fullDbAsset =>
+      fullDbAssetFor(maxSchemaVersion: kSupportedDbSchemaVersion);
+
+  /// ה-DB המלא בעל הסכמה הגבוהה ביותר שאינה עולה על [maxSchemaVersion].
+  /// `seforim.db.zst` נחשב סכמה 5.
+  ReleaseAsset? fullDbAssetFor({required int maxSchemaVersion}) {
+    ReleaseAsset? best;
+    var bestSchema = -1;
     for (final asset in assets) {
-      if (asset.isFullDbArchive) return asset;
+      if (!asset.isFullDbArchive) continue;
+      final schema = asset.fullDbSchemaVersion ?? _legacyFullDbSchemaCeiling;
+      if (schema > maxSchemaVersion || schema <= bestSchema) continue;
+      best = asset;
+      bestSchema = schema;
     }
-    return null;
+    return best;
   }
 
   /// מאתר asset לפי שם מדויק.
