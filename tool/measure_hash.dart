@@ -4,8 +4,8 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:sqlite3/sqlite3.dart';
-import 'package:seforim_library_updater/seforim_library_updater.dart'
-    show kHashTableOrder;
+
+import 'src/db_hash_order.dart';
 
 void main(List<String> args) {
   final dbPath = args.isNotEmpty
@@ -19,6 +19,7 @@ void main(List<String> args) {
     return;
   }
 
+  final order = hashTableOrderForDbFile(dbPath);
   final db = sqlite3.open(dbPath, mode: OpenMode.readOnly);
 
   print('DB: $dbPath\n');
@@ -26,7 +27,7 @@ void main(List<String> args) {
   // שלב 1 — תוכניות שאילתה (מיידי): מי עושה TEMP B-TREE (מיון).
   print('== EXPLAIN QUERY PLAN (מיון = TEMP B-TREE) ==');
   final sorters = <String>[];
-  for (final table in kHashTableOrder) {
+  for (final table in order) {
     final cols = _cols(db, table);
     if (cols == null) {
       print('  $table: (לא קיימת)');
@@ -44,7 +45,7 @@ void main(List<String> args) {
   // שלב 2 — timing per-table (קורא את כל הנתונים כמו ה-hash האמיתי).
   print('== TIMING (קריאה מלאה כמו verifyToHash) ==');
   final total = Stopwatch()..start();
-  for (final table in kHashTableOrder) {
+  for (final table in order) {
     final cols = _cols(db, table);
     if (cols == null) continue;
     final sql = _buildSql(table, cols);

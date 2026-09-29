@@ -2351,7 +2351,7 @@ class _PragmaProbeHasher extends LogicalContentHasher {
 
   @override
   String compute(api.Database db,
-      {List<String> tableOrder = kHashTableOrder,
+      {required List<String> tableOrder,
       void Function(int bytesHashed)? onProgress}) {
     _record(db);
     return super.compute(db, tableOrder: tableOrder, onProgress: onProgress);

@@ -4,16 +4,14 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:seforim_library_updater/src/sqlite/sqlite3_api.dart' as sqlite3;
 
-import '../models/patch_table_spec.dart';
-
 /// מחשב logical content hash על תוכן ה-DB, בדיוק כמו `LogicalContentHasher.kt`
 /// בצד הייצור (SeforimLibrary). ה-hash משמש לאימות שה-DB המקומי תואם בדיוק
 /// ל-`fromContentHash`/`toContentHash` שב-manifest.
 ///
 /// האלגוריתם (אומת אות-באות מול שרשרת v14/v15 האמיתית):
-/// * לכל טבלה בסדר ה-hash הנתון ([compute]‏ `tableOrder`, ברירת מחדל
-///   [kHashTableOrder]) נכתב הקידומת `" table:<name> "` — תמיד, גם אם הטבלה
-///   אינה קיימת. הסדר נבחר לפי גרסת הסכמה (34 לסכמה-2, 33 לסכמה-1).
+/// * לכל טבלה בסדר ה-hash הנתון ([compute]‏ `tableOrder`, לפי גרסת הסכמה —
+///   ראו `hashTableOrderForSchemaVersion`) נכתב הקידומת `" table:<name> "` —
+///   תמיד, גם אם הטבלה אינה קיימת.
 /// * אם הטבלה קיימת: `"cols:<c1,c2,...>"` (עמודות ממוינות אלפביתית) ואז בית 0x00.
 /// * השורות נקראות לפי `ORDER BY id` (אם יש עמודת id) או לפי כל העמודות.
 /// * לכל תא: בית-סוג ואז הנתונים, ואז מפריד יחידה 0x1F.
@@ -39,15 +37,16 @@ class LogicalContentHasher {
   ///
   /// [onProgress] מדווח את מספר הבתים המצטבר שהוזרם ל-SHA עד כה (מדוד כל
   /// ~16MB), למד התקדמות במהלך האימות הארוך.
-  /// [tableOrder] — סדר הטבלאות לשקלול ב-hash. ברירת מחדל: [kHashTableOrder]
-  /// (34 טבלאות, סכמה-2). ה-caller בוחר את הסדר לפי גרסת הסכמה של ה-DB.
+  /// [tableOrder] — סדר הטבלאות לפי גרסת הסכמה של ה-DB. אין ברירת מחדל:
+  /// הסדר של הסכמה הנוכחית נותן hash שגוי על DB בסכמה ישנה.
   String compute(sqlite3.Database db,
-          {List<String> tableOrder = kHashTableOrder,
+          {required List<String> tableOrder,
           void Function(int bytesHashed)? onProgress}) =>
       _compute(db,
-          tableOrder: tableOrder,
-          onProgress: onProgress,
-          includeTableHashes: false).wholeHash!;
+              tableOrder: tableOrder,
+              onProgress: onProgress,
+              includeTableHashes: false)
+          .wholeHash!;
 
   /// מחשב במעבר יחיד את ה-hash הכולל ואת ה-hash של כל טבלה בנפרד
   /// (`tableHash(t) = sha256` של בדיוק הבתים שהטבלה תורמת לזרם הכולל).
@@ -55,9 +54,9 @@ class LogicalContentHasher {
   /// [only] — כשניתן, מחושבות רק הטבלאות שבו (בסדר [tableOrder]),
   /// ו-[LogicalContentHashReport.wholeHash] יהיה null.
   LogicalContentHashReport computeReport(sqlite3.Database db,
-      {List<String> tableOrder = kHashTableOrder,
-      Set<String>? only,
-      void Function(int bytesHashed)? onProgress}) =>
+          {required List<String> tableOrder,
+          Set<String>? only,
+          void Function(int bytesHashed)? onProgress}) =>
       _compute(db,
           tableOrder: tableOrder,
           only: only,
