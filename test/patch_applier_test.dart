@@ -2009,6 +2009,10 @@ void main() {
           'file:////server/share/dir/p.db?mode=ro');
     }, testOn: 'windows');
 
+    test('מחוץ ל-Windows לוכסן הפוך נשאר חלק משם הקובץ', () {
+      expect(readOnlyFileUri(r'/data/a\b.db'), 'file:///data/a\\b.db?mode=ro');
+    }, testOn: '!windows');
+
     test('ה-hash רץ עם temp_store=FILE ו-cache_size של שלב ה-hash', () {
       final base = buildBaseDb(version: 1, sourceRows: [
         [1, 'a'],

@@ -43,7 +43,9 @@ const String kPatchStat1SnapshotTable = 'stat1_snapshot';
 /// URI של SQLite לפתיחת [path] לקריאה בלבד. `file:////host/share` שומר על
 /// נתיב UNC; רק `%`, `?` ו-`#` מקודדים, והיתר עובר כ-UTF-8 כפי שהוא.
 String readOnlyFileUri(String path) {
-  var p = File(path).absolute.path.replaceAll('\\', '/');
+  var p = File(path).absolute.path;
+  // מחוץ ל-Windows לוכסן הפוך הוא תו רגיל בשם קובץ.
+  if (Platform.isWindows) p = p.replaceAll('\\', '/');
   if (!p.startsWith('/')) p = '/$p';
   p = p.replaceAll('%', '%25').replaceAll('?', '%3F').replaceAll('#', '%23');
   return 'file://$p?mode=ro';
