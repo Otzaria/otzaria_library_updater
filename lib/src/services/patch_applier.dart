@@ -749,7 +749,17 @@ class PatchApplier {
   /// בזיכרון, כי ה-build של sqlite3.dart מגדיר TEMP_STORE=2.
   void _tuneConnection(sqlite3.Database db, int cacheKib) {
     _setCacheSize(db, cacheKib);
-    db.execute('PRAGMA temp_store = FILE');
+    if (_sqliteHasTempDir()) db.execute('PRAGMA temp_store = FILE');
+  }
+
+  /// ב-Android אין לתהליך תיקיית temp ש-SQLite מוצא בעצמו; בלעדיה FILE נכשל
+  /// ב-SQLITE_CANTOPEN בקובץ הזמני הראשון (מיון ה-hash, statement journal).
+  static bool _sqliteHasTempDir() {
+    if (!Platform.isAndroid || sqlite3.sqlite3.tempDirectory != null) {
+      return true;
+    }
+    final env = Platform.environment;
+    return (env['SQLITE_TMPDIR'] ?? env['TMPDIR'] ?? '').isNotEmpty;
   }
 
   void _setCacheSize(sqlite3.Database db, int kib) =>

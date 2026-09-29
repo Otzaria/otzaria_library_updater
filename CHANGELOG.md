@@ -7,6 +7,8 @@
 - `PatchApplier`: פרמטרי בנאי `cacheSizeKib` (ברירת מחדל 256MB, לשלב
   ה-upserts/deletes) ו-`hashCacheSizeKib` (ברירת מחדל 64MB, לחישובי ה-hash),
   ו-`temp_store=FILE`. מיון ה-hash של `version_line` לא נשמר עוד כולו בזיכרון.
+  ב-Android רק כש-`sqlite3.tempDirectory` (או `TMPDIR`) מוגדר, אחרת SQLite
+  לא מוצא היכן לפתוח קובץ זמני.
 - upsert של שורה זהה לקיימת כבר לא כותב אותה. ההשוואה מבחינה גם בסוג הערך
   וברישיות, כמו ה-hash. `PatchApplyResult.upserts` סופר רק שורות שנוספו או
   השתנו בפועל.
