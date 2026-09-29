@@ -31,17 +31,41 @@ const Set<String> kBooksTouchedTables = {
 /// גודל מנת ה-upsert/delete בשורות. ראו [PatchApplier.applyChunkSize].
 const int kDefaultApplyChunkSize = 50000;
 
+/// תקרת ה-page cache בשלב ה-upserts/deletes, ב-KiB. ראו [PatchApplier.cacheSizeKib].
+const int kDefaultApplyCacheSizeKib = 256 * 1024;
+
+/// cache_size בזמן חישוב ה-hash, ב-KiB. ראו [PatchApplier.hashCacheSizeKib].
+const int kDefaultHashCacheSizeKib = 64 * 1024;
+
+/// שם הטבלה ב-patch שנושאת את `sqlite_stat1` של ה-DB היעד.
+const String kPatchStat1SnapshotTable = 'stat1_snapshot';
+
+/// URI של SQLite לפתיחת [path] לקריאה בלבד. `file:////host/share` שומר על
+/// נתיב UNC; רק `%`, `?` ו-`#` מקודדים, והיתר עובר כ-UTF-8 כפי שהוא.
+String readOnlyFileUri(String path) {
+  var p = File(path).absolute.path.replaceAll('\\', '/');
+  if (!p.startsWith('/')) p = '/$p';
+  p = p.replaceAll('%', '%25').replaceAll('?', '%3F').replaceAll('#', '%23');
+  return 'file://$p?mode=ro';
+}
+
+/// מנות ה-rowid של טבלת patch אחת. [ranges] null — אין rowid, statement יחיד.
+class _ChunkPlan {
+  final int rows;
+  final List<({int lo, int hi, int rows})>? ranges;
+
+  const _ChunkPlan(this.rows, this.ranges);
+}
+
 /// מונה שורות ה-patch שהוחלו, משותף לשלבי ה-upserts וה-deletes.
 class _ApplyProgress {
-  final Map<String, int> _rowsPerTable;
+  final Map<String, _ChunkPlan> plans;
   final void Function(int rowsDone, int rowsTotal)? _callback;
   final int total;
   int _done = 0;
 
-  _ApplyProgress(this._rowsPerTable, this._callback)
-      : total = _rowsPerTable.values.fold<int>(0, (a, b) => a + b);
-
-  int tableRows(String patchTable) => _rowsPerTable[patchTable] ?? 0;
+  _ApplyProgress(this.plans, this._callback)
+      : total = plans.values.fold<int>(0, (a, p) => a + p.rows);
 
   void advance(int rows) {
     _done += rows;
@@ -54,6 +78,8 @@ class _ApplyProgress {
 /// תוצאת החלת patch מוצלחת.
 class PatchApplyResult {
   final int migrations;
+
+  /// שורות שנוספו או השתנו בפועל, לכל טבלה. שורת patch זהה לקיימת לא נספרת.
   final Map<String, int> upserts;
   final Map<String, int> deletes;
 
@@ -186,12 +212,24 @@ class PatchApplier {
   /// ההתקדמות יהיה רציף — patch של מיליוני שורות אינו קופץ מ-0 ל-100.
   final int applyChunkSize;
 
+  /// תקרת ה-page cache בשלב ה-upserts/deletes (KiB). ב-2MB של ברירת המחדל
+  /// עדכון אינדקסים אקראי ב-link מפנה ומשפיך דפים שוב ושוב.
+  final int cacheSizeKib;
+
+  /// cache_size בזמן ה-hash (KiB). הסריקה רציפה, אבל SQLite קובע לפיו גם את
+  /// זיכרון המיון של טבלה בלי id — ערך גדול מנפח זיכרון בלי להאיץ.
+  final int hashCacheSizeKib;
+
   const PatchApplier({
     this.hasher = const LogicalContentHasher(),
     this.supportedPatchFormatVersion = kSupportedPatchFormatVersion,
     this.applyChunkSize = kDefaultApplyChunkSize,
+    this.cacheSizeKib = kDefaultApplyCacheSizeKib,
+    this.hashCacheSizeKib = kDefaultHashCacheSizeKib,
   })  : assert(supportedPatchFormatVersion >= 1),
-        assert(applyChunkSize > 0);
+        assert(applyChunkSize > 0),
+        assert(cacheSizeKib > 0),
+        assert(hashCacheSizeKib > 0);
 
   /// מחיל את ה-patch שב-[patchPath] על ה-DB שב-[dbPath] לפי [manifest].
   ///
@@ -238,7 +276,8 @@ class PatchApplier {
         ? null
         : (bytes) => onVerifyProgress(bytes, totalBytes);
 
-    final db = sqlite3.sqlite3.open(dbPath);
+    // uri: true — רק כדי ש-ATTACH יכבד mode=ro; נתיב ה-DB עצמו אינו URI.
+    final db = sqlite3.sqlite3.open(dbPath, uri: true);
     var attached = false;
     var inTransaction = false;
     try {
@@ -246,6 +285,7 @@ class PatchApplier {
       // אכיפת FK פעילה (כמו צד הייצור). מחוץ ל-transaction — לא ניתן לשינוי
       // בתוך transaction. בתוך ה-transaction מוסיפים defer_foreign_keys.
       db.execute('PRAGMA foreign_keys = ON');
+      _tuneConnection(db, cacheSizeKib);
 
       // ── preflight: גרסה וסכמה מקומיות ──
       onStage?.call('preflight');
@@ -269,12 +309,14 @@ class PatchApplier {
       if (verifyFromHash) {
         onStage?.call('verifyFromHash');
         if (verifyProgress != null) refreshTotal();
+        _setCacheSize(db, hashCacheSizeKib);
         // ה-DB *לפני* apply הוא בסכמת המקור — הסדר נבחר לפי fromSchemaVersion.
         final localHash = hasher.compute(
           db,
           tableOrder: fromOrder,
           onProgress: verifyProgress,
         );
+        _setCacheSize(db, cacheSizeKib);
         if (localHash != manifest.fromContentHash) {
           throw PatchApplyException(
             'ה-DB המקומי שונה מהצפוי — hash לא תואם ל-fromContentHash. '
@@ -286,17 +328,13 @@ class PatchApplier {
 
       // ── ATTACH (חייב להיות מחוץ ל-transaction) ──
       onStage?.call('attach');
-      db.execute('ATTACH DATABASE ? AS patch', [patchPath]);
+      db.execute('ATTACH DATABASE ? AS patch', [readOnlyFileUri(patchPath)]);
       attached = true;
       _assertPatchCompatible(db, manifest);
 
       final preFk = checkForeignKeys ? _countFkViolations(db) : 0;
 
-      // הספירה היא מעבר מלא נוסף על קובץ ה-patch — בלי מאזין אין בשבילה צורך.
-      final progress = _ApplyProgress(
-        onApplyProgress == null ? const {} : _countPatchRows(db),
-        onApplyProgress,
-      );
+      final progress = _ApplyProgress(_planPatchChunks(db), onApplyProgress);
 
       // ── transaction ──
       db.execute('BEGIN');
@@ -317,6 +355,8 @@ class PatchApplier {
       onStage?.call('deletes');
       final deletes = _runDeletes(db, progress);
 
+      _applyStat1Snapshot(db);
+
       if (checkForeignKeys) {
         onStage?.call('foreignKeyCheck');
         final postFk = _countFkViolations(db);
@@ -328,6 +368,8 @@ class PatchApplier {
       }
 
       onStage?.call('verifyToHash');
+      // מקטין רק דפים נקיים; הדפים המלוכלכים של ה-transaction נשארים.
+      _setCacheSize(db, hashCacheSizeKib);
       // ה-DB *אחרי* apply הוא בסכמת היעד — הסדר נבחר לפי toSchemaVersion.
       final toTables = enablePartialTableVerification
           ? _tablesToVerify(db, manifest, fromOrder, toOrder)
@@ -434,6 +476,7 @@ class PatchApplier {
     if (totalBytes == 0) totalBytes = File(dbPath).lengthSync();
     final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
     try {
+      _tuneConnection(db, hashCacheSizeKib);
       final report = hasher.computeReport(
         db,
         tableOrder: order,
@@ -555,14 +598,22 @@ class PatchApplier {
       } else {
         final assignments =
             nonPkCols.map((c) => '"$c" = excluded."$c"').join(',');
-        conflictClause = 'ON CONFLICT($pkCsv) DO UPDATE SET $assignments';
+        // שורה זהה לא נכתבת. ההשוואה כמו ב-hash: typeof מבדיל 2 מ-2.0, ו-BINARY
+        // עוקף COLLATE NOCASE של העמודה.
+        final changed = nonPkCols
+            .map((c) => '"${table.name}"."$c" IS NOT excluded."$c" '
+                'COLLATE BINARY OR typeof("${table.name}"."$c") IS NOT '
+                'typeof(excluded."$c")')
+            .join(' OR ');
+        conflictClause =
+            'ON CONFLICT($pkCsv) DO UPDATE SET $assignments WHERE $changed';
       }
 
       final head = 'INSERT INTO "${table.name}" ($colsCsv) '
           'SELECT $colsCsv FROM patch."$patchTable"';
       counts[table.name] = _runChunked(
         db,
-        patchTable: patchTable,
+        plan: progress.plans[patchTable],
         progress: progress,
         // תנאי ה-rowid ממלא גם את תפקיד `WHERE true` — בלעדיו ה-parser
         // משייך את ON CONFLICT ל-SELECT ולא ל-INSERT.
@@ -589,7 +640,7 @@ class PatchApplier {
 
       counts[table.name] = _runChunked(
         db,
-        patchTable: patchTable,
+        plan: progress.plans[patchTable],
         progress: progress,
         chunkSql: (range) => sql(' WHERE $range'),
         wholeSql: sql(''),
@@ -598,46 +649,80 @@ class PatchApplier {
     return counts;
   }
 
-  /// מריץ [chunkSql] על מנות rowid רצופות של [patchTable] ומחזיר את סך
-  /// `updatedRows`. נופל ל-[wholeSql] כשלטבלת ה-patch אין rowid.
+  /// מריץ [chunkSql] על מנות ה-rowid של [plan] ומחזיר את סך `updatedRows`.
+  /// נופל ל-[wholeSql] כשלטבלת ה-patch אין rowid.
   int _runChunked(
     sqlite3.Database db, {
-    required String patchTable,
+    required _ChunkPlan? plan,
     required _ApplyProgress progress,
     required String Function(String rowidRange) chunkSql,
     required String wholeSql,
   }) {
-    final remaining = progress.tableRows(patchTable);
-    if (!_patchTableHasRowid(db, patchTable)) {
+    final ranges = plan?.ranges;
+    if (ranges == null) {
       db.execute(wholeSql);
       // נקרא לפני הדיווח — callback שיריץ SQL ידרוס את `updatedRows`.
       final updated = db.updatedRows;
-      progress.advance(remaining);
+      progress.advance(plan?.rows ?? 0);
       return updated;
     }
-
-    final bounds = db.select(
-        'SELECT min(rowid) AS lo, max(rowid) AS hi FROM patch."$patchTable"');
-    final maxRowid = bounds.isEmpty ? null : bounds.first['hi'];
-    if (maxRowid is! int) {
-      progress.advance(remaining);
-      return 0;
-    }
-    var lo = (bounds.first['lo'] as int) - 1;
-    var left = remaining;
     var updated = 0;
-    while (true) {
-      final boundary = _chunkBoundary(db, patchTable, lo);
-      final hi = boundary ?? maxRowid;
-      db.execute(chunkSql('rowid > $lo AND rowid <= $hi'));
+    for (final r in ranges) {
+      db.execute(chunkSql('rowid > ${r.lo} AND rowid <= ${r.hi}'));
       updated += db.updatedRows;
-      final done = boundary == null ? left : applyChunkSize;
-      left -= done;
-      progress.advance(done);
-      if (boundary == null) break;
-      lo = hi;
+      progress.advance(r.rows);
     }
     return updated;
+  }
+
+  /// מתכנן מראש את מנות כל טבלאות ה-patch שיעובדו — אותם תנאי דילוג כמו
+  /// ב-[_runUpserts] וב-[_runDeletes]. סכום השורות הוא `rowsTotal` של המד.
+  Map<String, _ChunkPlan> _planPatchChunks(sqlite3.Database db) {
+    final plans = <String, _ChunkPlan>{};
+    for (final table in kPatchTablesInFkOrder) {
+      final upsertTable = 'upsert_${table.name}';
+      if (_hasTable(db, 'patch', upsertTable) &&
+          _patchTableColumns(db, upsertTable).isNotEmpty) {
+        plans[upsertTable] = _planChunks(db, upsertTable);
+      }
+      final deleteTable = 'delete_${table.name}';
+      if (table.primaryKey.isNotEmpty && _hasTable(db, 'patch', deleteTable)) {
+        plans[deleteTable] = _planChunks(db, deleteTable);
+      }
+    }
+    return plans;
+  }
+
+  /// גבולות המנות ומספר השורות במעבר יחיד על ה-rowid-ים: כל גבול מדלג
+  /// [applyChunkSize] שורות, ורק שארית המנה האחרונה נספרת.
+  _ChunkPlan _planChunks(sqlite3.Database db, String patchTable) {
+    if (!_patchTableHasRowid(db, patchTable)) {
+      final row =
+          db.select('SELECT count(*) AS c FROM patch."$patchTable"').first;
+      return _ChunkPlan(row['c'] as int, null);
+    }
+    final bounds = db.select(
+        'SELECT min(rowid) AS lo, max(rowid) AS hi FROM patch."$patchTable"');
+    final maxRowid = bounds.first['hi'];
+    if (maxRowid is! int) return const _ChunkPlan(0, []);
+
+    final ranges = <({int lo, int hi, int rows})>[];
+    var rows = 0;
+    var lo = (bounds.first['lo'] as int) - 1;
+    while (true) {
+      final boundary = _chunkBoundary(db, patchTable, lo);
+      if (boundary == null) {
+        final tail = db.select(
+          'SELECT count(*) AS c FROM patch."$patchTable" WHERE rowid > ?',
+          [lo],
+        ).first['c'] as int;
+        if (tail > 0) ranges.add((lo: lo, hi: maxRowid, rows: tail));
+        return _ChunkPlan(rows + tail, ranges);
+      }
+      ranges.add((lo: lo, hi: boundary, rows: applyChunkSize));
+      rows += applyChunkSize;
+      lo = boundary;
+    }
   }
 
   /// ה-rowid של השורה ה-[applyChunkSize] אחרי [afterRowid], או null כשנותרו
@@ -660,26 +745,25 @@ class PatchApplier {
     }
   }
 
-  /// סופר את שורות כל טבלאות ה-patch שיעובדו בפועל — אותם תנאי דילוג
-  /// כמו ב-[_runUpserts] וב-[_runDeletes], כדי ש-`rowsTotal` יהיה מדויק.
-  Map<String, int> _countPatchRows(sqlite3.Database db) {
-    final counts = <String, int>{};
-    void count(String patchTable) {
-      if (!_hasTable(db, 'patch', patchTable)) return;
-      final row =
-          db.select('SELECT count(*) AS c FROM patch."$patchTable"').first;
-      counts[patchTable] = row['c'] as int;
-    }
+  /// temp_store=FILE: מיון ה-hash של version_line (בלי id) היה נשמר כולו
+  /// בזיכרון, כי ה-build של sqlite3.dart מגדיר TEMP_STORE=2.
+  void _tuneConnection(sqlite3.Database db, int cacheKib) {
+    _setCacheSize(db, cacheKib);
+    db.execute('PRAGMA temp_store = FILE');
+  }
 
-    for (final table in kPatchTablesInFkOrder) {
-      final upsertTable = 'upsert_${table.name}';
-      if (_hasTable(db, 'patch', upsertTable) &&
-          _patchTableColumns(db, upsertTable).isNotEmpty) {
-        count(upsertTable);
-      }
-      if (table.primaryKey.isNotEmpty) count('delete_${table.name}');
-    }
-    return counts;
+  void _setCacheSize(sqlite3.Database db, int kib) =>
+      db.execute('PRAGMA cache_size = -$kib');
+
+  /// מעתיק את `stat1_snapshot` של ה-patch ל-`sqlite_stat1`, כדי שלקוח דלתא
+  /// יקבל את סטטיסטיקות המתכנן של ה-DB המלא. patch בלעדיה משאיר את הקיימות.
+  void _applyStat1Snapshot(sqlite3.Database db) {
+    if (!_hasTable(db, 'patch', kPatchStat1SnapshotTable)) return;
+    // יוצר את sqlite_stat1 כשחסרה; CREATE TABLE על שם sqlite_* אסור.
+    db.execute('ANALYZE main.sqlite_schema');
+    db.execute('DELETE FROM main.sqlite_stat1');
+    db.execute('INSERT INTO main.sqlite_stat1 (tbl, idx, stat) '
+        'SELECT tbl, idx, stat FROM patch."$kPatchStat1SnapshotTable"');
   }
 
   /// אוסף את מזהי הספרים שתוכן האינדקס שלהם (כותרת/טקסט/הפניות TOC/מטא-דאטה)
