@@ -15,6 +15,19 @@
 אין תלות ב‑Flutter. חילוץ zstd **מוזרק** על‑ידי הצרכן (ל‑`PatchDownloader.decompress`),
 כדי שהחבילה תישאר אגנוסטית לפלטפורמה.
 
+## DB מלא בפורמט zdb ו-VFS
+
+מסכמה 6 ה‑DB המלא מופץ כ‑`seforim-schema<N>.zdb` — קובץ SQLite דחוס לפי דפים — יחד עם
+`seforim-schema<N>.zdb.manifest.json` (`FullDbManifest`). ה‑zdb אינו מחולץ: הוא נקרא כמות שהוא
+דרך ה‑VFS של האפליקציה (`otzaria_zvfs`), וכתיבות נשמרות ב‑overlay שלצדו (`<db>-zovl`).
+
+**החבילה אגנוסטית ל‑VFS.** היא פותחת כל DB ב‑`sqlite3.open` עם ה‑VFS שמוגדר כברירת מחדל,
+ואינה תלויה ב‑`otzaria_zvfs`. לכן לפני כל שימוש בחבילה על zdb — גילוי ה‑DB המקומי, `PatchApplier`,
+`LogicalContentHasher`, `checkDbHealthAfterCrash` — **האפליקציה חייבת לרשום את zvfs כ‑VFS ברירת
+המחדל** (`makeDefault`), בכל isolate שבו הקוד רץ. אימות ה‑zdb, התקנתו וקריאת הגודל הלוגי שלו
+נשארים באפליקציה; ל‑`PatchApplier` מעבירים `logicalSizeOf` כדי שמדי ההתקדמות יתבססו על הגודל
+הלוגי ולא על הקובץ הפיזי הקטן.
+
 ## ⚠️ פעולות חוסמות — הרץ ב‑Isolate
 
 `LogicalContentHasher.compute` ו‑`PatchApplier.apply` הן **סינכרוניות וכבדות** (חישוב ה‑hash

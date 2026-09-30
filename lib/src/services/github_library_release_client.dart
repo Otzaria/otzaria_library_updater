@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../models/delta_manifest.dart';
+import '../models/full_db_manifest.dart';
 import '../models/library_release.dart';
 
 /// לקוח לקריאת ה-releases וה-assets של ספריית הספרים מ-GitHub.
@@ -62,7 +63,15 @@ class GithubLibraryReleaseClient {
   }
 
   /// מוריד ומפענח manifest דלתאי מכתובת [url]. זורק בכשל רשת או parse.
-  Future<DeltaManifest> fetchManifest(String url) async {
+  Future<DeltaManifest> fetchManifest(String url) async =>
+      DeltaManifest.fromJson(await _fetchJsonObject(url));
+
+  /// מוריד ומפענח manifest של DB מלא (zdb) מכתובת [url]. זורק בכשל רשת או
+  /// parse.
+  Future<FullDbManifest> fetchFullDbManifest(String url) async =>
+      FullDbManifest.fromJson(await _fetchJsonObject(url));
+
+  Future<Map<String, dynamic>> _fetchJsonObject(String url) async {
     final response = await _httpClient.get(
       Uri.parse(url),
       headers: const {'Accept': 'application/json'},
@@ -74,7 +83,7 @@ class GithubLibraryReleaseClient {
     if (decoded is! Map<String, dynamic>) {
       throw FormatException('manifest אינו אובייקט JSON תקין: $url');
     }
-    return DeltaManifest.fromJson(decoded);
+    return decoded;
   }
 
   /// סוגר את לקוח ה-HTTP אם הוא נוצר פנימית.

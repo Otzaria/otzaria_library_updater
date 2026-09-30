@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.0
+
+DB מלא בפורמט zdb מסכמה 6. החבילה נשארת אגנוסטית ל-VFS: היא פותחת DB עם ה-VFS
+שמוגדר כברירת מחדל, ועל האפליקציה לרשום את zvfs כברירת מחדל (`makeDefault`)
+לפני שימוש בחבילה על zdb, בכל isolate. אימות zdb, התקנה וגודל לוגי — באפליקציה.
+
+- **שבירה:** `fullDbArchiveNameForSchema(n)` מחזיר `seforim-schema<n>.zdb` ל-n ≥ 6
+  (במקום `seforim-schema<n>.db.zst`). `seforim.db.zst` לסכמה 5 ומטה ללא שינוי.
+  `seforim-schema<n>.db.zst` אינו מזוהה עוד כ-DB מלא.
+- `FullDbContainer` (`zst`/`zdb`) ו-`ReleaseAsset.fullDbContainer`;
+  `fullDbManifestNameFor` ו-`LibraryRelease.fullDbManifestAsset`.
+- `FullDbManifest` (עם `FullDbZdbInfo`, `FullDbConverterInfo`) מפענח בקפדנות את
+  `seforim-schema<N>.zdb.manifest.json`: `manifestVersion` חייב להיות
+  `kSupportedFullDbManifestVersion` = 1, וכל שדה חובה נבדק בסוגו. `contentHash` הוא
+  ה-hash הלוגי, זהה ל-`toContentHash` של patch לאותה גרסה.
+- `GithubLibraryReleaseClient.fetchFullDbManifest`.
+- `LibraryDiscoveryResult.latestFullDbManifest`: כשה-DB המלא שנבחר הוא zdb, ה-manifest
+  שלו מורד ומאומת מול ה-asset (`file`, `size`) ומול הגרסה והסכמה. manifest חסר, שלא
+  ירד או שסותר — `discover` זורק `FullDbManifestException`.
+- `LibraryDbRecoveryService`: `-zovl` נוסף ל-sidecars — גיבוי, שחזור ומחיקה מזיזים
+  את הבסיס וה-overlay יחד. `-zlck` אינו נגוע לעולם.
+- `PatchApplier(logicalSizeOf:)`: בסיס ה-total של מדי האימות כשאין רמז (ב-`apply`
+  וב-`verifyTableHashes`). ברירת המחדל — גודל הקובץ, כמקודם.
+
 ## 0.8.0
 
 סכמת DB 6: פיצול `line` לטבלה צרה ול-`line_content(id, content)`, ו-

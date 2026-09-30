@@ -230,12 +230,18 @@ class PatchApplier {
   /// זיכרון המיון של טבלה בלי id — ערך גדול מנפח זיכרון בלי להאיץ.
   final int hashCacheSizeKib;
 
+  /// גודל ה-DB שבנתיב הנתון, בסיס למדי ההתקדמות של האימות כשאין רמז. null =
+  /// גודל הקובץ. ל-zdb הגודל הפיזי קטן בהרבה מהלוגי, והאפליקציה מעבירה פונקציה
+  /// שמחזירה את הגודל הלוגי.
+  final int Function(String dbPath)? logicalSizeOf;
+
   const PatchApplier({
     this.hasher = const LogicalContentHasher(),
     this.supportedPatchFormatVersion = kSupportedPatchFormatVersion,
     this.applyChunkSize = kDefaultApplyChunkSize,
     this.cacheSizeKib = kDefaultApplyCacheSizeKib,
     this.hashCacheSizeKib = kDefaultHashCacheSizeKib,
+    this.logicalSizeOf,
   })  : assert(supportedPatchFormatVersion >= 1),
         assert(applyChunkSize > 0),
         assert(cacheSizeKib > 0),
@@ -280,8 +286,7 @@ class PatchApplier {
     // הקובץ — הערכת-יתר (אינדקסים ודפים לא נכנסים ל-hash), שנמדדת מחדש לפני
     // כל אימות כי ה-patch משנה את הגודל. בשני המסלולים זו הערכה למד בלבד.
     var totalBytes = 0;
-    int refreshTotal() =>
-        totalBytes = verifyTotalBytesHint ?? File(dbPath).lengthSync();
+    int refreshTotal() => totalBytes = verifyTotalBytesHint ?? _dbSize(dbPath);
     final void Function(int)? verifyProgress = onVerifyProgress == null
         ? null
         : (bytes) => onVerifyProgress(bytes, totalBytes);
@@ -483,7 +488,7 @@ class PatchApplier {
     final order = hashTableOrderForSchemaVersion(schemaVersion);
     final only = tables.toSet();
     var totalBytes = _hintedTotal(tableBytesHint, tables);
-    if (totalBytes == 0) totalBytes = File(dbPath).lengthSync();
+    if (totalBytes == 0) totalBytes = _dbSize(dbPath);
     final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
     try {
       _tuneConnection(db, hashCacheSizeKib);
@@ -505,6 +510,9 @@ class PatchApplier {
       db.close();
     }
   }
+
+  int _dbSize(String dbPath) =>
+      logicalSizeOf?.call(dbPath) ?? File(dbPath).lengthSync();
 
   /// סכום רמזי הבתים עבור [tables]; 0 כשאין רמז שימושי.
   int _hintedTotal(Map<String, int>? hint, List<String> tables) {

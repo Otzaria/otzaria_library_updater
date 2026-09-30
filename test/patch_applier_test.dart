@@ -1524,6 +1524,74 @@ void main() {
       expect(lastTotal, 150);
     });
 
+    group('בסיס ה-total בלי רמז', () {
+      ({String base, String patch, DeltaManifest manifest}) setUpCase(
+          String tag) {
+        final base = buildDb('${tag}_base', version: 1, sourceRows: [
+          [1, 'aleph'],
+        ]);
+        final expected = buildDb('${tag}_expected', version: 2, sourceRows: [
+          [1, 'aleph'],
+          [2, 'bet'],
+        ]);
+        final patch = buildPatchDb(from: 1, to: 2, upsertSource: [
+          [2, 'bet'],
+        ]);
+        final manifest = _manifest(
+          from: 1,
+          to: 2,
+          fromHash: _hashOf(base),
+          toHash: _hashOf(expected),
+          fromTables: _tableHashesOf(base),
+          toTables: _tableHashesOf(expected),
+        );
+        return (base: base, patch: patch, manifest: manifest);
+      }
+
+      test('ברירת המחדל — גודל הקובץ', () {
+        final c = setUpCase('size_default');
+        var lastTotal = -1;
+        _applier.apply(
+          dbPath: c.base,
+          patchPath: c.patch,
+          manifest: c.manifest,
+          onVerifyProgress: (_, total) => lastTotal = total,
+        );
+        expect(lastTotal, File(c.base).lengthSync());
+      });
+
+      test('logicalSizeOf מחליף את גודל הקובץ ב-apply וב-verifyTableHashes',
+          () {
+        final c = setUpCase('size_logical');
+        final asked = <String>[];
+        final applier = PatchApplier(logicalSizeOf: (path) {
+          asked.add(path);
+          return 123456789;
+        });
+        var lastTotal = -1;
+        final result = applier.apply(
+          dbPath: c.base,
+          patchPath: c.patch,
+          manifest: c.manifest,
+          enablePartialTableVerification: true,
+          onVerifyProgress: (_, total) => lastTotal = total,
+        );
+        expect(lastTotal, 123456789);
+
+        var tableTotal = -1;
+        applier.verifyTableHashes(
+          dbPath: c.base,
+          schemaVersion: 2,
+          expected: c.manifest.toTableContentHashes!,
+          tables: result.deferredTables,
+          onProgress: (_, total) => tableTotal = total,
+        );
+        expect(tableTotal, 123456789);
+        expect(asked, isNotEmpty);
+        expect(asked.toSet(), {c.base});
+      });
+    });
+
     test('אי-התאמה בטבלה שה-patch נגע בה מדווחת בשמה ומגלגלת לאחור', () {
       final base = buildDb('mismatch_base', version: 1, sourceRows: [
         [1, 'aleph'],

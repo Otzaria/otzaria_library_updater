@@ -26,7 +26,8 @@ class RecoveryResult {
 /// שקריסה באמצע apply תהיה ניתנת לשחזור.
 ///
 /// קבצים ליד ה-DB:
-/// * `<db>.backup`   — ה-DB המקורי עצמו, שהוזז ב-rename (יחד עם ה-sidecars שלו).
+/// * `<db>.backup`   — ה-DB המקורי עצמו, שהוזז ב-rename (יחד עם ה-sidecars שלו,
+///   כולל `-zovl` של zdb).
 /// * `<db>.applying` — סימון JSON (fromVersion/toVersion/timestamp).
 ///
 /// הגיבוי הוא rename ולא העתקה: מיידי, ואינו דורש מקום פנוי בגודל ה-DB. לכן
@@ -41,7 +42,9 @@ class LibraryDbRecoveryService {
   String backupPathFor(String dbPath) => '$dbPath.backup';
   String markerPathFor(String dbPath) => '$dbPath.applying';
 
-  static const _sidecarSuffixes = ['-wal', '-shm', '-journal'];
+  // `-zovl` הוא ה-overlay של zdb ושייך לבסיס שלו כמו ה-WAL. `-zlck` מנוהל
+  // בידי zvfs עצמו — אסור להזיז או למחוק אותו.
+  static const _sidecarSuffixes = ['-wal', '-shm', '-journal', '-zovl'];
 
   /// נקרא בעליית האפליקציה, **לפני** פתיחת ה-DB.
   ///

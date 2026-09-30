@@ -196,6 +196,63 @@ void main() {
     expect(File(service.markerPathFor(dbPath)).existsSync(), isFalse);
   });
 
+  group('zdb: -zovl נע עם הבסיס, -zlck לא נגוע', () {
+    const moved = ['-wal', '-shm', '-journal', '-zovl'];
+
+    setUp(() {
+      for (final suffix in [...moved, '-zlck']) {
+        File('$dbPath$suffix').writeAsStringSync('LIVE$suffix');
+      }
+    });
+
+    test('beginApply ו-rollback מזיזים את כל ה-sidecars יחד', () async {
+      await service.beginApply(
+          dbPath: dbPath, fromVersion: 1, toVersion: 2, timestamp: 't');
+      final backup = service.backupPathFor(dbPath);
+      for (final suffix in moved) {
+        expect(File('$dbPath$suffix').existsSync(), isFalse, reason: suffix);
+        expect(File('$backup$suffix').readAsStringSync(), 'LIVE$suffix');
+      }
+      expect(File('$dbPath-zlck').readAsStringSync(), 'LIVE-zlck');
+      expect(File('$backup-zlck').existsSync(), isFalse);
+
+      await service.rollback(dbPath);
+      for (final suffix in moved) {
+        expect(File('$dbPath$suffix').readAsStringSync(), 'LIVE$suffix');
+        expect(File('$backup$suffix').existsSync(), isFalse, reason: suffix);
+      }
+      expect(File('$dbPath-zlck').readAsStringSync(), 'LIVE-zlck');
+    });
+
+    test('שחזור מוחק את ה-overlay של ה-DB החדש ומחזיר את של הגיבוי', () async {
+      await service.beginApply(
+          dbPath: dbPath, fromVersion: 1, toVersion: 2, timestamp: 't');
+      File(dbPath).writeAsStringSync('NEW-ZDB');
+      File('$dbPath-zovl').writeAsStringSync('NEW-OVERLAY');
+
+      final result = await service.recoverIfNeeded(dbPath);
+      expect(result.action, RecoveryAction.restored);
+      expect(File(dbPath).readAsStringSync(), 'ORIGINAL');
+      expect(File('$dbPath-zovl').readAsStringSync(), 'LIVE-zovl');
+      expect(File('$dbPath-zlck').readAsStringSync(), 'LIVE-zlck');
+    });
+
+    test('finishSuccess מוחק את ה-overlay של הגיבוי בלבד', () async {
+      await service.beginApply(
+          dbPath: dbPath, fromVersion: 1, toVersion: 2, timestamp: 't');
+      File(dbPath).writeAsStringSync('NEW-ZDB');
+      File('$dbPath-zovl').writeAsStringSync('NEW-OVERLAY');
+      File('${service.backupPathFor(dbPath)}-zlck').writeAsStringSync('X');
+
+      service.finishSuccess(dbPath);
+      final backup = service.backupPathFor(dbPath);
+      expect(File('$backup-zovl').existsSync(), isFalse);
+      expect(File('$backup-zlck').readAsStringSync(), 'X');
+      expect(File('$dbPath-zovl').readAsStringSync(), 'NEW-OVERLAY');
+      expect(File('$dbPath-zlck').readAsStringSync(), 'LIVE-zlck');
+    });
+  });
+
   group('checkDbHealthAfterCrash', () {
     test('מגלגל hot journal (קריסה באמצע apply) ומחזיר true', () {
       final crashed = _makeHotJournalDb(tmp.path);

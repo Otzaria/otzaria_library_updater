@@ -519,8 +519,8 @@ void main() {
     const planner = LibraryUpdatePlanner(
         supportedDbSchemaVersion: kSupportedDbSchemaVersion);
     const schema6Full = ReleaseAsset(
-      name: 'seforim-schema6.db.zst',
-      downloadUrl: 'https://x/v29/seforim-schema6.db.zst',
+      name: 'seforim-schema6.zdb',
+      downloadUrl: 'https://x/v29/seforim-schema6.zdb',
       size: 900000000,
     );
 
@@ -643,7 +643,7 @@ void main() {
     });
 
     // מתעד את הלקוח הישן (upstream/main לפני סכמה 6): הוא מתעלם מ-fullRebase,
-    // ולא רואה את seforim-schema6.db.zst כ-DB מלא (latestFullDbAsset: null).
+    // ולא רואה את seforim-schema6.zdb כ-DB מלא (latestFullDbAsset: null).
     test('לקוח ישן: המחסום הוא edge תקין אך לא נתמך → blocked, בלי הורדת 6',
         () {
       const oldClient = LibraryUpdatePlanner(

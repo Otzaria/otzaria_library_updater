@@ -4,13 +4,27 @@ import 'patch_table_spec.dart';
 
 /// שם ה-asset של ה-DB המלא לסכמה נתונה. `seforim.db.zst` שמור לסכמה 5 ומטה
 /// לתמיד — לקוחות ישנים מתאימים לשם המדויק ואסור שיקבלו סכמה חדשה מהם.
+/// מסכמה 6 ה-DB מופץ כ-`seforim-schema<N>.zdb` (דחוס לפי דפים, נקרא דרך VFS).
 String fullDbArchiveNameForSchema(int schemaVersion) => schemaVersion <= 5
     ? _legacyFullDbArchiveName
-    : 'seforim-schema$schemaVersion.db.zst';
+    : 'seforim-schema$schemaVersion.zdb';
+
+/// שם ה-manifest שמתלווה ל-DB מלא בשם [archiveName].
+String fullDbManifestNameFor(String archiveName) =>
+    '$archiveName.manifest.json';
 
 const String _legacyFullDbArchiveName = 'seforim.db.zst';
 const int _legacyFullDbSchemaCeiling = 5;
-final RegExp _schemaFullDbPattern = RegExp(r'^seforim-schema(\d+)\.db\.zst$');
+final RegExp _schemaFullDbPattern = RegExp(r'^seforim-schema(\d+)\.zdb$');
+
+/// פורמט הקובץ של DB מלא ב-release.
+enum FullDbContainer {
+  /// קובץ SQLite רגיל דחוס ב-zstd; מחולץ לפני שימוש (סכמה 5 ומטה).
+  zst,
+
+  /// קובץ SQLite דחוס לפי דפים; נפתח כמות שהוא דרך VFS של האפליקציה.
+  zdb,
+}
 
 /// קובץ מצורף בודד ב-release של GitHub.
 class ReleaseAsset extends Equatable {
@@ -52,11 +66,16 @@ class ReleaseAsset extends Equatable {
   bool get isDeltaManifest =>
       name.startsWith('patch-') && name.endsWith('.db.zst.manifest.json');
 
-  /// `true` אם זהו DB מלא דחוס: `seforim.db.zst` או `seforim-schema<N>.db.zst`.
-  bool get isFullDbArchive =>
-      name == _legacyFullDbArchiveName || fullDbSchemaVersion != null;
+  /// `true` אם זהו DB מלא: `seforim.db.zst` או `seforim-schema<N>.zdb`.
+  bool get isFullDbArchive => fullDbContainer != null;
 
-  /// סכמת ה-DB המלא לפי שם ה-asset: N עבור `seforim-schema<N>.db.zst`
+  /// פורמט ה-DB המלא, או null כשה-asset אינו DB מלא.
+  FullDbContainer? get fullDbContainer {
+    if (name == _legacyFullDbArchiveName) return FullDbContainer.zst;
+    return fullDbSchemaVersion == null ? null : FullDbContainer.zdb;
+  }
+
+  /// סכמת ה-DB המלא לפי שם ה-asset: N עבור `seforim-schema<N>.zdb`
   /// (N ≥ 6, בכתיב קנוני), null עבור `seforim.db.zst` (סכמה ≤ 5) ולכל שם אחר.
   int? get fullDbSchemaVersion {
     final match = _schemaFullDbPattern.firstMatch(name);
@@ -123,6 +142,10 @@ class LibraryRelease extends Equatable {
     }
     return best;
   }
+
+  /// ה-manifest של [fullDbAsset] (`<name>.manifest.json`), אם פורסם.
+  ReleaseAsset? fullDbManifestAsset(ReleaseAsset fullDbAsset) =>
+      assetByName(fullDbManifestNameFor(fullDbAsset.name));
 
   /// מאתר asset לפי שם מדויק.
   ReleaseAsset? assetByName(String name) {

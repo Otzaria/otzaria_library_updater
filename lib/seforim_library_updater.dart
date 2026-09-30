@@ -9,8 +9,19 @@
 library;
 
 export 'src/models/delta_manifest.dart' show DeltaManifest, PatchFileEntry;
+export 'src/models/full_db_manifest.dart'
+    show
+        FullDbConverterInfo,
+        FullDbManifest,
+        FullDbZdbInfo,
+        kSupportedFullDbManifestVersion;
 export 'src/models/library_release.dart'
-    show LibraryRelease, ReleaseAsset, fullDbArchiveNameForSchema;
+    show
+        FullDbContainer,
+        LibraryRelease,
+        ReleaseAsset,
+        fullDbArchiveNameForSchema,
+        fullDbManifestNameFor;
 export 'src/models/library_update_plan.dart'
     show LibraryUpdatePlan, LibraryUpdatePlanKind, PatchEdge;
 export 'src/models/patch_table_spec.dart'
@@ -25,7 +36,10 @@ export 'src/services/github_library_release_client.dart'
 export 'src/services/library_db_recovery_service.dart'
     show LibraryDbRecoveryService, RecoveryResult, RecoveryAction;
 export 'src/services/library_update_discovery.dart'
-    show LibraryUpdateDiscovery, LibraryDiscoveryResult;
+    show
+        FullDbManifestException,
+        LibraryUpdateDiscovery,
+        LibraryDiscoveryResult;
 export 'src/services/library_update_planner.dart'
     show LibraryUpdatePlanner, kDefaultMaxDeltaUncompressedRatio;
 export 'src/services/local_db_version_reader.dart'

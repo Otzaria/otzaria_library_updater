@@ -1,6 +1,8 @@
 import 'package:seforim_library_updater/seforim_library_updater.dart'
     show
+        FullDbContainer,
         fullDbArchiveNameForSchema,
+        fullDbManifestNameFor,
         kDefaultConsumerDbSchemaVersion,
         kSupportedDbSchemaVersion;
 import 'package:seforim_library_updater/src/models/library_release.dart';
@@ -19,53 +21,76 @@ LibraryRelease _releaseWith(List<String> names) => LibraryRelease(
 
 void main() {
   group('שם ה-DB המלא לפי סכמה', () {
-    test('seforim.db.zst שמור לסכמה 5 ומטה; מ-6 שם עם הסכמה', () {
+    test('seforim.db.zst שמור לסכמה 5 ומטה; מ-6 zdb עם הסכמה בשם', () {
       expect(fullDbArchiveNameForSchema(1), 'seforim.db.zst');
       expect(fullDbArchiveNameForSchema(5), 'seforim.db.zst');
-      expect(fullDbArchiveNameForSchema(6), 'seforim-schema6.db.zst');
-      expect(fullDbArchiveNameForSchema(12), 'seforim-schema12.db.zst');
+      expect(fullDbArchiveNameForSchema(6), 'seforim-schema6.zdb');
+      expect(fullDbArchiveNameForSchema(12), 'seforim-schema12.zdb');
+      expect(fullDbManifestNameFor('seforim-schema6.zdb'),
+          'seforim-schema6.zdb.manifest.json');
     });
 
-    test('fullDbSchemaVersion ו-isFullDbArchive לשתי הצורות', () {
+    test('fullDbSchemaVersion, isFullDbArchive ו-container לשתי הצורות', () {
       expect(_asset('seforim.db.zst').isFullDbArchive, isTrue);
       expect(_asset('seforim.db.zst').fullDbSchemaVersion, isNull);
-      expect(_asset('seforim-schema6.db.zst').isFullDbArchive, isTrue);
-      expect(_asset('seforim-schema6.db.zst').fullDbSchemaVersion, 6);
-      expect(_asset('seforim-schema7.db.zst').fullDbSchemaVersion, 7);
+      expect(_asset('seforim.db.zst').fullDbContainer, FullDbContainer.zst);
+      expect(_asset('seforim-schema6.zdb').isFullDbArchive, isTrue);
+      expect(_asset('seforim-schema6.zdb').fullDbSchemaVersion, 6);
+      expect(
+          _asset('seforim-schema6.zdb').fullDbContainer, FullDbContainer.zdb);
+      expect(_asset('seforim-schema7.zdb').fullDbSchemaVersion, 7);
+      expect(_asset('patch-v1-v2.db.zst').fullDbContainer, isNull);
     });
 
-    test('שמות לא קנוניים או סכמה < 6 אינם DB מלא', () {
+    test('שמות לא קנוניים, סכמה < 6 או zst מסכמה 6 אינם DB מלא', () {
       for (final name in [
-        'seforim-schema5.db.zst',
-        'seforim-schema0.db.zst',
-        'seforim-schema06.db.zst',
-        'seforim-schema6.db.zst.manifest.json',
-        'seforim-schema.db.zst',
+        'seforim-schema6.db.zst',
+        'seforim-schema7.db.zst',
+        'seforim-schema5.zdb',
+        'seforim-schema0.zdb',
+        'seforim-schema06.zdb',
+        'seforim-schema6.zdb.manifest.json',
+        'seforim-schema.zdb',
+        'seforim.zdb',
         'seforim.db',
         'patch-v28-v29.db.zst',
       ]) {
         expect(_asset(name).isFullDbArchive, isFalse, reason: name);
         expect(_asset(name).fullDbSchemaVersion, isNull, reason: name);
+        expect(_asset(name).fullDbContainer, isNull, reason: name);
       }
+    });
+
+    test('fullDbManifestAsset מאתר את ה-manifest הצמוד בלבד', () {
+      final release = _releaseWith([
+        'seforim-schema6.zdb',
+        'seforim-schema6.zdb.manifest.json',
+        'seforim-schema7.zdb',
+      ]);
+      expect(release.fullDbManifestAsset(_asset('seforim-schema6.zdb'))?.name,
+          'seforim-schema6.zdb.manifest.json');
+      expect(
+          release.fullDbManifestAsset(_asset('seforim-schema7.zdb')), isNull);
+      expect(release.deltaManifestAssets, isEmpty);
     });
 
     test('fullDbAssetFor בוחר את הסכמה הגבוהה ביותר שנתמכת', () {
       final release = _releaseWith([
-        'seforim-schema7.db.zst',
+        'seforim-schema7.zdb',
         'seforim.db.zst',
-        'seforim-schema6.db.zst',
+        'seforim-schema6.zdb',
       ]);
       expect(
           release.fullDbAssetFor(maxSchemaVersion: 5)?.name, 'seforim.db.zst');
       expect(release.fullDbAssetFor(maxSchemaVersion: 6)?.name,
-          'seforim-schema6.db.zst');
+          'seforim-schema6.zdb');
       expect(release.fullDbAssetFor(maxSchemaVersion: 9)?.name,
-          'seforim-schema7.db.zst');
+          'seforim-schema7.zdb');
       expect(release.fullDbAssetFor(maxSchemaVersion: 4), isNull);
     });
 
     test('release עם DB מלא בסכמה לא נתמכת בלבד — אין asset', () {
-      final release = _releaseWith(['seforim-schema6.db.zst']);
+      final release = _releaseWith(['seforim-schema6.zdb']);
       expect(release.fullDbAssetFor(maxSchemaVersion: 5), isNull);
     });
 
@@ -74,16 +99,16 @@ void main() {
       expect(
           _releaseWith(['seforim.db.zst']).fullDbAsset?.name, 'seforim.db.zst');
       expect(
-          _releaseWith(['seforim.db.zst', 'seforim-schema6.db.zst'])
+          _releaseWith(['seforim.db.zst', 'seforim-schema6.zdb'])
               .fullDbAsset
               ?.name,
           'seforim.db.zst');
-      expect(_releaseWith(['seforim-schema6.db.zst']).fullDbAsset, isNull);
+      expect(_releaseWith(['seforim-schema6.zdb']).fullDbAsset, isNull);
       expect(
-          _releaseWith(['seforim.db.zst', 'seforim-schema6.db.zst'])
+          _releaseWith(['seforim.db.zst', 'seforim-schema6.zdb'])
               .fullDbAssetFor(maxSchemaVersion: kSupportedDbSchemaVersion)
               ?.name,
-          'seforim-schema6.db.zst');
+          'seforim-schema6.zdb');
     });
   });
 

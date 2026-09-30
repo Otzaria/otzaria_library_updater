@@ -27,6 +27,30 @@ LibraryRelease _release({
   );
 }
 
+/// manifest תקין של DB מלא zdb בשם [file] (size 9, כמו ה-assets בקבוצת הסכמה).
+Map<String, dynamic> _fullManifest(String file, {int dbVersion = 29}) => {
+      'manifestVersion': 1,
+      'file': file,
+      'size': 9,
+      'sha256': 'a' * 64,
+      'zdb': {
+        'formatMajor': 1,
+        'formatMinor': 0,
+        'fileUuid': '0123456789abcdef0123456789abcdef',
+        'contentXxh64': '0123456789abcdef',
+        'logicalSize': 36,
+        'pageSize': 4096,
+        'dictName': 'seforim-v1',
+        'dictId': 7,
+        'level': 19,
+      },
+      'dbVersion': dbVersion,
+      'dbSchemaVersion':
+          int.parse(RegExp(r'schema(\d+)').firstMatch(file)!.group(1)!),
+      'contentHash': 'hash$dbVersion',
+      'converter': {'repository': 'Otzaria/otzaria_zvfs', 'commit': 'abc123'},
+    };
+
 /// בונה manifest JSON עבור patch from→to.
 String _manifestJson(int from, int to) => jsonEncode({
       'fromVersion': from,
@@ -318,7 +342,7 @@ void main() {
         'draft': false,
         'assets': [
           for (final n in [
-            'seforim-schema6.db.zst',
+            'seforim-schema6.zdb',
             'patch-v28-v29.db.zst',
             'patch-v28-v29.db.zst.manifest.json',
           ])
@@ -365,6 +389,9 @@ void main() {
       int manifestStatus = 200,
       List<String>? latestAssetNames,
       bool schemaSixDelta = false,
+      bool withFullManifests = true,
+      int fullManifestStatus = 200,
+      void Function(Map<String, dynamic> manifest)? editFullManifest,
     }) {
       final releaseData = jsonDecode(releasesJson) as List;
       if (latestAssetNames != null) {
@@ -381,6 +408,20 @@ void main() {
         (releaseData.first['assets'] as List)
             .removeWhere((a) => (a['name'] as String).startsWith('patch-'));
       }
+      if (withFullManifests) {
+        final assets = releaseData.first['assets'] as List;
+        for (final zdb in [
+          for (final a in assets)
+            if ((a['name'] as String).endsWith('.zdb')) a['name'] as String
+        ]) {
+          final name = '$zdb.manifest.json';
+          assets.add({
+            'name': name,
+            'browser_download_url': 'https://x/v29/$name',
+            'size': 9
+          });
+        }
+      }
       final manifestData = jsonDecode(barrierJson);
       if (schemaSixDelta) {
         manifestData['fromSchemaVersion'] = 6;
@@ -395,6 +436,12 @@ void main() {
         if (url.endsWith('patch-v28-v29.db.zst.manifest.json')) {
           return http.Response(jsonEncode(manifestData), manifestStatus);
         }
+        if (url.endsWith('.zdb.manifest.json')) {
+          final file = url.split('/').last.replaceAll('.manifest.json', '');
+          final manifest = _fullManifest(file);
+          editFullManifest?.call(manifest);
+          return http.Response(jsonEncode(manifest), fullManifestStatus);
+        }
         return http.Response('not found', 404);
       });
       final client = GithubLibraryReleaseClient(httpClient: mock);
@@ -406,12 +453,12 @@ void main() {
             );
     }
 
-    test('לקוח סכמה 6 מקבל את seforim-schema6.db.zst של latest', () async {
+    test('לקוח סכמה 6 מקבל את seforim-schema6.zdb של latest', () async {
       final result = await build(supportedDbSchemaVersion: 6)
           .discover(allowPrerelease: false);
       expect(result.latestVersion, 29);
       expect(result.edges.single.manifest.fullRebase, isTrue);
-      expect(result.latestFullDbAsset?.name, 'seforim-schema6.db.zst');
+      expect(result.latestFullDbAsset?.name, 'seforim-schema6.zdb');
       expect(result.latestReleaseTag, 'v29');
     });
 
@@ -479,7 +526,7 @@ void main() {
       );
       expect(plan.kind, LibraryUpdatePlanKind.fullDownload);
       expect(plan.targetVersion, 29);
-      expect(plan.fullDbAsset?.name, 'seforim-schema6.db.zst');
+      expect(plan.fullDbAsset?.name, 'seforim-schema6.zdb');
     });
 
     for (final delta in [false, true]) {
@@ -490,8 +537,8 @@ void main() {
           supportedDbSchemaVersion: 6,
           schemaSixDelta: delta,
           latestAssetNames: [
-            'seforim-schema7.db.zst',
-            'seforim-schema6.db.zst',
+            'seforim-schema7.zdb',
+            'seforim-schema6.zdb',
             if (delta) ...[
               'patch-v28-v29.db.zst',
               'patch-v28-v29.db.zst.manifest.json',
@@ -516,7 +563,7 @@ void main() {
             delta
                 ? LibraryUpdatePlanKind.delta
                 : LibraryUpdatePlanKind.fullDownload);
-        expect(plan.fullDbAsset?.name, 'seforim-schema6.db.zst');
+        expect(plan.fullDbAsset?.name, 'seforim-schema6.zdb');
       });
     }
 
@@ -533,5 +580,67 @@ void main() {
       expect(result.latestDbSchemaVersion, 5);
       expect(result.latestFullDbAsset?.name, 'seforim.db.zst');
     });
+    test('zdb נבחר: ה-manifest שלו מצורף לתוצאה', () async {
+      final result = await build(supportedDbSchemaVersion: 6)
+          .discover(allowPrerelease: false);
+      final manifest = result.latestFullDbManifest;
+      expect(manifest, isNotNull);
+      expect(manifest!.file, 'seforim-schema6.zdb');
+      expect(manifest.dbVersion, 29);
+      expect(manifest.dbSchemaVersion, 6);
+      expect(manifest.zdb.logicalSize, 36);
+    });
+
+    test('zdb שלא נבחר ו-DB מלא zst אינם דורשים manifest', () async {
+      final result = await build(
+        latestAssetNames: ['seforim-schema6.zdb'],
+        withFullManifests: false,
+      ).discover(allowPrerelease: false);
+      expect(result.latestFullDbAsset, isNull);
+      expect(result.latestFullDbManifest, isNull);
+
+      final legacy = await build(
+        supportedDbSchemaVersion: 6,
+        latestAssetNames: ['catalog.pb'],
+        withFullManifests: false,
+      ).discover(allowPrerelease: false);
+      expect(legacy.latestFullDbAsset?.name, 'seforim.db.zst');
+      expect(legacy.latestFullDbManifest, isNull);
+    });
+
+    test('zdb ללא manifest — הגילוי נכשל במפורש', () async {
+      await expectLater(
+        build(supportedDbSchemaVersion: 6, withFullManifests: false)
+            .discover(allowPrerelease: false),
+        throwsA(isA<FullDbManifestException>().having((e) => e.message,
+            'message', contains('seforim-schema6.zdb.manifest.json'))),
+      );
+    });
+
+    test('manifest של zdb שלא ירד — הגילוי נכשל במפורש', () async {
+      await expectLater(
+        build(supportedDbSchemaVersion: 6, fullManifestStatus: 503)
+            .discover(allowPrerelease: false),
+        throwsA(isA<FullDbManifestException>()),
+      );
+    });
+
+    for (final (field, value) in [
+      ('file', 'seforim-schema7.zdb'),
+      ('size', 10),
+      ('dbVersion', 28),
+      ('dbSchemaVersion', 7),
+    ]) {
+      test('manifest של zdb שסותר את ה-asset ב-$field — נכשל', () async {
+        await expectLater(
+          build(
+            supportedDbSchemaVersion: 6,
+            editFullManifest: (m) => m[field] = value,
+          ).discover(allowPrerelease: false),
+          throwsA(isA<FullDbManifestException>()
+              .having((e) => e.message, 'message', contains(field))),
+        );
+      });
+    }
   });
 }
