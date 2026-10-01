@@ -330,6 +330,78 @@ void main() {
       expect(File(dest).existsSync(), isFalse);
     });
 
+    test('חיבור חלקים גדולים מגוש קריאה אחד זהה בייט-לבייט', () async {
+      final big = Uint8List.fromList(List.generate(
+          3 * 1024 * 1024 + 7, (i) => (i * 31 + (i >> 9)) & 0xff));
+      final sizes = [1500000, 1048576, big.length - 2548576];
+      final bigParts = [
+        Uint8List.sublistView(big, 0, sizes[0]),
+        Uint8List.sublistView(big, sizes[0], sizes[0] + sizes[1]),
+        Uint8List.sublistView(big, sizes[0] + sizes[1]),
+      ];
+      final split = SplitAsset.fromManifestJson({
+        ..._manifestJson(),
+        'size': big.length,
+        'sha256': _sha(big),
+        'partSizeLimit': sizes[0],
+        'parts': [
+          for (var i = 0; i < 3; i++)
+            {
+              'name': _partName(i),
+              'size': sizes[i],
+              'sha256': _sha(bigParts[i]),
+            },
+        ],
+      }, manifestName: _manifestName, partUrls: _partUrls);
+      await server([], bodies: {
+        for (var i = 0; i < 3; i++)
+          i: (_) => http.StreamedResponse(Stream.value(bigParts[i]), 200,
+              contentLength: sizes[i]),
+      }).downloadSplitToFile(split: split, destPath: dest, resumeToken: 'v31');
+      expect(File(dest).readAsBytesSync(), big);
+      expect(leftovers(), isEmpty);
+    });
+
+    /// מריץ הורדה מלאה ומפעיל את [beforeJoin] כשהחלק האחרון כמעט נכתב — אחרי
+    /// שהחלקים הקודמים כבר אומתו, ולפני החיבור.
+    Future<void> downloadThen(void Function() beforeJoin) {
+      var fired = false;
+      return server([]).downloadSplitToFile(
+        split: _split(),
+        destPath: dest,
+        resumeToken: 'v31',
+        onProgress: (d, _) {
+          if (d == _full.length && !fired) {
+            fired = true;
+            beforeJoin();
+          }
+        },
+      );
+    }
+
+    test('חלק שנעלם לפני החיבור → PathNotFoundException בלי פלט חלקי',
+        () async {
+      await expectLater(
+        downloadThen(
+            () => File(PatchDownloader.splitPartPath(dest, 1)).deleteSync()),
+        throwsA(isA<PathNotFoundException>()),
+      );
+      expect(File(dest).existsSync(), isFalse);
+      expect(leftovers().where((n) => !n.contains('.part-')), isEmpty);
+    });
+
+    test('חלק שהשתבש לפני החיבור → PatchDownloadException בלי פלט חלקי',
+        () async {
+      await expectLater(
+        downloadThen(() => File(PatchDownloader.splitPartPath(dest, 0))
+            .writeAsBytesSync(List.filled(20, 9))),
+        throwsA(isA<PatchDownloadException>()
+            .having((e) => e.message, 'message', contains('המחובר'))),
+      );
+      expect(File(dest).existsSync(), isFalse);
+      expect(leftovers().where((n) => !n.contains('.part-')), isEmpty);
+    });
+
     test('ארכיון שכבר חובר בריצה קודמת → אין הורדה', () async {
       await server([]).downloadSplitToFile(
           split: _split(), destPath: dest, resumeToken: 'v31');

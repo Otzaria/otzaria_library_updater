@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `downloadSplitToFile`: חיבור החלקים (קריאה, sha256 וכתיבה) רץ ב-isolate נפרד,
+  אל קובץ זמני שעובר ל-`destPath` רק אחרי האימות. ה-API לא השתנה.
+
 ## 0.8.1
 
 DB מלא מפוצל: כשה-DB המלא גדול ממגבלת ה-2 GiB לנכס ב-GitHub, SeforimLibrary
