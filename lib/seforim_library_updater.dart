@@ -13,6 +13,8 @@ export 'src/models/library_release.dart'
     show LibraryRelease, ReleaseAsset, fullDbArchiveNameForSchema;
 export 'src/models/library_update_plan.dart'
     show LibraryUpdatePlan, LibraryUpdatePlanKind, PatchEdge;
+export 'src/models/split_asset.dart'
+    show SplitAsset, SplitAssetPart, kGithubAssetLimit, kSplitManifestSuffix;
 export 'src/models/patch_table_spec.dart'
     show
         PatchTableSpec,

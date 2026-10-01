@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.8.1
+
+DB מלא מפוצל: כשה-DB המלא גדול ממגבלת ה-2 GiB לנכס ב-GitHub, SeforimLibrary
+מפרסם אותו כ-`seforim-schema<N>.db.zst.part-NNN` ולצדם
+`seforim-schema<N>.db.zst.manifest.json` (אותה צורה של `split_release_asset.sh`
+באוצריא: גודל ו-sha256 לכל חלק ולשלם).
+
+- `SplitAsset` / `SplitAssetPart`: פענוח ואימות של מניפסט הפיצול מול נכסי ה-release.
+- `ReleaseAsset.split`, `isSplitFullDbManifest`, `advertisedFullDbSchemaVersion`.
+  `fullDbAssetFor` בוחר גם מניפסט פיצול; קובץ יחיד גובר באותה סכמה.
+- `GithubLibraryReleaseClient.resolveSplitAsset` — מניפסט ← נכס עם הגודל וה-sha256 של השלם.
+  `LibraryUpdateDiscovery` מפענח את ה-DB המפוצל של ה-release האחרון; מניפסט
+  פגום מבטל את ה-fallback המלא בלבד.
+- `PatchDownloader.downloadSplitToFile`: כל חלק עם resume ו-sha256 משלו, חיבור
+  שמוחק כל חלק אחרי צירופו ואימות ה-sha256 של השלם.
+  `downloadReleaseAssetToFile` מכסה קובץ יחיד ומפוצל בקריאה אחת.
+
 ## 0.8.0
 
 סכמת DB 6: פיצול `line` לטבלה צרה ול-`line_content(id, content)`, ו-

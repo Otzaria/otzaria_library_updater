@@ -1,6 +1,7 @@
 import 'package:equatable/equatable.dart';
 
 import 'patch_table_spec.dart';
+import 'split_asset.dart';
 
 /// שם ה-asset של ה-DB המלא לסכמה נתונה. `seforim.db.zst` שמור לסכמה 5 ומטה
 /// לתמיד — לקוחות ישנים מתאימים לשם המדויק ואסור שיקבלו סכמה חדשה מהם.
@@ -27,6 +28,10 @@ class ReleaseAsset extends Equatable {
   /// digest של התוכן (`sha256:<hex>`) כשה-API מספק; null כשחסר.
   final String? digest;
 
+  /// החלקים כשהנכס מפוצל. אז [name] הוא שם הארכיון השלם, [size] ו-[digest]
+  /// שלו, ו-[downloadUrl] היא כתובת מניפסט הפיצול.
+  final SplitAsset? split;
+
   const ReleaseAsset({
     required this.name,
     required this.downloadUrl,
@@ -34,7 +39,21 @@ class ReleaseAsset extends Equatable {
     this.id,
     this.updatedAt,
     this.digest,
+    this.split,
   });
+
+  /// הנכס המפוצל ש-[manifestAsset] מתאר, אחרי פענוח המניפסט שלו.
+  factory ReleaseAsset.fromSplit(ReleaseAsset manifestAsset, SplitAsset split) {
+    return ReleaseAsset(
+      name: split.archive,
+      downloadUrl: manifestAsset.downloadUrl,
+      size: split.size,
+      id: manifestAsset.id,
+      updatedAt: manifestAsset.updatedAt,
+      digest: 'sha256:${split.sha256}',
+      split: split,
+    );
+  }
 
   factory ReleaseAsset.fromJson(Map<String, dynamic> json) {
     return ReleaseAsset(
@@ -53,12 +72,31 @@ class ReleaseAsset extends Equatable {
       name.startsWith('patch-') && name.endsWith('.db.zst.manifest.json');
 
   /// `true` אם זהו DB מלא דחוס: `seforim.db.zst` או `seforim-schema<N>.db.zst`.
-  bool get isFullDbArchive =>
-      name == _legacyFullDbArchiveName || fullDbSchemaVersion != null;
+  bool get isFullDbArchive => _isFullDbName(name);
+
+  /// `true` אם זהו מניפסט פיצול של DB מלא (`<שם DB מלא>.manifest.json`),
+  /// שעוד לא פוענח ל-[split].
+  bool get isSplitFullDbManifest {
+    final archive = _splitArchiveName;
+    return archive != null && _isFullDbName(archive);
+  }
 
   /// סכמת ה-DB המלא לפי שם ה-asset: N עבור `seforim-schema<N>.db.zst`
   /// (N ≥ 6, בכתיב קנוני), null עבור `seforim.db.zst` (סכמה ≤ 5) ולכל שם אחר.
-  int? get fullDbSchemaVersion {
+  int? get fullDbSchemaVersion => _schemaOfFullDbName(name);
+
+  /// כמו [fullDbSchemaVersion], אבל גם למניפסט פיצול — לפי שם הארכיון שלו.
+  int? get advertisedFullDbSchemaVersion =>
+      _schemaOfFullDbName(_splitArchiveName ?? name);
+
+  String? get _splitArchiveName => name.endsWith(kSplitManifestSuffix)
+      ? name.substring(0, name.length - kSplitManifestSuffix.length)
+      : null;
+
+  static bool _isFullDbName(String name) =>
+      name == _legacyFullDbArchiveName || _schemaOfFullDbName(name) != null;
+
+  static int? _schemaOfFullDbName(String name) {
     final match = _schemaFullDbPattern.firstMatch(name);
     if (match == null) return null;
     final schema = int.tryParse(match.group(1)!);
@@ -67,7 +105,8 @@ class ReleaseAsset extends Equatable {
   }
 
   @override
-  List<Object?> get props => [name, downloadUrl, size, id, updatedAt, digest];
+  List<Object?> get props =>
+      [name, downloadUrl, size, id, updatedAt, digest, split];
 }
 
 /// מייצג release אחד מ-GitHub עם כל ה-assets שלו.
@@ -110,19 +149,30 @@ class LibraryRelease extends Equatable {
       fullDbAssetFor(maxSchemaVersion: kDefaultConsumerDbSchemaVersion);
 
   /// ה-DB המלא בעל הסכמה הגבוהה ביותר שאינה עולה על [maxSchemaVersion].
-  /// `seforim.db.zst` נחשב סכמה 5.
+  /// `seforim.db.zst` נחשב סכמה 5. DB מפוצל מוחזר כמניפסט שלו (לפענוח ב-
+  /// `resolveSplitAsset`); קובץ יחיד גובר בתיקו.
   ReleaseAsset? fullDbAssetFor({required int maxSchemaVersion}) {
     ReleaseAsset? best;
-    var bestSchema = -1;
+    var bestRank = -1;
     for (final asset in assets) {
-      if (!asset.isFullDbArchive) continue;
-      final schema = asset.fullDbSchemaVersion ?? _legacyFullDbSchemaCeiling;
-      if (schema > maxSchemaVersion || schema <= bestSchema) continue;
+      final single = asset.isFullDbArchive;
+      if (!single && !asset.isSplitFullDbManifest) continue;
+      final schema =
+          asset.advertisedFullDbSchemaVersion ?? _legacyFullDbSchemaCeiling;
+      if (schema > maxSchemaVersion) continue;
+      final rank = schema * 2 + (single ? 1 : 0);
+      if (rank <= bestRank) continue;
       best = asset;
-      bestSchema = schema;
+      bestRank = rank;
     }
     return best;
   }
+
+  /// כתובות החלקים וגדליהם ב-release זה, לפענוח מניפסט פיצול.
+  ({Map<String, String> urls, Map<String, int> sizes}) get assetIndex => (
+        urls: {for (final a in assets) a.name: a.downloadUrl},
+        sizes: {for (final a in assets) a.name: a.size},
+      );
 
   /// מאתר asset לפי שם מדויק.
   ReleaseAsset? assetByName(String name) {
