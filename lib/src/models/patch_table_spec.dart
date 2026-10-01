@@ -212,7 +212,8 @@ const List<String> kHashTableOrderSchema4 = [
 const List<String> kHashTableOrderSchema5 = kHashTableOrderSchema4;
 
 /// סדר ה-hash הקפוא של סכמה 6 (39 טבלאות): `line_content` מיד אחרי `line`,
-/// ו-`zstd_dict` (מילון המסגרות של טקסט השורות) מיד אחריה. לעולם אין לערוך.
+/// ו-`zstd_dict` (מילון המסגרות של טקסט השורות) מיד אחריה. `zstd_dict` נוספה
+/// לפני שסכמה 6 שוחררה; מעכשיו לעולם אין לערוך.
 const List<String> kHashTableOrderSchema6 = [
   'source',
   'author',
