@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 
 import '../models/delta_manifest.dart';
 import '../models/library_release.dart';
+import '../models/split_asset.dart';
 
 /// לקוח לקריאת ה-releases וה-assets של ספריית הספרים מ-GitHub.
 ///
@@ -75,6 +76,30 @@ class GithubLibraryReleaseClient {
       throw FormatException('manifest אינו אובייקט JSON תקין: $url');
     }
     return DeltaManifest.fromJson(decoded);
+  }
+
+  /// מוריד את מניפסט הפיצול [manifestAsset] ומחזיר את הנכס שהוא מתאר. זורק
+  /// בכשל רשת, ו-[FormatException] על מניפסט פגום או על חלק חסר.
+  Future<ReleaseAsset> resolveSplitAsset(
+    LibraryRelease release,
+    ReleaseAsset manifestAsset,
+  ) async {
+    final response = await _httpClient.get(
+      Uri.parse(manifestAsset.downloadUrl),
+      headers: const {'Accept': 'application/json'},
+    ).timeout(timeout);
+    if (response.statusCode != 200) {
+      throw Exception('שגיאה בהורדת מניפסט הפיצול '
+          '(${manifestAsset.name}): ${response.statusCode}');
+    }
+    final index = release.assetIndex;
+    final split = SplitAsset.fromManifestJson(
+      jsonDecode(utf8.decode(response.bodyBytes)),
+      manifestName: manifestAsset.name,
+      partUrls: index.urls,
+      partSizes: index.sizes,
+    );
+    return ReleaseAsset.fromSplit(manifestAsset, split);
   }
 
   /// סוגר את לקוח ה-HTTP אם הוא נוצר פנימית.

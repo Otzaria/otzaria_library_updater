@@ -9,6 +9,8 @@ import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 
 import '../models/delta_manifest.dart';
+import '../models/library_release.dart';
+import '../models/split_asset.dart';
 
 /// נזרק כשהורדה או אימות נכשלים. הקבצים הפגומים נמחקים לפני הזריקה.
 class PatchDownloadException implements Exception {
@@ -338,6 +340,154 @@ class PatchDownloader {
   /// נתיב קובץ הצד (`.resume`) של [destPath]. חשוף כדי שהצרכן שמוחק את הקובץ
   /// לאחר חילוץ מוצלח (או בכשל חילוץ) ינקה גם את קובץ הצד.
   static String resumeSidecarPath(String destPath) => '$destPath.resume';
+
+  /// נתיב החלק [index] של ארכיון מפוצל שמורכב אל [destPath].
+  static String splitPartPath(String destPath, int index) =>
+      '$destPath.part-${index.toString().padLeft(3, '0')}';
+
+  /// מוריד את [asset] אל [destPath]: קובץ יחיד דרך [downloadToFile] (עם
+  /// ה-digest כ-sha256 צפוי), ונכס מפוצל דרך [downloadSplitToFile].
+  Future<void> downloadReleaseAssetToFile({
+    required ReleaseAsset asset,
+    required String destPath,
+    String? resumeToken,
+    void Function(int downloaded, int? total)? onProgress,
+    bool Function()? isCancelled,
+  }) {
+    final split = asset.split;
+    if (split != null) {
+      return downloadSplitToFile(
+        split: split,
+        destPath: destPath,
+        resumeToken: resumeToken,
+        onProgress: onProgress,
+        isCancelled: isCancelled,
+      );
+    }
+    final digest = asset.digest;
+    return downloadToFile(
+      url: asset.downloadUrl,
+      destPath: destPath,
+      expectedSize: asset.size > 0 ? asset.size : null,
+      expectedSha256: digest != null && digest.startsWith('sha256:')
+          ? digest.substring('sha256:'.length)
+          : null,
+      resumeToken: resumeToken,
+      onProgress: onProgress,
+      isCancelled: isCancelled,
+    );
+  }
+
+  /// מוריד כל חלק דרך [downloadToFile] (resume ו-sha256 לכל חלק), מחבר אל
+  /// [destPath] ומאמת את השלם; [resumeToken] כובל גם את הארכיון המחובר.
+  Future<void> downloadSplitToFile({
+    required SplitAsset split,
+    required String destPath,
+    String? resumeToken,
+    void Function(int downloaded, int? total)? onProgress,
+    bool Function()? isCancelled,
+  }) async {
+    _throwIfCancelled(isCancelled);
+    final sidecarPath = resumeSidecarPath(destPath);
+    final joinedToken =
+        resumeToken == null ? null : '$resumeToken|joined:${split.sha256}';
+
+    if (joinedToken != null &&
+        _readSidecar(sidecarPath)?.token == joinedToken &&
+        File(destPath).existsSync() &&
+        File(destPath).lengthSync() == split.size) {
+      onProgress?.call(split.size, split.size);
+      if (await _hashFileSha256(destPath, isCancelled) == split.sha256) {
+        _deleteSplitParts(destPath, from: 0);
+        return;
+      }
+    }
+    _deleteRequired(
+      destPath,
+      'מחיקת ארכיון קודם נכשלה — לא ניתן לחבר את חלקי ההורדה',
+    );
+    _deleteQuietly(sidecarPath);
+    _deleteSplitParts(destPath, from: split.parts.length);
+
+    var completed = 0;
+    for (var i = 0; i < split.parts.length; i++) {
+      final part = split.parts[i];
+      final base = completed;
+      await downloadToFile(
+        url: part.downloadUrl,
+        destPath: splitPartPath(destPath, i),
+        expectedSize: part.size,
+        expectedSha256: part.sha256,
+        resumeToken: resumeToken == null
+            ? null
+            : '$resumeToken|${part.name}|${part.sha256}',
+        onProgress: (downloaded, _) =>
+            onProgress?.call(base + downloaded, split.size),
+        isCancelled: isCancelled,
+      );
+      completed += part.size;
+    }
+    _throwIfCancelled(isCancelled);
+
+    await _joinSplitParts(split, destPath);
+    if (joinedToken != null) _writeSidecar(sidecarPath, joinedToken, null);
+  }
+
+  /// מצרף את החלקים לפי הסדר ומוחק כל אחד אחרי צירופו. אינו נעצר בביטול:
+  /// חיבור שנקטע היה מאבד את החלקים שכבר צורפו.
+  Future<void> _joinSplitParts(SplitAsset split, String destPath) async {
+    final digestSink = _ChunkedDigestSink();
+    final hasher = sha256.startChunkedConversion(digestSink);
+    var written = 0;
+    try {
+      final output = File(destPath).openSync(mode: FileMode.writeOnly);
+      try {
+        for (var i = 0; i < split.parts.length; i++) {
+          final partPath = splitPartPath(destPath, i);
+          await for (final chunk in File(partPath).openRead()) {
+            hasher.add(chunk);
+            output.writeFromSync(chunk);
+            written += chunk.length;
+          }
+          _deleteQuietly(partPath);
+          _deleteQuietly(resumeSidecarPath(partPath));
+        }
+        output.flushSync();
+      } finally {
+        output.closeSync();
+      }
+      hasher.close();
+      if (written != split.size) {
+        throw PatchDownloadException(
+            'גודל הארכיון המחובר ($written) אינו תואם לצפוי (${split.size})');
+      }
+      if (digestSink.value.toString() != split.sha256) {
+        throw const PatchDownloadException(
+            'sha256 של הארכיון המחובר אינו תואם');
+      }
+    } catch (_) {
+      _deleteQuietly(destPath);
+      rethrow;
+    }
+  }
+
+  /// מוחק חלקים (ואת קבצי הצד שלהם) מהאינדקס [from] והלאה — שרידים של
+  /// פיצול קודם שהיו בו יותר חלקים, או כל החלקים אחרי חיבור מוצלח.
+  void _deleteSplitParts(String destPath, {required int from}) {
+    final dir = Directory(p.dirname(destPath));
+    if (!dir.existsSync()) return;
+    final pattern = RegExp(
+        '^${RegExp.escape(p.basename(destPath))}' r'\.part-(\d+)(\.resume)?$');
+    try {
+      for (final entity in dir.listSync()) {
+        if (entity is! File) continue;
+        final match = pattern.firstMatch(p.basename(entity.path));
+        if (match != null && int.parse(match.group(1)!) >= from) {
+          _deleteQuietly(entity.path);
+        }
+      }
+    } catch (_) {}
+  }
 
   /// זורם את גוף התגובה אל [file], תוך המשך מ-[offset] בעזרת `Range`.
   /// מחזיר את גודל הקובץ הכולל שנכתב ואת ה-sha256 שחושב בזרימה (או null אם

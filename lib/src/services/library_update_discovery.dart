@@ -85,12 +85,14 @@ class LibraryUpdateDiscovery {
     // ה-DB המלא ל-fallback: מה-release בעל הגרסה הגבוהה ביותר שיש לו DB מלא
     // בסכמה נתמכת. סכמות חדשות מדי מזוהות כ-latest אך אינן fallback.
     ReleaseAsset? latestFull;
+    LibraryRelease? latestFullRelease;
     String? latestTag;
     var bestFullVersion = -1;
     var latestVersion = maxEdgeVersion;
     int? latestDbSchemaVersion;
     for (final release in releases) {
-      final advertisedFulls = release.assets.where((a) => a.isFullDbArchive);
+      final advertisedFulls = release.assets
+          .where((a) => a.isFullDbArchive || a.isSplitFullDbManifest);
       final hasVersionedManifest = release.deltaManifestAssets
           .any((a) => _manifestVersionPattern.hasMatch(a.name));
       if (advertisedFulls.isEmpty && !hasVersionedManifest) {
@@ -105,7 +107,7 @@ class LibraryUpdateDiscovery {
       }
       if (version == latestVersion) {
         for (final asset in advertisedFulls) {
-          final schema = asset.fullDbSchemaVersion ?? 5;
+          final schema = asset.advertisedFullDbSchemaVersion ?? 5;
           if (latestDbSchemaVersion == null || schema > latestDbSchemaVersion) {
             latestDbSchemaVersion = schema;
           }
@@ -117,7 +119,21 @@ class LibraryUpdateDiscovery {
       if (version > bestFullVersion) {
         bestFullVersion = version;
         latestFull = full;
+        latestFullRelease = release;
         latestTag = release.tag;
+      }
+    }
+
+    // DB מפוצל מפוענח רק לבסוף, ל-release הנבחר; מניפסט פגום מבטל את ה-fallback
+    // המלא בלבד ואינו חוסם מסלול דלתא.
+    if (latestFull != null &&
+        latestFull.isSplitFullDbManifest &&
+        bestFullVersion == latestVersion) {
+      try {
+        latestFull =
+            await client.resolveSplitAsset(latestFullRelease!, latestFull);
+      } catch (_) {
+        latestFull = null;
       }
     }
 
