@@ -4,6 +4,8 @@
 
 - `downloadSplitToFile`: חיבור החלקים (קריאה, sha256 וכתיבה) רץ ב-isolate נפרד,
   אל קובץ זמני שעובר ל-`destPath` רק אחרי האימות. ה-API לא השתנה.
+- אימות sha256 של קובץ שכבר שלם (`downloadToFile`) או ארכיון שכבר חובר
+  (`downloadSplitToFile`) רץ ב-isolate נפרד; ביטול עדיין נתפס באמצע החישוב.
 
 ## 0.8.1
 
