@@ -412,6 +412,26 @@ void main() {
       expect(File(dest).readAsBytesSync(), _full);
     });
 
+    test('ביטול באימות ארכיון שכבר חובר → PatchDownloadCancelled, הארכיון נשמר',
+        () async {
+      await server([]).downloadSplitToFile(
+          split: _split(), destPath: dest, resumeToken: 'v31');
+      final captured = <http.BaseRequest>[];
+      var verifying = false;
+      await expectLater(
+        server(captured).downloadSplitToFile(
+          split: _split(),
+          destPath: dest,
+          resumeToken: 'v31',
+          onProgress: (_, __) => verifying = true,
+          isCancelled: () => verifying,
+        ),
+        throwsA(isA<PatchDownloadCancelled>()),
+      );
+      expect(captured, isEmpty);
+      expect(File(dest).readAsBytesSync(), _full);
+    });
+
     test('שרידי חלקים מעבר למספר החלקים הנוכחי נמחקים', () async {
       File(PatchDownloader.splitPartPath(dest, 5)).writeAsBytesSync([1]);
       File('${PatchDownloader.splitPartPath(dest, 5)}.resume')

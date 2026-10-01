@@ -313,7 +313,7 @@ class PatchDownloader {
         // בלי retry ה-hash מחושב בזרימה. במסלול alreadyComplete או אחרי retry
         // קוראים את הקובץ המוגמר פעם אחת, במקום לקרוא כל partial בכל ניסיון.
         final actual = streamDigest?.toString() ??
-            await _hashFileSha256(destPath, isCancelled);
+            await _hashFileSha256InIsolate(destPath, isCancelled);
         if (actual != expectedSha256.toLowerCase()) {
           _deleteQuietly(destPath);
           _deleteQuietly(sidecarPath);
@@ -397,7 +397,8 @@ class PatchDownloader {
         File(destPath).existsSync() &&
         File(destPath).lengthSync() == split.size) {
       onProgress?.call(split.size, split.size);
-      if (await _hashFileSha256(destPath, isCancelled) == split.sha256) {
+      if (await _hashFileSha256InIsolate(destPath, isCancelled) ==
+          split.sha256) {
         _deleteSplitParts(destPath, from: 0);
         return;
       }
@@ -1060,7 +1061,7 @@ class PatchDownloader {
     required String expected,
     required String label,
   }) async {
-    final actual = await Isolate.run(() => _hashFileSha256(path));
+    final actual = await _hashFileSha256InIsolate(path);
     if (actual != expected.toLowerCase()) {
       throw PatchDownloadException('$label אינו תואם');
     }
@@ -1133,8 +1134,49 @@ class PatchDownloader {
   }
 }
 
-/// מחשב sha256 של קובץ בזרימה (עשוי לעבור 1GB — לא readAsBytes); top-level כדי
-/// שתרוץ ב-`Isolate.run`, ולכן [isCancelled] שמיש רק בקריאה מקומית.
+/// sha256 של קובץ ב-isolate נפרד. [isCancelled] אינו עובר בין isolates, ולכן
+/// נבדק כאן כל 100ms ומגיע ל-worker כהודעה; ביטול נזרק כ-[PatchDownloadCancelled].
+Future<String> _hashFileSha256InIsolate(String path,
+    [bool Function()? isCancelled]) async {
+  if (isCancelled == null) return _runHashWorker(path, null);
+  if (isCancelled()) throw const PatchDownloadCancelled();
+  final control = ReceivePort();
+  SendPort? workerCancel;
+  var cancelled = false;
+  control.listen((port) {
+    workerCancel = port as SendPort;
+    if (cancelled) workerCancel!.send(null);
+  });
+  final poll = Timer.periodic(const Duration(milliseconds: 100), (_) {
+    if (cancelled || !isCancelled()) return;
+    cancelled = true;
+    workerCancel?.send(null);
+  });
+  try {
+    return await _runHashWorker(path, control.sendPort);
+  } finally {
+    poll.cancel();
+    control.close();
+  }
+}
+
+/// נפרד מ-[_hashFileSha256InIsolate] כדי שה-closure לא ילכוד את ה-ReceivePort.
+Future<String> _runHashWorker(String path, SendPort? control) =>
+    Isolate.run(() async {
+      if (control == null) return _hashFileSha256(path);
+      final cancel = ReceivePort();
+      var cancelled = false;
+      cancel.listen((_) => cancelled = true);
+      control.send(cancel.sendPort);
+      try {
+        return await _hashFileSha256(path, () => cancelled);
+      } finally {
+        cancel.close();
+      }
+    });
+
+/// מחשב sha256 של קובץ בזרימה (עשוי לעבור 1GB — לא readAsBytes). רץ רק בתוך
+/// worker; מבחוץ קוראים ל-[_hashFileSha256InIsolate].
 Future<String> _hashFileSha256(String path,
     [bool Function()? isCancelled]) async {
   final digestSink = _ChunkedDigestSink();
