@@ -1764,27 +1764,24 @@ void main() {
       expect(hashTableOrderForSchemaVersion(5), same(kHashTableOrderSchema5));
       expect(kHashTableOrderSchema5, same(kHashTableOrderSchema4));
     });
-    test('סכמה-6 → סדר 38, line_content מיד אחרי line', () {
+    test('סכמה-6 → סדר 39 הנוכחי, line_content ו-zstd_dict אחרי line', () {
       expect(hashTableOrderForSchemaVersion(6), same(kHashTableOrderSchema6));
-      expect(kHashTableOrderSchema6.length, 38);
+      expect(kHashTableOrder, same(kHashTableOrderSchema6));
+      expect(kHashTableOrderSchema6.length, 39);
       expect(kHashTableOrderSchema6.indexOf('line_content'),
           kHashTableOrderSchema6.indexOf('line') + 1);
-      expect([...kHashTableOrderSchema6]..remove('line_content'),
+      expect(kHashTableOrderSchema6.indexOf('zstd_dict'),
+          kHashTableOrderSchema6.indexOf('line_content') + 1);
+      expect(
+          [...kHashTableOrderSchema6]
+            ..remove('line_content')
+            ..remove('zstd_dict'),
           kHashTableOrderSchema5);
-    });
-    test('סכמה-7 → סדר 39 הנוכחי, zstd_dict מיד אחרי line_content', () {
-      expect(hashTableOrderForSchemaVersion(7), same(kHashTableOrderSchema7));
-      expect(kHashTableOrder, same(kHashTableOrderSchema7));
-      expect(kHashTableOrderSchema7.length, 39);
-      expect(kHashTableOrderSchema7.indexOf('zstd_dict'),
-          kHashTableOrderSchema7.indexOf('line_content') + 1);
-      expect([...kHashTableOrderSchema7]..remove('zstd_dict'),
-          kHashTableOrderSchema6);
     });
     test('גרסת סכמה לא מוכרת → זורק PatchApplyException', () {
       expect(() => hashTableOrderForSchemaVersion(0),
           throwsA(isA<PatchApplyException>()));
-      expect(() => hashTableOrderForSchemaVersion(8),
+      expect(() => hashTableOrderForSchemaVersion(7),
           throwsA(isA<PatchApplyException>()));
     });
   });

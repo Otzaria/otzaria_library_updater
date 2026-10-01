@@ -43,7 +43,7 @@ const List<PatchTableSpec> kPatchTablesInFkOrder = [
   PatchTableSpec('line', ['id'], updatable: true),
   // סכמה 6. תוכן השורה בטבלה נפרדת, שורה אחת לכל שורת line עם אותו id.
   PatchTableSpec('line_content', ['id'], updatable: true),
-  // סכמה 7. מילון ה-zstd של טקסט השורות; החלפתו היא תמיד הורדה מלאה.
+  // סכמה 6. מילון ה-zstd של טקסט השורות; החלפתו היא תמיד הורדה מלאה.
   PatchTableSpec('zstd_dict', ['id'], updatable: true),
   PatchTableSpec('line_toc', ['lineId'], updatable: true),
   // סכמה 4. טבלת מפתח טהורה — כל עמודותיה PK, אין מה לעדכן בהתנגשות.
@@ -111,7 +111,7 @@ const List<String> kHashTableOrderSchema2 = [
 ];
 
 /// גרסת סכמת ה-DB הלוגית הגבוהה ביותר שה-hasher וה-planner מכירים.
-const int kSupportedDbSchemaVersion = 7;
+const int kSupportedDbSchemaVersion = 6;
 
 /// הסכמה שצרכן מקבל כשאינו מצהיר אחרת. קורא `line_content` (סכמה 6) מצהיר
 /// במפורש, כך ש-build של אפליקציה ישנה מול `ref: main` צף לא יוריד DB שאינו קורא.
@@ -211,52 +211,9 @@ const List<String> kHashTableOrderSchema4 = [
 /// סדר ה-hash הקפוא של סכמה 5 — זהה לסכמה 4 (השינוי בעמודה, לא בטבלאות).
 const List<String> kHashTableOrderSchema5 = kHashTableOrderSchema4;
 
-/// סדר ה-hash הקפוא של סכמה 6 (38 טבלאות): `line_content` מיד אחרי `line`.
-/// לעולם אין לערוך.
+/// סדר ה-hash הקפוא של סכמה 6 (39 טבלאות): `line_content` מיד אחרי `line`,
+/// ו-`zstd_dict` (מילון המסגרות של טקסט השורות) מיד אחריה. לעולם אין לערוך.
 const List<String> kHashTableOrderSchema6 = [
-  'source',
-  'author',
-  'topic',
-  'pub_place',
-  'pub_date',
-  'connection_type',
-  'generation',
-  'category',
-  'category_closure',
-  'tocText',
-  'book',
-  'book_topic',
-  'book_author',
-  'book_base_text',
-  'book_pub_place',
-  'book_pub_date',
-  'book_generation',
-  'tocEntry',
-  'line',
-  'line_content',
-  'line_toc',
-  'line_ref',
-  'line_dh',
-  'link',
-  'link_anchor',
-  'link_range',
-  'link_coverage',
-  'link_suppressed_side',
-  'book_has_links',
-  'book_version',
-  'version_line',
-  'book_acronym',
-  'alt_toc_structure',
-  'alt_toc_entry',
-  'line_alt_toc',
-  'default_commentator',
-  'default_targum',
-  'schema_meta',
-];
-
-/// סדר ה-hash הקפוא של סכמה 7 (39 טבלאות): `zstd_dict` מיד אחרי
-/// `line_content`, שתוכנה מסגרות zstd של המילון שבה. לעולם אין לערוך.
-const List<String> kHashTableOrderSchema7 = [
   'source',
   'author',
   'topic',
@@ -298,8 +255,8 @@ const List<String> kHashTableOrderSchema7 = [
   'schema_meta',
 ];
 
-/// סדר ה-hash הנוכחי (סכמה 7).
-const List<String> kHashTableOrder = kHashTableOrderSchema7;
+/// סדר ה-hash הנוכחי (סכמה 6).
+const List<String> kHashTableOrder = kHashTableOrderSchema6;
 
 /// סדר ה-hash הקפוא של סכמה-1 (33 טבלאות, ללא `book_base_text`) — משחזר בדיוק
 /// את ה-hash של ארטיפקטי סכמה-1 ההיסטוריים. לעולם אין לערוך.

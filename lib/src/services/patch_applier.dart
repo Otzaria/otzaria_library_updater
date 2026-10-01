@@ -180,7 +180,7 @@ class PatchApplyException implements Exception {
 /// בוחר את סדר ה-hash לפי גרסת הסכמה: 1 → [kHashTableOrderSchema1] (33),
 /// 2 → [kHashTableOrderSchema2] (34), 3 → [kHashTableOrderSchema3] (35),
 /// 4 → [kHashTableOrderSchema4], 5 → [kHashTableOrderSchema5] (37),
-/// 6 → [kHashTableOrderSchema6] (38), 7 → [kHashTableOrderSchema7] (39, הנוכחי).
+/// 6 → [kHashTableOrderSchema6] (39, הנוכחי).
 /// כל ערך אחר → זריקה (fail loudly).
 List<String> hashTableOrderForSchemaVersion(int schemaVersion) {
   switch (schemaVersion) {
@@ -196,8 +196,6 @@ List<String> hashTableOrderForSchemaVersion(int schemaVersion) {
       return kHashTableOrderSchema5;
     case 6:
       return kHashTableOrderSchema6;
-    case 7:
-      return kHashTableOrderSchema7;
     default:
       throw PatchApplyException(
         'גרסת סכמה $schemaVersion אינה נתמכת לבחירת סדר hash',
