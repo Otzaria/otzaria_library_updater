@@ -43,6 +43,8 @@ const List<PatchTableSpec> kPatchTablesInFkOrder = [
   PatchTableSpec('line', ['id'], updatable: true),
   // סכמה 6. תוכן השורה בטבלה נפרדת, שורה אחת לכל שורת line עם אותו id.
   PatchTableSpec('line_content', ['id'], updatable: true),
+  // סכמה 6. מילון ה-zstd של טקסט השורות; החלפתו היא תמיד הורדה מלאה.
+  PatchTableSpec('zstd_dict', ['id'], updatable: true),
   PatchTableSpec('line_toc', ['lineId'], updatable: true),
   // סכמה 4. טבלת מפתח טהורה — כל עמודותיה PK, אין מה לעדכן בהתנגשות.
   PatchTableSpec('line_ref', ['bookId', 'refKeyHash', 'lineIndex'],
@@ -209,8 +211,9 @@ const List<String> kHashTableOrderSchema4 = [
 /// סדר ה-hash הקפוא של סכמה 5 — זהה לסכמה 4 (השינוי בעמודה, לא בטבלאות).
 const List<String> kHashTableOrderSchema5 = kHashTableOrderSchema4;
 
-/// סדר ה-hash הקפוא של סכמה 6 (38 טבלאות): `line_content` מיד אחרי `line`.
-/// לעולם אין לערוך.
+/// סדר ה-hash הקפוא של סכמה 6 (39 טבלאות): `line_content` מיד אחרי `line`,
+/// ו-`zstd_dict` (מילון המסגרות של טקסט השורות) מיד אחריה. `zstd_dict` נוספה
+/// לפני שסכמה 6 שוחררה; מעכשיו לעולם אין לערוך.
 const List<String> kHashTableOrderSchema6 = [
   'source',
   'author',
@@ -232,6 +235,7 @@ const List<String> kHashTableOrderSchema6 = [
   'tocEntry',
   'line',
   'line_content',
+  'zstd_dict',
   'line_toc',
   'line_ref',
   'line_dh',

@@ -39,7 +39,7 @@ void main() {
   group('חוזה טבלאות ה-patch', () {
     const fixturePath = 'test/patch_tables_contract.json';
 
-    // ה-fixture מתאר את החוזה הנוכחי (סכמה 6): hashOrder = 38 הטבלאות.
+    // ה-fixture מתאר את החוזה הנוכחי (סכמה 6): hashOrder = 39 הטבלאות.
     // הסדרים הקפואים של סכמות 1–5 הם היסטוריה — לא נכנסים ל-fixture.
     test('הסריאליזציה הקנונית תואמת ל-fixture המקומי', () {
       final expected =
