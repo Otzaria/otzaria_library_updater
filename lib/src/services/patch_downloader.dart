@@ -1153,7 +1153,10 @@ Future<String> _hashFileSha256InIsolate(String path,
     workerCancel?.send(null);
   });
   try {
-    return await _runHashWorker(path, control.sendPort);
+    final digest = await _runHashWorker(path, control.sendPort);
+    // hash קצר יכול להסתיים לפני הדגימה הבאה, או לפני שה-worker קיבל ביטול.
+    if (cancelled || isCancelled()) throw const PatchDownloadCancelled();
+    return digest;
   } finally {
     poll.cancel();
     control.close();

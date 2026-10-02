@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -430,6 +431,74 @@ void main() {
       );
       expect(captured, isEmpty);
       expect(File(dest).readAsBytesSync(), _full);
+    });
+
+    test('ביטול בזמן hash קצר של ארכיון מחובר שומר resume ושרידי חלקים',
+        () async {
+      final payload = Uint8List(2 * 1024 * 1024);
+      final digest = _sha(payload);
+      final split = SplitAsset(
+        archive: _archive,
+        size: payload.length,
+        sha256: digest,
+        manifestName: _manifestName,
+        parts: [
+          SplitAssetPart(
+            name: _partName(0),
+            size: payload.length,
+            sha256: digest,
+            downloadUrl: _partUrls[_partName(0)]!,
+          ),
+        ],
+      );
+      final token = 'v31|joined:$digest';
+      File(dest).writeAsBytesSync(payload);
+      File('$dest.resume').writeAsStringSync(token);
+      final part = PatchDownloader.splitPartPath(dest, 0);
+      File(part).writeAsBytesSync([1, 2, 3]);
+      File('$part.resume').writeAsStringSync('previous part');
+      final captured = <http.BaseRequest>[];
+      final downloader = server(captured);
+      var cancelled = false;
+      final pollTimers = <Timer>[];
+
+      // ביטול מגיע אחרי תחילת האימות. מעכבים את דגימת הביטול כדי לבדוק
+      // באופן דטרמיניסטי hash שמסתיים בין שתי דגימות, גם במחשב עמוס.
+      await expectLater(
+        runZoned(
+          () => downloader.downloadSplitToFile(
+            split: split,
+            destPath: dest,
+            resumeToken: 'v31',
+            onProgress: (_, __) => scheduleMicrotask(() => cancelled = true),
+            isCancelled: () => cancelled,
+          ),
+          zoneSpecification: ZoneSpecification(
+            createPeriodicTimer: (self, parent, zone, duration, callback) {
+              final timer = parent.createPeriodicTimer(
+                  zone, const Duration(days: 1), callback);
+              pollTimers.add(timer);
+              return timer;
+            },
+          ),
+        ),
+        throwsA(isA<PatchDownloadCancelled>()),
+      );
+      expect(pollTimers, hasLength(1));
+      expect(pollTimers.single.isActive, isFalse);
+      expect(captured, isEmpty);
+      expect(_sha(File(dest).readAsBytesSync()), digest);
+      expect(File('$dest.resume').readAsStringSync(), token);
+      expect(File(part).readAsBytesSync(), [1, 2, 3]);
+      expect(File('$part.resume').readAsStringSync(), 'previous part');
+
+      // ניסיון חדש מאמת את אותו ארכיון ללא רשת ומנקה רק אחרי הצלחה.
+      await downloader.downloadSplitToFile(
+          split: split, destPath: dest, resumeToken: 'v31');
+      expect(captured, isEmpty);
+      expect(_sha(File(dest).readAsBytesSync()), digest);
+      expect(File('$dest.resume').readAsStringSync(), token);
+      expect(leftovers(), isEmpty);
     });
 
     test('שרידי חלקים מעבר למספר החלקים הנוכחי נמחקים', () async {
