@@ -313,7 +313,7 @@ class PatchDownloader {
         // בלי retry ה-hash מחושב בזרימה. במסלול alreadyComplete או אחרי retry
         // קוראים את הקובץ המוגמר פעם אחת, במקום לקרוא כל partial בכל ניסיון.
         final actual = streamDigest?.toString() ??
-            await _hashFileSha256(destPath, isCancelled);
+            await _hashFileSha256InIsolate(destPath, isCancelled);
         if (actual != expectedSha256.toLowerCase()) {
           _deleteQuietly(destPath);
           _deleteQuietly(sidecarPath);
@@ -397,7 +397,8 @@ class PatchDownloader {
         File(destPath).existsSync() &&
         File(destPath).lengthSync() == split.size) {
       onProgress?.call(split.size, split.size);
-      if (await _hashFileSha256(destPath, isCancelled) == split.sha256) {
+      if (await _hashFileSha256InIsolate(destPath, isCancelled) ==
+          split.sha256) {
         _deleteSplitParts(destPath, from: 0);
         return;
       }
@@ -433,43 +434,17 @@ class PatchDownloader {
     if (joinedToken != null) _writeSidecar(sidecarPath, joinedToken, null);
   }
 
-  /// מצרף את החלקים לפי הסדר ומוחק כל אחד אחרי צירופו. אינו נעצר בביטול:
-  /// חיבור שנקטע היה מאבד את החלקים שכבר צורפו.
-  Future<void> _joinSplitParts(SplitAsset split, String destPath) async {
-    final digestSink = _ChunkedDigestSink();
-    final hasher = sha256.startChunkedConversion(digestSink);
-    var written = 0;
-    try {
-      final output = File(destPath).openSync(mode: FileMode.writeOnly);
-      try {
-        for (var i = 0; i < split.parts.length; i++) {
-          final partPath = splitPartPath(destPath, i);
-          await for (final chunk in File(partPath).openRead()) {
-            hasher.add(chunk);
-            output.writeFromSync(chunk);
-            written += chunk.length;
-          }
-          _deleteQuietly(partPath);
-          _deleteQuietly(resumeSidecarPath(partPath));
-        }
-        output.flushSync();
-      } finally {
-        output.closeSync();
-      }
-      hasher.close();
-      if (written != split.size) {
-        throw PatchDownloadException(
-            'גודל הארכיון המחובר ($written) אינו תואם לצפוי (${split.size})');
-      }
-      if (digestSink.value.toString() != split.sha256) {
-        throw const PatchDownloadException(
-            'sha256 של הארכיון המחובר אינו תואם');
-      }
-    } catch (_) {
-      _deleteQuietly(destPath);
-      rethrow;
-    }
-  }
+  /// מצרף את החלקים ב-isolate נפרד (קריאה, sha256 וכתיבה של מאות MB).
+  Future<void> _joinSplitParts(SplitAsset split, String destPath) =>
+      _joinPartsInIsolate(
+        [
+          for (var i = 0; i < split.parts.length; i++)
+            splitPartPath(destPath, i)
+        ],
+        destPath,
+        split.size,
+        split.sha256,
+      );
 
   /// מוחק חלקים (ואת קבצי הצד שלהם) מהאינדקס [from] והלאה — שרידים של
   /// פיצול קודם שהיו בו יותר חלקים, או כל החלקים אחרי חיבור מוצלח.
@@ -1086,7 +1061,7 @@ class PatchDownloader {
     required String expected,
     required String label,
   }) async {
-    final actual = await Isolate.run(() => _hashFileSha256(path));
+    final actual = await _hashFileSha256InIsolate(path);
     if (actual != expected.toLowerCase()) {
       throw PatchDownloadException('$label אינו תואם');
     }
@@ -1138,12 +1113,7 @@ class PatchDownloader {
     _throwIfCancelled(isCancelled);
   }
 
-  void _deleteQuietly(String path) {
-    try {
-      final file = File(path);
-      if (file.existsSync()) file.deleteSync();
-    } catch (_) {}
-  }
+  void _deleteQuietly(String path) => _deleteFileQuietly(path);
 
   /// מוחק קובץ שחייב להיעלם לפני שאפשר להמשיך בבטחה.
   void _deleteRequired(String path, String failureMessage) {
@@ -1164,8 +1134,52 @@ class PatchDownloader {
   }
 }
 
-/// מחשב sha256 של קובץ בזרימה (עשוי לעבור 1GB — לא readAsBytes); top-level כדי
-/// שתרוץ ב-`Isolate.run`, ולכן [isCancelled] שמיש רק בקריאה מקומית.
+/// sha256 של קובץ ב-isolate נפרד. [isCancelled] אינו עובר בין isolates, ולכן
+/// נבדק כאן כל 100ms ומגיע ל-worker כהודעה; ביטול נזרק כ-[PatchDownloadCancelled].
+Future<String> _hashFileSha256InIsolate(String path,
+    [bool Function()? isCancelled]) async {
+  if (isCancelled == null) return _runHashWorker(path, null);
+  if (isCancelled()) throw const PatchDownloadCancelled();
+  final control = ReceivePort();
+  SendPort? workerCancel;
+  var cancelled = false;
+  control.listen((port) {
+    workerCancel = port as SendPort;
+    if (cancelled) workerCancel!.send(null);
+  });
+  final poll = Timer.periodic(const Duration(milliseconds: 100), (_) {
+    if (cancelled || !isCancelled()) return;
+    cancelled = true;
+    workerCancel?.send(null);
+  });
+  try {
+    final digest = await _runHashWorker(path, control.sendPort);
+    // hash קצר יכול להסתיים לפני הדגימה הבאה, או לפני שה-worker קיבל ביטול.
+    if (cancelled || isCancelled()) throw const PatchDownloadCancelled();
+    return digest;
+  } finally {
+    poll.cancel();
+    control.close();
+  }
+}
+
+/// נפרד מ-[_hashFileSha256InIsolate] כדי שה-closure לא ילכוד את ה-ReceivePort.
+Future<String> _runHashWorker(String path, SendPort? control) =>
+    Isolate.run(() async {
+      if (control == null) return _hashFileSha256(path);
+      final cancel = ReceivePort();
+      var cancelled = false;
+      cancel.listen((_) => cancelled = true);
+      control.send(cancel.sendPort);
+      try {
+        return await _hashFileSha256(path, () => cancelled);
+      } finally {
+        cancel.close();
+      }
+    });
+
+/// מחשב sha256 של קובץ בזרימה (עשוי לעבור 1GB — לא readAsBytes). רץ רק בתוך
+/// worker; מבחוץ קוראים ל-[_hashFileSha256InIsolate].
 Future<String> _hashFileSha256(String path,
     [bool Function()? isCancelled]) async {
   final digestSink = _ChunkedDigestSink();
@@ -1178,6 +1192,65 @@ Future<String> _hashFileSha256(String path,
   }
   input.close();
   return digestSink.value.toString();
+}
+
+/// top-level כדי שה-closure של `Isolate.run` לא ילכוד את ה-PatchDownloader.
+Future<void> _joinPartsInIsolate(List<String> partPaths, String destPath,
+        int expectedSize, String expectedSha256) =>
+    Isolate.run(
+        () => _joinParts(partPaths, destPath, expectedSize, expectedSha256));
+
+/// מצרף לקובץ זמני, מוחק כל חלק אחרי צירופו, ומעביר ל-[destPath] רק אחרי
+/// אימות. אינו נעצר בביטול: חיבור שנקטע היה מאבד את החלקים שכבר צורפו.
+void _joinParts(List<String> partPaths, String destPath, int expectedSize,
+    String expectedSha256) {
+  final tempPath = '$destPath.joining';
+  final digestSink = _ChunkedDigestSink();
+  final hasher = sha256.startChunkedConversion(digestSink);
+  var written = 0;
+  try {
+    final output = File(tempPath).openSync(mode: FileMode.writeOnly);
+    try {
+      for (final partPath in partPaths) {
+        final input = File(partPath).openSync();
+        try {
+          for (var chunk = input.readSync(1 << 20);
+              chunk.isNotEmpty;
+              chunk = input.readSync(1 << 20)) {
+            hasher.add(chunk);
+            output.writeFromSync(chunk);
+            written += chunk.length;
+          }
+        } finally {
+          input.closeSync();
+        }
+        _deleteFileQuietly(partPath);
+        _deleteFileQuietly(PatchDownloader.resumeSidecarPath(partPath));
+      }
+      output.flushSync();
+    } finally {
+      output.closeSync();
+    }
+    hasher.close();
+    if (written != expectedSize) {
+      throw PatchDownloadException(
+          'גודל הארכיון המחובר ($written) אינו תואם לצפוי ($expectedSize)');
+    }
+    if (digestSink.value.toString() != expectedSha256) {
+      throw const PatchDownloadException('sha256 של הארכיון המחובר אינו תואם');
+    }
+    File(tempPath).renameSync(destPath);
+  } catch (_) {
+    _deleteFileQuietly(tempPath);
+    rethrow;
+  }
+}
+
+void _deleteFileQuietly(String path) {
+  try {
+    final file = File(path);
+    if (file.existsSync()) file.deleteSync();
+  } catch (_) {}
 }
 
 /// אוסף את ה-Digest מ-`startChunkedConversion` של sha256 — בכל המסלולים

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- `downloadSplitToFile`: חיבור החלקים (קריאה, sha256 וכתיבה) רץ ב-isolate נפרד,
+  אל קובץ זמני שעובר ל-`destPath` רק אחרי האימות. ה-API לא השתנה.
+- אימות sha256 של קובץ שכבר שלם (`downloadToFile`) או ארכיון שכבר חובר
+  (`downloadSplitToFile`) רץ ב-isolate נפרד; ביטול עדיין נתפס באמצע החישוב.
+- ביטול נבדק גם עם חזרת ה-hash מה-isolate, כך שחישוב קצר שמסתיים בין
+  דגימות הביטול אינו מדווח הצלחה ואינו מוחק את שרידי החלקים לפני resume.
+
 ## 0.8.1
 
 DB מלא מפוצל: כשה-DB המלא גדול ממגבלת ה-2 GiB לנכס ב-GitHub, SeforimLibrary

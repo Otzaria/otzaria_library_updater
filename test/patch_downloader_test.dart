@@ -432,6 +432,47 @@ void main() {
       expect(progress.last, (full.length, full.length));
     });
 
+    group('ביטול באימות ה-hash של קובץ שלם', () {
+      final big = Uint8List(48 * 1024 * 1024);
+      for (var i = 0; i < big.length; i += 997) {
+        big[i] = i & 0xff;
+      }
+      final bigHash = sha256.convert(big).toString();
+
+      // השעון מתחיל ב-onProgress, שנקרא ממש לפני חישוב ה-hash.
+      Future<void> run(Duration delay, String dest) {
+        Stopwatch? watch;
+        return downloaderThatCaptures([], handler: (_) async {
+          throw StateError('קובץ שלם אינו אמור לשלוח בקשה');
+        }).downloadToFile(
+          url: 'https://x/seforim.db.zst',
+          destPath: dest,
+          expectedSize: big.length,
+          expectedSha256: bigHash,
+          resumeToken: 'v-1',
+          onProgress: (_, __) => watch ??= Stopwatch()..start(),
+          isCancelled: () => watch != null && watch!.elapsed >= delay,
+        );
+      }
+
+      for (final (label, delay) in [
+        ('לפני החישוב', Duration.zero),
+        ('באמצע החישוב', const Duration(milliseconds: 150)),
+      ]) {
+        test('$label → PatchDownloadCancelled, הקובץ השלם נשמר', () async {
+          final dest = '${tmp.path}/seforim.db.zst';
+          File(dest).writeAsBytesSync(big);
+          File('$dest.resume').writeAsStringSync('v-1\n"e1"');
+          await expectLater(
+            run(delay, dest),
+            throwsA(isA<PatchDownloadCancelled>()),
+          );
+          expect(File(dest).lengthSync(), big.length);
+          expect(File('$dest.resume').existsSync(), isTrue);
+        });
+      }
+    });
+
     // finding P1: 416 עם Content-Range תואם ל-offset (בלי expectedSize) — הקובץ
     // אכן שלם בצד השרת, נשמר לאימות.
     test('416 עם Content-Range תואם → נחשב שלם, הקובץ נשמר לאימות', () async {
