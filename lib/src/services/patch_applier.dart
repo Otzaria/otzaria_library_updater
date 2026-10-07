@@ -219,7 +219,8 @@ List<String> hashTableOrderForSchemaVersion(int schemaVersion) {
 ///
 /// הזרימה: preflight (גרסה/סכמה/hash) → ATTACH → migrations → upserts (סדר FK)
 /// → deletes (סדר FK הפוך) → החלפת טבלאות אופציונליות → foreign_key_check →
-/// אימות `toContentHash` ו-`optionalTableContentHashes` → COMMIT. כל כשל גורם ל-ROLLBACK וזריקה, וה-DB נשאר ללא שינוי.
+/// אימות `toContentHash` ו-`optionalTableContentHashes` → COMMIT. כל כשל
+/// גורם ל-ROLLBACK וזריקה, וה-DB נשאר ללא שינוי.
 ///
 /// המתודה סינכרונית וחוסמת — יש להריצה ב-Isolate או אחרי
 /// `closeForExternalWrite`.
@@ -815,19 +816,58 @@ class PatchApplier {
     for (final spec in kOptionalPatchTables) {
       final snapshot = '$kPatchOptionalTablePrefix${spec.name}';
       if (!_hasTable(db, 'patch', snapshot)) continue;
-      final ddl = _optionalTableDdl(db, spec.name);
-      if (ddl == null) {
-        throw PatchApplyException('ל-$snapshot חסר DDL ב-'
-            '$kPatchOptionalTableDdlTable — ה-patch אינו תקין');
-      }
-      db.execute(ddl);
+      _createOptionalTable(db, spec);
       final colsCsv = spec.columns.map((c) => '"$c"').join(',');
       db.execute('DELETE FROM main."${spec.name}"');
       db.execute('INSERT INTO main."${spec.name}" ($colsCsv) '
           'SELECT $colsCsv FROM patch."$snapshot"');
       counts[spec.name] = db.updatedRows;
+      // נבדק כאן ולא רק ב-checkForeignKeys: שורה יתומה היא snapshot שבור.
+      if (db
+          .select('PRAGMA main.foreign_key_check("${spec.name}")')
+          .isNotEmpty) {
+        throw PatchApplyException(
+            'ב-$snapshot שורות שמפנות לספר שאינו קיים — ה-patch אינו תקין');
+      }
     }
     return counts;
+  }
+
+  /// מריץ את ה-DDL של [spec] מה-patch: הצהרה אחת בלבד, `CREATE TABLE IF NOT
+  /// EXISTS` על שם הטבלה עצמה, ואחריה כל עמודות ה-spec חייבות להיות קיימות.
+  void _createOptionalTable(sqlite3.Database db, OptionalPatchTableSpec spec) {
+    Never invalid(String why) => throw PatchApplyException(
+        'DDL של ${spec.name} ב-$kPatchOptionalTableDdlTable $why — '
+        'ה-patch אינו תקין');
+
+    final ddl = _optionalTableDdl(db, spec.name);
+    if (ddl == null) invalid('חסר');
+    final name = RegExp.escape(spec.name);
+    final header = RegExp(
+      r'^\s*CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+'
+      '("$name"|$name)'
+      r'\s*\(',
+      caseSensitive: false,
+    );
+    if (!header.hasMatch(ddl)) invalid('אינו CREATE TABLE IF NOT EXISTS');
+    final sqlite3.PreparedStatement stmt;
+    try {
+      stmt = db.prepare(ddl, checkNoTail: true);
+    } catch (e) {
+      invalid('אינו הצהרה אחת תקינה ($e)');
+    }
+    try {
+      stmt.execute();
+    } finally {
+      stmt.close();
+    }
+    final existing = db
+        .select('PRAGMA main.table_info("${spec.name}")')
+        .map((r) => r['name'] as String)
+        .toSet();
+    if (!existing.containsAll(spec.columns)) {
+      invalid('יוצר טבלה בלי כל העמודות ${spec.columns}');
+    }
   }
 
   String? _optionalTableDdl(sqlite3.Database db, String name) {
