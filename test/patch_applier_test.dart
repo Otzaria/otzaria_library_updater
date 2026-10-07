@@ -2760,6 +2760,22 @@ void main() {
       });
     });
 
+    test('golden: hash של טבלאות אופציונליות ריקות', () {
+      final path = '${tmp.path}/opt_golden_empty.db';
+      final db = sqlite3.sqlite3.open(path);
+      db.execute('CREATE TABLE book (id INTEGER PRIMARY KEY)');
+      db.execute(bannerDdl);
+      db.execute(protectionDdl);
+      db.close();
+
+      expect(optionalHashesOf(path, bothTables), {
+        'book_banner':
+            '473b121ac837ac17a9627ed583981faec4074ec3217224c18bb0a6bb62752240',
+        'book_protection':
+            '260da62f074581043b5bf203c9790203a9ea052f9d1e14e27ecc780f66790a81',
+      });
+    });
+
     test('snapshot בלי DDL הוא patch לא תקין', () {
       final base = buildDb('opt_noddl_base');
       final before = _hashOf(base);
