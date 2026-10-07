@@ -41,6 +41,12 @@ const int kDefaultHashCacheSizeKib = 64 * 1024;
 /// שם הטבלה ב-patch שנושאת את `sqlite_stat1` של ה-DB היעד.
 const String kPatchStat1SnapshotTable = 'stat1_snapshot';
 
+/// טבלת ה-DDL של הטבלאות האופציונליות ב-patch (`name`, `sql`).
+const String kPatchOptionalTableDdlTable = 'optional_table_ddl';
+
+/// קידומת ה-snapshot המלא של טבלה אופציונלית ב-patch.
+const String kPatchOptionalTablePrefix = 'optional_';
+
 /// URI של SQLite לפתיחת [path] לקריאה בלבד. `file:////host/share` שומר על
 /// נתיב UNC; רק `%`, `?` ו-`#` מקודדים, והיתר עובר כ-UTF-8 כפי שהוא.
 String readOnlyFileUri(String path) {
@@ -111,6 +117,10 @@ class PatchApplyResult {
   /// מספר הבתים שהוזרמו ל-SHA לכל טבלה שאומתה — רמז התקדמות לריצה הבאה.
   final Map<String, int> verifyTableBytes;
 
+  /// שורות שנכתבו לכל טבלה אופציונלית שהוחלפה (ראו [kOptionalPatchTables]).
+  /// נפרד מ-[upserts] בכוונה: אינו תוכן חיפוש ואינו מחייב רענון אינדקס.
+  final Map<String, int> optionalTablesReplaced;
+
   /// האם ה-patch שינה טבלאות שאינן מכוסות ב-[booksTouched] (מלבד schema_meta,
   /// שמתעדכן בכל patch, ו-line_ref/line_dh, שאינן תוכן חיפוש — ראו
   /// [kBooksTouchedTables]). כש-true, צרכן שהאינדקס שלו תלוי בטבלאות האלה
@@ -133,6 +143,7 @@ class PatchApplyResult {
     this.verifiedTables = const [],
     this.deferredTables = const [],
     this.verifyTableBytes = const {},
+    this.optionalTablesReplaced = const {},
   });
 }
 
@@ -207,8 +218,8 @@ List<String> hashTableOrderForSchemaVersion(int schemaVersion) {
 /// `PatchApplier.kt` בצד הייצור.
 ///
 /// הזרימה: preflight (גרסה/סכמה/hash) → ATTACH → migrations → upserts (סדר FK)
-/// → deletes (סדר FK הפוך) → foreign_key_check → אימות `toContentHash` →
-/// COMMIT. כל כשל גורם ל-ROLLBACK וזריקה, וה-DB נשאר ללא שינוי.
+/// → deletes (סדר FK הפוך) → החלפת טבלאות אופציונליות → foreign_key_check →
+/// אימות `toContentHash` ו-`optionalTableContentHashes` → COMMIT. כל כשל גורם ל-ROLLBACK וזריקה, וה-DB נשאר ללא שינוי.
 ///
 /// המתודה סינכרונית וחוסמת — יש להריצה ב-Isolate או אחרי
 /// `closeForExternalWrite`.
@@ -365,6 +376,8 @@ class PatchApplier {
       onStage?.call('deletes');
       final deletes = _runDeletes(db, progress);
 
+      final optionalTablesReplaced = _replaceOptionalTables(db);
+
       _applyStat1Snapshot(db);
 
       if (checkForeignKeys) {
@@ -435,6 +448,7 @@ class PatchApplier {
         // אומת לפי טבלאות; ה-hash הכולל הצפוי הוא זה שבמניפסט.
         resultHash = manifest.toContentHash;
       }
+      _verifyOptionalTables(db, manifest);
 
       onStage?.call('commit');
       db.execute('COMMIT');
@@ -452,6 +466,7 @@ class PatchApplier {
         verifiedTables: verifiedTables,
         deferredTables: deferredTables,
         verifyTableBytes: verifyTableBytes,
+        optionalTablesReplaced: optionalTablesReplaced,
       );
     } catch (_) {
       if (inTransaction) {
@@ -792,6 +807,62 @@ class PatchApplier {
 
   void _setCacheSize(sqlite3.Database db, int kib) =>
       db.execute('PRAGMA cache_size = -$kib');
+
+  /// מחליף כל טבלה אופציונלית שה-patch נושא עבורה snapshot. טבלה שאין לה
+  /// snapshot נשארת כפי שהיא; snapshot של טבלה לא מוכרת מתעלמים ממנו.
+  Map<String, int> _replaceOptionalTables(sqlite3.Database db) {
+    final counts = <String, int>{};
+    for (final spec in kOptionalPatchTables) {
+      final snapshot = '$kPatchOptionalTablePrefix${spec.name}';
+      if (!_hasTable(db, 'patch', snapshot)) continue;
+      final ddl = _optionalTableDdl(db, spec.name);
+      if (ddl == null) {
+        throw PatchApplyException('ל-$snapshot חסר DDL ב-'
+            '$kPatchOptionalTableDdlTable — ה-patch אינו תקין');
+      }
+      db.execute(ddl);
+      final colsCsv = spec.columns.map((c) => '"$c"').join(',');
+      db.execute('DELETE FROM main."${spec.name}"');
+      db.execute('INSERT INTO main."${spec.name}" ($colsCsv) '
+          'SELECT $colsCsv FROM patch."$snapshot"');
+      counts[spec.name] = db.updatedRows;
+    }
+    return counts;
+  }
+
+  String? _optionalTableDdl(sqlite3.Database db, String name) {
+    if (!_hasTable(db, 'patch', kPatchOptionalTableDdlTable)) return null;
+    final rows = db.select(
+        'SELECT sql FROM patch."$kPatchOptionalTableDdlTable" WHERE name = ?',
+        [name]);
+    final sql = rows.isEmpty ? null : rows.first['sql'];
+    return sql is String ? sql : null;
+  }
+
+  /// מאמת כל טבלה אופציונלית מוכרת שהמניפסט נושא לה hash. טבלה שה-applier
+  /// אינו מכיר אינה מאומתת — הוא גם לא החליף אותה.
+  void _verifyOptionalTables(sqlite3.Database db, DeltaManifest manifest) {
+    final expected = manifest.optionalTableContentHashes;
+    if (expected == null) return;
+    final tables = [
+      for (final spec in kOptionalPatchTables)
+        if (expected.containsKey(spec.name)) spec.name,
+    ];
+    if (tables.isEmpty) return;
+    final report = hasher.computeReport(db, tableOrder: tables);
+    final mismatched = [
+      for (final t in tables)
+        if (report.tableHashes[t] != expected[t]) t,
+    ];
+    if (mismatched.isNotEmpty) {
+      throw PatchApplyException(
+        'ה-hash אחרי apply אינו תואם ל-optionalTableContentHashes בטבלאות: '
+        '${mismatched.join(', ')}',
+        hashMismatchStage: PatchHashMismatchStage.toContentHash,
+        mismatchedTables: mismatched,
+      );
+    }
+  }
 
   /// מעתיק את `stat1_snapshot` של ה-patch ל-`sqlite_stat1`, כדי שלקוח דלתא
   /// יקבל את סטטיסטיקות המתכנן של ה-DB המלא. patch בלעדיה משאיר את הקיימות.
