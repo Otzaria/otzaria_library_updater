@@ -2359,9 +2359,15 @@ void main() {
         ')';
     const ddls = {'book_banner': bannerDdl, 'book_protection': protectionDdl};
     const bothTables = ['book_banner', 'book_protection'];
+    const goldenBannerHex =
+        '87026c32c4996eee6e5c75b65ce5e08be1a1a28e52864a57a696cbb6555a0c59';
+    const goldenProtectionHex =
+        '015c3c2291e1ebac6c68a6f33c8c01b42af0ce46dc3840d7e0a12ae370ae1319';
 
     String buildDb(String name,
-        {int version = 1, Map<String, List<List>> optional = const {}}) {
+        {int version = 1,
+        int books = 2,
+        Map<String, List<List>> optional = const {}}) {
       final path = buildBaseDb(version: version, sourceRows: [
         [1, 'aleph'],
       ]);
@@ -2369,7 +2375,8 @@ void main() {
       File(path).renameSync(target);
       final db = sqlite3.sqlite3.open(target);
       db.execute('CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT)');
-      db.execute("INSERT INTO book VALUES (1,'בראשית'),(2,'שמות')");
+      db.execute("INSERT INTO book VALUES (1,'בראשית')");
+      if (books > 1) db.execute("INSERT INTO book VALUES (2,'שמות')");
       optional.forEach((table, rows) {
         db.execute(ddls[table]!);
         for (final r in rows) {
@@ -2631,6 +2638,126 @@ void main() {
 
       expect(r.optionalTablesReplaced, isEmpty);
       expect(rowsOf(base, 'book_future'), isNull);
+    });
+
+    test('patch שמוחק ספר עם באנר ונושא snapshot מעודכן', () {
+      final base = buildDb('opt_delbook_base', optional: {
+        'book_banner': [
+          [1, 'נשאר'],
+          [2, 'של ספר שנמחק'],
+        ],
+      });
+      final expected =
+          buildDb('opt_delbook_expected', version: 2, books: 1, optional: {
+        'book_banner': [
+          [1, 'נשאר'],
+        ],
+      });
+      final patch = buildPatch('opt_delbook_patch', snapshots: {
+        'book_banner': [
+          [1, 'נשאר'],
+        ],
+      });
+      final db = sqlite3.sqlite3.open(patch);
+      db.execute('CREATE TABLE delete_book (id INTEGER PRIMARY KEY)');
+      db.execute('INSERT INTO delete_book VALUES (2)');
+      db.close();
+
+      final r = _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifestFor(base, expected,
+              optionalTables: optionalHashesOf(expected, ['book_banner'])));
+
+      expect(r.deletes['book'], 1);
+      expect(r.optionalTablesReplaced, {'book_banner': 1});
+      expect(rowsOf(base, 'book_banner'), [
+        [1, 'נשאר'],
+      ]);
+    });
+
+    test('שורה יתומה ב-snapshot נדחית גם בלי checkForeignKeys', () {
+      final base = buildDb('opt_orphan_base');
+      final before = _hashOf(base);
+      final patch = buildPatch('opt_orphan_patch', snapshots: {
+        'book_banner': [
+          [1, 'א'],
+          [3, 'לספר שאינו קיים'],
+        ],
+      });
+
+      expect(
+        () => _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          checkForeignKeys: false,
+          manifest: _manifest(from: 1, to: 2, fromHash: before, toHash: 'x'),
+        ),
+        throwsA(isA<PatchApplyException>()
+            .having((e) => e.hashMismatchStage, 'stage', isNull)),
+      );
+      expect(_hashOf(base), before);
+      expect(rowsOf(base, 'book_banner'), isNull);
+    });
+
+    final badDdls = {
+      'כמה הצהרות': '$bannerDdl; DROP TABLE source',
+      'שם טבלה אחר':
+          'CREATE TABLE IF NOT EXISTS source_x (bookId INTEGER, text TEXT)',
+      'בלי IF NOT EXISTS':
+          'CREATE TABLE book_banner (bookId INTEGER PRIMARY KEY, text TEXT)',
+      'עמודה חסרה': 'CREATE TABLE IF NOT EXISTS book_banner (bookId INTEGER)',
+      'הצהרה לפני': 'DROP TABLE source; $bannerDdl',
+    };
+    badDdls.forEach((label, ddl) {
+      test('DDL לא תקין נדחה: $label', () {
+        final base = buildDb('opt_badddl_base_${label.hashCode}');
+        final before = _hashOf(base);
+        final patch =
+            buildPatch('opt_badddl_patch_${label.hashCode}', ddlRows: {
+          'book_banner': ddl
+        }, snapshots: {
+          'book_banner': [
+            [1, 'א'],
+          ],
+        });
+
+        expect(
+          () => _applier.apply(
+            dbPath: base,
+            patchPath: patch,
+            manifest: _manifest(from: 1, to: 2, fromHash: before, toHash: 'x'),
+          ),
+          throwsA(isA<PatchApplyException>()
+              .having((e) => e.hashMismatchStage, 'stage', isNull)),
+        );
+        expect(_hashOf(base), before);
+        expect(rowsOf(base, 'book_banner'), isNull);
+        expect(rowsOf(base, 'source_x'), isNull);
+      });
+    });
+
+    // golden משותף עם SeforimLibrary: אותן שורות חייבות לתת אותו hex בשני הצדדים.
+    test('golden: hash לכל טבלה אופציונלית', () {
+      final path = '${tmp.path}/opt_golden.db';
+      final db = sqlite3.sqlite3.open(path);
+      db.execute('CREATE TABLE book (id INTEGER PRIMARY KEY)');
+      db.execute('INSERT INTO book VALUES (1),(2)');
+      db.execute(bannerDdl);
+      db.execute(protectionDdl);
+      db.execute('INSERT INTO book_banner VALUES (?,?),(?,?)', [
+        1,
+        'ספר זה באדיבות המו"ל\n[לאתר המו"ל](https://example.com/books?id=1)',
+        2,
+        'שורה ראשונה\nשורה שנייה',
+      ]);
+      db.execute('INSERT INTO book_protection VALUES (1,1),(2,2)');
+      db.close();
+
+      expect(optionalHashesOf(path, bothTables), {
+        'book_banner': goldenBannerHex,
+        'book_protection': goldenProtectionHex,
+      });
     });
 
     test('snapshot בלי DDL הוא patch לא תקין', () {
