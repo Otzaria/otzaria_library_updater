@@ -10,15 +10,16 @@ String canonicalContract(
   List<PatchTableSpec> fkOrder,
   List<String> hashOrder,
   int schemaVersion,
+  List<OptionalPatchTableSpec> optionalTables,
 ) {
+  String strings(List<String> xs) => xs.map((c) => '"$c"').join(', ');
   final b = StringBuffer();
   b.write('{\n');
   b.write('  "schemaVersion": $schemaVersion,\n');
   b.write('  "fkOrder": [\n');
   for (var i = 0; i < fkOrder.length; i++) {
     final t = fkOrder[i];
-    final pk = t.primaryKey.map((c) => '"$c"').join(', ');
-    b.write('    { "table": "${t.name}", "pk": [$pk], '
+    b.write('    { "table": "${t.name}", "pk": [${strings(t.primaryKey)}], '
         '"updatable": ${t.updatable} }');
     if (i != fkOrder.length - 1) b.write(',');
     b.write('\n');
@@ -28,6 +29,15 @@ String canonicalContract(
   for (var i = 0; i < hashOrder.length; i++) {
     b.write('    "${hashOrder[i]}"');
     if (i != hashOrder.length - 1) b.write(',');
+    b.write('\n');
+  }
+  b.write('  ],\n');
+  b.write('  "optionalTables": [\n');
+  for (var i = 0; i < optionalTables.length; i++) {
+    final t = optionalTables[i];
+    b.write('    { "table": "${t.name}", "pk": [${strings(t.primaryKey)}], '
+        '"columns": [${strings(t.columns)}] }');
+    if (i != optionalTables.length - 1) b.write(',');
     b.write('\n');
   }
   b.write('  ]\n');
@@ -41,6 +51,7 @@ void main() {
 
     // ה-fixture מתאר את החוזה הנוכחי (סכמה 6): hashOrder = 39 הטבלאות.
     // הסדרים הקפואים של סכמות 1–5 הם היסטוריה — לא נכנסים ל-fixture.
+    // optionalTables מחוץ לחוזה ה-hash; הסדר הוא סדר הרשימה, בלי מיון.
     test('הסריאליזציה הקנונית תואמת ל-fixture המקומי', () {
       final expected =
           File(fixturePath).readAsStringSync().replaceAll('\r\n', '\n');
@@ -48,9 +59,22 @@ void main() {
         kPatchTablesInFkOrder,
         kHashTableOrder,
         kSupportedDbSchemaVersion,
+        kOptionalPatchTables,
       );
       expect(actual, expected,
           reason: 'הרשימות סטו מה-fixture — הרץ מחדש את מחולל החוזה');
+    });
+
+    test('הטבלאות האופציונליות מחוץ לסדר ה-FK ולכל סדר hash', () {
+      final names = kOptionalPatchTables.map((t) => t.name).toSet();
+      expect(names, hasLength(kOptionalPatchTables.length));
+      expect(
+          kPatchTablesInFkOrder.map((t) => t.name).toSet().intersection(names),
+          isEmpty);
+      for (final v in [1, 2, 3, 4, 5, 6]) {
+        expect(hashTableOrderForSchemaVersion(v).toSet().intersection(names),
+            isEmpty);
+      }
     });
 
     test('יכולות DB ופורמט artifact מפורשות ונפרדות', () {

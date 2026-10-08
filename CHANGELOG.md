@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- טבלאות אופציונליות `book_banner` ו-`book_protection` (`kOptionalPatchTables`)
+  בערוץ צד של ה-patch, מחוץ לחוזה ה-hash של סכמה 6: ה-patch נושא את ה-DDL
+  ב-`optional_table_ddl` ו-snapshot מלא ב-`optional_<name>`, וה-applier יוצר
+  את הטבלה בעת הצורך ומחליף את כל תוכנה (אחרי ה-deletes, לפני ה-stat1).
+  patch בלי snapshot משאיר את הטבלה כפי שהיא. סכמה 6 ופורמט 4 לא השתנו.
+- `DeltaManifest.optionalTableContentHashes`: hash לכל טבלה אופציונלית, נבדק
+  לפני ה-COMMIT בשני מסלולי האימות; אי-התאמה זורקת `PatchApplyException`
+  (`toContentHash`, `mismatchedTables`) ומגלגלת לאחור.
+- `PatchApplyResult.optionalTablesReplaced`: ספירת השורות לכל טבלה שהוחלפה.
+  אינה נכנסת ל-`upserts`, ולכן אינה מפעילה את `hasChangesOutsideBooksTouched`.
+- `patch_tables_contract.json` מקבל את הסעיף `optionalTables`.
 - `downloadSplitToFile`: חיבור החלקים (קריאה, sha256 וכתיבה) רץ ב-isolate נפרד,
   אל קובץ זמני שעובר ל-`destPath` רק אחרי האימות. ה-API לא השתנה.
 - אימות sha256 של קובץ שכבר שלם (`downloadToFile`) או ארכיון שכבר חובר

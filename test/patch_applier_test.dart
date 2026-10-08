@@ -57,6 +57,7 @@ DeltaManifest _manifest({
   bool omitPatchFormat = false,
   Map<String, String>? fromTables,
   Map<String, String>? toTables,
+  Map<String, String>? optionalTables,
 }) =>
     DeltaManifest(
       fromVersion: from,
@@ -69,6 +70,7 @@ DeltaManifest _manifest({
       toContentHash: toHash,
       fromTableContentHashes: fromTables,
       toTableContentHashes: toTables,
+      optionalTableContentHashes: optionalTables,
       patchFiles: const [
         PatchFileEntry(
           file: 'p.db.zst',
@@ -2341,6 +2343,460 @@ void main() {
         throwsA(isA<PatchApplyException>()),
       );
       expect(statsOf(base), before);
+    });
+  });
+
+  group('טבלאות אופציונליות (book_banner / book_protection)', () {
+    const bannerDdl = 'CREATE TABLE IF NOT EXISTS book_banner (\n'
+        '    bookId INTEGER PRIMARY KEY NOT NULL REFERENCES book(id) '
+        'ON DELETE CASCADE,\n'
+        '    text TEXT NOT NULL\n'
+        ')';
+    const protectionDdl = 'CREATE TABLE IF NOT EXISTS book_protection (\n'
+        '    bookId INTEGER PRIMARY KEY NOT NULL REFERENCES book(id) '
+        'ON DELETE CASCADE,\n'
+        '    level INTEGER NOT NULL CHECK (level >= 1)\n'
+        ')';
+    const ddls = {'book_banner': bannerDdl, 'book_protection': protectionDdl};
+    const bothTables = ['book_banner', 'book_protection'];
+    const goldenBannerHex =
+        '87026c32c4996eee6e5c75b65ce5e08be1a1a28e52864a57a696cbb6555a0c59';
+    const goldenProtectionHex =
+        '015c3c2291e1ebac6c68a6f33c8c01b42af0ce46dc3840d7e0a12ae370ae1319';
+
+    String buildDb(String name,
+        {int version = 1,
+        int books = 2,
+        Map<String, List<List>> optional = const {}}) {
+      final path = buildBaseDb(version: version, sourceRows: [
+        [1, 'aleph'],
+      ]);
+      final target = '${tmp.path}/$name.db';
+      File(path).renameSync(target);
+      final db = sqlite3.sqlite3.open(target);
+      db.execute('CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT)');
+      db.execute("INSERT INTO book VALUES (1,'בראשית')");
+      if (books > 1) db.execute("INSERT INTO book VALUES (2,'שמות')");
+      optional.forEach((table, rows) {
+        db.execute(ddls[table]!);
+        for (final r in rows) {
+          db.execute('INSERT INTO $table VALUES (?,?)', r);
+        }
+      });
+      db.close();
+      return target;
+    }
+
+    String buildPatch(String name,
+        {Map<String, List<List>> snapshots = const {},
+        Map<String, String>? ddlRows,
+        List<List>? upsertBanner}) {
+      final path = buildPatchDb(from: 1, to: 2);
+      final target = '${tmp.path}/$name.db';
+      File(path).renameSync(target);
+      final db = sqlite3.sqlite3.open(target);
+      final ddlTable = ddlRows ?? {for (final t in snapshots.keys) t: ddls[t]!};
+      if (ddlTable.isNotEmpty) {
+        db.execute('CREATE TABLE $kPatchOptionalTableDdlTable '
+            '(name TEXT PRIMARY KEY NOT NULL, sql TEXT NOT NULL)');
+        ddlTable.forEach((t, sql) => db.execute(
+            'INSERT INTO $kPatchOptionalTableDdlTable VALUES (?,?)', [t, sql]));
+      }
+      snapshots.forEach((table, rows) {
+        final snapshot = '$kPatchOptionalTablePrefix$table';
+        final valueCol = table == 'book_banner' ? 'text TEXT' : 'level INTEGER';
+        db.execute('CREATE TABLE $snapshot (bookId INTEGER, $valueCol)');
+        for (final r in rows) {
+          db.execute('INSERT INTO $snapshot VALUES (?,?)', r);
+        }
+      });
+      if (upsertBanner != null) {
+        db.execute(
+            'CREATE TABLE upsert_book_banner (bookId INTEGER, text TEXT)');
+        for (final r in upsertBanner) {
+          db.execute('INSERT INTO upsert_book_banner VALUES (?,?)', r);
+        }
+      }
+      db.close();
+      return target;
+    }
+
+    /// ה-hash של כל טבלה אופציונלית ב-[dbPath], כפי שהמניפסט נושא אותו.
+    Map<String, String> optionalHashesOf(String dbPath, List<String> tables) {
+      final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
+      try {
+        return _hasher.computeReport(db, tableOrder: tables).tableHashes;
+      } finally {
+        db.close();
+      }
+    }
+
+    List<List<Object?>>? rowsOf(String dbPath, String table) {
+      final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
+      try {
+        final exists = db.select(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            [table]);
+        if (exists.isEmpty) return null;
+        return db
+            .select('SELECT * FROM "$table" ORDER BY bookId')
+            .map((r) => r.values)
+            .toList();
+      } finally {
+        db.close();
+      }
+    }
+
+    DeltaManifest manifestFor(String base, String expected,
+            {Map<String, String>? optionalTables}) =>
+        _manifest(
+          from: 1,
+          to: 2,
+          fromHash: _hashOf(base),
+          toHash: _hashOf(expected),
+          optionalTables: optionalTables,
+        );
+
+    test('DB בלי הטבלאות: נוצרות ומתמלאות, וה-hash של הסכמה לא משתנה', () {
+      final base = buildDb('opt_base');
+      final banner = [
+        [1, 'שורה\n[קישור](https://example.com/a b)'],
+      ];
+      final expected = buildDb('opt_expected', version: 2, optional: {
+        'book_banner': banner,
+        'book_protection': [
+          [1, 2],
+          [2, 1],
+        ],
+      });
+      final patch = buildPatch('opt_patch', snapshots: {
+        'book_banner': banner,
+        'book_protection': [
+          [2, 1],
+          [1, 2],
+        ],
+      });
+      // הטבלאות אינן בסדר ה-hash, ולכן ה-hash הכולל זהה ל-DB בלעדיהן.
+      final plain = buildDb('opt_plain', version: 2);
+      expect(_hashOf(expected), _hashOf(plain));
+
+      final r = _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: manifestFor(base, plain,
+            optionalTables: optionalHashesOf(expected, bothTables)),
+      );
+
+      expect(r.resultHash, _hashOf(plain));
+      expect(
+          r.optionalTablesReplaced, {'book_banner': 1, 'book_protection': 2});
+      expect(r.upserts.keys, isNot(contains('book_banner')));
+      expect(r.upserts.keys, isNot(contains('book_protection')));
+      expect(r.hasChangesOutsideBooksTouched, isFalse);
+      expect(rowsOf(base, 'book_banner'), banner);
+      expect(rowsOf(base, 'book_protection'), [
+        [1, 2],
+        [2, 1],
+      ]);
+      expect(optionalHashesOf(base, bothTables),
+          optionalHashesOf(expected, bothTables));
+    });
+
+    test('טבלה קיימת מוחלפת כולה, ו-snapshot ריק מרוקן אותה', () {
+      final base = buildDb('opt_replace_base', optional: {
+        'book_banner': [
+          [1, 'ישן'],
+          [2, 'יימחק'],
+        ],
+        'book_protection': [
+          [1, 1],
+        ],
+      });
+      final expected = buildDb('opt_replace_expected', version: 2);
+      final patch = buildPatch('opt_replace_patch', snapshots: {
+        'book_banner': [
+          [1, 'חדש'],
+        ],
+        'book_protection': const [],
+      });
+
+      final r = _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifestFor(base, expected));
+
+      expect(
+          r.optionalTablesReplaced, {'book_banner': 1, 'book_protection': 0});
+      expect(rowsOf(base, 'book_banner'), [
+        [1, 'חדש'],
+      ]);
+      expect(rowsOf(base, 'book_protection'), isEmpty);
+    });
+
+    test('patch בלי ערוץ הצד משאיר את הטבלאות כפי שהן', () {
+      final base = buildDb('opt_keep_base', optional: {
+        'book_banner': [
+          [2, 'נשאר'],
+        ],
+      });
+      final expected = buildDb('opt_keep_expected', version: 2);
+      final patch = buildPatch('opt_keep_patch');
+
+      final r = _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifestFor(base, expected));
+
+      expect(r.optionalTablesReplaced, isEmpty);
+      expect(rowsOf(base, 'book_banner'), [
+        [2, 'נשאר'],
+      ]);
+      expect(rowsOf(base, 'book_protection'), isNull);
+    });
+
+    for (final partial in [false, true]) {
+      test('hash אופציונלי שגוי זורק ומגלגל לאחור (partial=$partial)', () {
+        final base = buildDb('opt_bad_base_$partial');
+        final expected = buildDb('opt_bad_expected_$partial', version: 2);
+        final patch = buildPatch('opt_bad_patch_$partial', snapshots: {
+          'book_banner': [
+            [1, 'א'],
+          ],
+          'book_protection': [
+            [1, 1],
+          ],
+        });
+        final good = buildDb('opt_bad_good_$partial', version: 2, optional: {
+          'book_protection': [
+            [1, 1],
+          ],
+        });
+        final before = _hashOf(base);
+
+        expect(
+          () => _applier.apply(
+            dbPath: base,
+            patchPath: patch,
+            enablePartialTableVerification: partial,
+            manifest: _manifest(
+              from: 1,
+              to: 2,
+              fromHash: before,
+              toHash: _hashOf(expected),
+              fromTables: partial ? _tableHashesOf(base) : null,
+              toTables: partial ? _tableHashesOf(expected) : null,
+              optionalTables: {
+                'book_banner': 'wrong',
+                ...optionalHashesOf(good, const ['book_protection']),
+              },
+            ),
+          ),
+          throwsA(isA<PatchApplyException>()
+              .having((e) => e.hashMismatchStage, 'stage',
+                  PatchHashMismatchStage.toContentHash)
+              .having((e) => e.mismatchedTables, 'mismatchedTables',
+                  ['book_banner'])),
+        );
+        expect(_hashOf(base), before);
+        expect(rowsOf(base, 'book_banner'), isNull);
+        expect(rowsOf(base, 'book_protection'), isNull);
+      });
+    }
+
+    test('upsert_book_banner אינו מוחל ואינו נכנס ל-upserts', () {
+      final base = buildDb('opt_upsert_base');
+      final expected = buildDb('opt_upsert_expected', version: 2);
+      final patch = buildPatch('opt_upsert_patch', upsertBanner: [
+        [1, 'לא'],
+      ]);
+
+      final r = _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifestFor(base, expected));
+
+      expect(r.upserts.keys, isNot(contains('book_banner')));
+      expect(r.optionalTablesReplaced, isEmpty);
+      expect(rowsOf(base, 'book_banner'), isNull);
+    });
+
+    test('טבלה אופציונלית לא מוכרת: ה-snapshot וה-hash שלה נזנחים', () {
+      final base = buildDb('opt_unknown_base');
+      final expected = buildDb('opt_unknown_expected', version: 2);
+      final patch = buildPatch('opt_unknown_patch', ddlRows: {
+        'book_future': 'CREATE TABLE book_future (bookId INTEGER)'
+      });
+      final db = sqlite3.sqlite3.open(patch);
+      db.execute('CREATE TABLE optional_book_future (bookId INTEGER)');
+      db.close();
+
+      final r = _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifestFor(base, expected,
+              optionalTables: const {'book_future': 'whatever'}));
+
+      expect(r.optionalTablesReplaced, isEmpty);
+      expect(rowsOf(base, 'book_future'), isNull);
+    });
+
+    test('patch שמוחק ספר עם באנר ונושא snapshot מעודכן', () {
+      final base = buildDb('opt_delbook_base', optional: {
+        'book_banner': [
+          [1, 'נשאר'],
+          [2, 'של ספר שנמחק'],
+        ],
+      });
+      final expected =
+          buildDb('opt_delbook_expected', version: 2, books: 1, optional: {
+        'book_banner': [
+          [1, 'נשאר'],
+        ],
+      });
+      final patch = buildPatch('opt_delbook_patch', snapshots: {
+        'book_banner': [
+          [1, 'נשאר'],
+        ],
+      });
+      final db = sqlite3.sqlite3.open(patch);
+      db.execute('CREATE TABLE delete_book (id INTEGER PRIMARY KEY)');
+      db.execute('INSERT INTO delete_book VALUES (2)');
+      db.close();
+
+      final r = _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifestFor(base, expected,
+              optionalTables: optionalHashesOf(expected, ['book_banner'])));
+
+      expect(r.deletes['book'], 1);
+      expect(r.optionalTablesReplaced, {'book_banner': 1});
+      expect(rowsOf(base, 'book_banner'), [
+        [1, 'נשאר'],
+      ]);
+    });
+
+    test('שורה יתומה ב-snapshot נדחית גם בלי checkForeignKeys', () {
+      final base = buildDb('opt_orphan_base');
+      final before = _hashOf(base);
+      final patch = buildPatch('opt_orphan_patch', snapshots: {
+        'book_banner': [
+          [1, 'א'],
+          [3, 'לספר שאינו קיים'],
+        ],
+      });
+
+      expect(
+        () => _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          checkForeignKeys: false,
+          manifest: _manifest(from: 1, to: 2, fromHash: before, toHash: 'x'),
+        ),
+        throwsA(isA<PatchApplyException>()
+            .having((e) => e.hashMismatchStage, 'stage', isNull)),
+      );
+      expect(_hashOf(base), before);
+      expect(rowsOf(base, 'book_banner'), isNull);
+    });
+
+    final badDdls = {
+      'כמה הצהרות': '$bannerDdl; DROP TABLE source',
+      'שם טבלה אחר':
+          'CREATE TABLE IF NOT EXISTS source_x (bookId INTEGER, text TEXT)',
+      'בלי IF NOT EXISTS':
+          'CREATE TABLE book_banner (bookId INTEGER PRIMARY KEY, text TEXT)',
+      'עמודה חסרה': 'CREATE TABLE IF NOT EXISTS book_banner (bookId INTEGER)',
+      'הצהרה לפני': 'DROP TABLE source; $bannerDdl',
+    };
+    badDdls.forEach((label, ddl) {
+      test('DDL לא תקין נדחה: $label', () {
+        final base = buildDb('opt_badddl_base_${label.hashCode}');
+        final before = _hashOf(base);
+        final patch =
+            buildPatch('opt_badddl_patch_${label.hashCode}', ddlRows: {
+          'book_banner': ddl
+        }, snapshots: {
+          'book_banner': [
+            [1, 'א'],
+          ],
+        });
+
+        expect(
+          () => _applier.apply(
+            dbPath: base,
+            patchPath: patch,
+            manifest: _manifest(from: 1, to: 2, fromHash: before, toHash: 'x'),
+          ),
+          throwsA(isA<PatchApplyException>()
+              .having((e) => e.hashMismatchStage, 'stage', isNull)),
+        );
+        expect(_hashOf(base), before);
+        expect(rowsOf(base, 'book_banner'), isNull);
+        expect(rowsOf(base, 'source_x'), isNull);
+      });
+    });
+
+    // golden משותף עם SeforimLibrary: אותן שורות חייבות לתת אותו hex בשני הצדדים.
+    test('golden: hash לכל טבלה אופציונלית', () {
+      final path = '${tmp.path}/opt_golden.db';
+      final db = sqlite3.sqlite3.open(path);
+      db.execute('CREATE TABLE book (id INTEGER PRIMARY KEY)');
+      db.execute('INSERT INTO book VALUES (1),(2)');
+      db.execute(bannerDdl);
+      db.execute(protectionDdl);
+      db.execute('INSERT INTO book_banner VALUES (?,?),(?,?)', [
+        1,
+        'ספר זה באדיבות המו"ל\n[לאתר המו"ל](https://example.com/books?id=1)',
+        2,
+        'שורה ראשונה\nשורה שנייה',
+      ]);
+      db.execute('INSERT INTO book_protection VALUES (1,1),(2,2)');
+      db.close();
+
+      expect(optionalHashesOf(path, bothTables), {
+        'book_banner': goldenBannerHex,
+        'book_protection': goldenProtectionHex,
+      });
+    });
+
+    test('golden: hash של טבלאות אופציונליות ריקות', () {
+      final path = '${tmp.path}/opt_golden_empty.db';
+      final db = sqlite3.sqlite3.open(path);
+      db.execute('CREATE TABLE book (id INTEGER PRIMARY KEY)');
+      db.execute(bannerDdl);
+      db.execute(protectionDdl);
+      db.close();
+
+      expect(optionalHashesOf(path, bothTables), {
+        'book_banner':
+            '473b121ac837ac17a9627ed583981faec4074ec3217224c18bb0a6bb62752240',
+        'book_protection':
+            '260da62f074581043b5bf203c9790203a9ea052f9d1e14e27ecc780f66790a81',
+      });
+    });
+
+    test('snapshot בלי DDL הוא patch לא תקין', () {
+      final base = buildDb('opt_noddl_base');
+      final before = _hashOf(base);
+      final patch =
+          buildPatch('opt_noddl_patch', ddlRows: const {}, snapshots: {
+        'book_banner': [
+          [1, 'א'],
+        ],
+      });
+
+      expect(
+        () => _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: _manifest(from: 1, to: 2, fromHash: before, toHash: 'x'),
+        ),
+        throwsA(isA<PatchApplyException>()
+            .having((e) => e.hashMismatchStage, 'stage', isNull)),
+      );
+      expect(_hashOf(base), before);
+      expect(rowsOf(base, 'book_banner'), isNull);
     });
   });
 }
