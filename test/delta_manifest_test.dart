@@ -97,6 +97,27 @@ void main() {
       expect(() => DeltaManifest.fromJson(json), throwsFormatException);
     });
 
+    test('optionalTableContentHashes: קיים, חסר ולא תקין', () {
+      final json = jsonDecode(validJson) as Map<String, dynamic>;
+      expect(DeltaManifest.fromJson(json).optionalTableContentHashes, isNull);
+
+      json['optionalTableContentHashes'] = {
+        'book_banner': 'aa',
+        'book_protection': 'bb',
+      };
+      final m = DeltaManifest.fromJson(json);
+      expect(m.optionalTableContentHashes,
+          {'book_banner': 'aa', 'book_protection': 'bb'});
+      // עומד לבדו — אינו תלוי בזוג מפות ה-hash של סכמת ה-DB.
+      expect(m.toTableContentHashes, isNull);
+      expect(m, isNot(DeltaManifest.fromJson(jsonDecode(validJson))));
+
+      json['optionalTableContentHashes'] = ['book_banner'];
+      expect(() => DeltaManifest.fromJson(json), throwsFormatException);
+      json['optionalTableContentHashes'] = {'book_banner': 1};
+      expect(() => DeltaManifest.fromJson(json), throwsFormatException);
+    });
+
     test('fullRebase אופציונלי: ברירת מחדל false, דוחה טיפוס לא בוליאני', () {
       final json = jsonDecode(validJson) as Map<String, dynamic>;
       expect(DeltaManifest.fromJson(json).fullRebase, isFalse);
