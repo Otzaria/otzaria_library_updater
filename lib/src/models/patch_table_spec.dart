@@ -314,4 +314,15 @@ class OptionalPatchTableSpec {
 const List<OptionalPatchTableSpec> kOptionalPatchTables = [
   OptionalPatchTableSpec('book_banner', ['bookId'], ['bookId', 'text']),
   OptionalPatchTableSpec('book_protection', ['bookId'], ['bookId', 'level']),
+  // שמות קודש מאומתים לכל שורה; מפנה ל-line, ולכן מוחלפת אחרי ה-upserts וה-deletes.
+  OptionalPatchTableSpec('line_divine_name', [
+    'lineId',
+    'charStart'
+  ], [
+    'lineId',
+    'charStart',
+    'charEnd',
+    'kind',
+    'source',
+  ]),
 ];

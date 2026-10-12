@@ -2799,6 +2799,344 @@ void main() {
       expect(rowsOf(base, 'book_banner'), isNull);
     });
   });
+
+  group('טבלה אופציונלית line_divine_name', () {
+    // אות-באות כמו ה-DDL ב-OPTIONAL_PATCH_TABLES של SeforimLibrary.
+    const dnDdl = 'CREATE TABLE IF NOT EXISTS line_divine_name (\n'
+        '    lineId INTEGER NOT NULL REFERENCES line(id) ON DELETE CASCADE,\n'
+        '    charStart INTEGER NOT NULL,\n'
+        '    charEnd INTEGER NOT NULL,\n'
+        '    kind INTEGER NOT NULL,\n'
+        '    source INTEGER NOT NULL,\n'
+        '    PRIMARY KEY (lineId, charStart)\n'
+        ') WITHOUT ROWID';
+    const dn = 'line_divine_name';
+    // וקטור golden משותף עם SeforimLibrary (PatchOptionalTablesTest): ה-hash
+    // תלוי רק בשורות האלה (בכל סדר הכנסה), לא בתוכן line.
+    const goldenRows = [
+      [2, 20, 24, 3, 4],
+      [1, 0, 4, 1, 1],
+      [2, 3, 6, 7, 3],
+      [1, 12, 17, 5, 2],
+    ];
+    const goldenDnHex =
+        'e0b9cc2885495c4bf2ebdfe044b06948aa8cb0c859e777d45b880e59f3d4e799';
+    const goldenEmptyDnHex =
+        '278213e576ad7f0865c73036789d82ec801bb65e594d9eee0ec6e6e799325b85';
+
+    String buildDb(String name,
+        {int version = 1,
+        List<int> lines = const [1, 2, 3],
+        List<List>? spans}) {
+      final path = buildBaseDb(version: version, sourceRows: [
+        [1, 'aleph'],
+      ]);
+      final target = '${tmp.path}/$name.db';
+      File(path).renameSync(target);
+      final db = sqlite3.sqlite3.open(target);
+      db.execute('CREATE TABLE line (id INTEGER PRIMARY KEY, bookId INTEGER)');
+      for (final id in lines) {
+        db.execute('INSERT INTO line VALUES (?, 1)', [id]);
+      }
+      if (spans != null) {
+        db.execute(dnDdl);
+        for (final r in spans) {
+          db.execute('INSERT INTO $dn VALUES (?,?,?,?,?)', r);
+        }
+      }
+      db.close();
+      return target;
+    }
+
+    String buildPatch(String name,
+        {List<List>? snapshot,
+        List<int>? upsertLines,
+        List<int>? deleteLines}) {
+      final path = buildPatchDb(from: 1, to: 2);
+      final target = '${tmp.path}/$name.db';
+      File(path).renameSync(target);
+      final db = sqlite3.sqlite3.open(target);
+      const snapshotTable = '$kPatchOptionalTablePrefix$dn';
+      if (snapshot != null) {
+        db.execute('CREATE TABLE $kPatchOptionalTableDdlTable '
+            '(name TEXT PRIMARY KEY NOT NULL, sql TEXT NOT NULL)');
+        db.execute('INSERT INTO $kPatchOptionalTableDdlTable VALUES (?,?)',
+            [dn, dnDdl]);
+        db.execute('CREATE TABLE $snapshotTable (lineId INTEGER, '
+            'charStart INTEGER, charEnd INTEGER, kind INTEGER, '
+            'source INTEGER)');
+        for (final r in snapshot) {
+          db.execute('INSERT INTO $snapshotTable VALUES (?,?,?,?,?)', r);
+        }
+      }
+      if (upsertLines != null) {
+        db.execute('CREATE TABLE upsert_line (id INTEGER, bookId INTEGER)');
+        for (final id in upsertLines) {
+          db.execute('INSERT INTO upsert_line VALUES (?, 1)', [id]);
+        }
+      }
+      if (deleteLines != null) {
+        db.execute('CREATE TABLE delete_line (id INTEGER PRIMARY KEY)');
+        for (final id in deleteLines) {
+          db.execute('INSERT INTO delete_line VALUES (?)', [id]);
+        }
+      }
+      db.close();
+      return target;
+    }
+
+    Map<String, String> dnHashOf(String dbPath) {
+      final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
+      try {
+        return _hasher.computeReport(db, tableOrder: const [dn]).tableHashes;
+      } finally {
+        db.close();
+      }
+    }
+
+    List<List<Object?>>? spansOf(String dbPath) {
+      final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
+      try {
+        final exists = db.select(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", [dn]);
+        if (exists.isEmpty) return null;
+        return db
+            .select('SELECT * FROM $dn ORDER BY lineId, charStart')
+            .map((r) => r.values)
+            .toList();
+      } finally {
+        db.close();
+      }
+    }
+
+    DeltaManifest manifestFor(String base, String expected,
+            {bool withOptionalHash = true}) =>
+        _manifest(
+          from: 1,
+          to: 2,
+          fromHash: _hashOf(base),
+          toHash: _hashOf(expected),
+          optionalTables: withOptionalHash ? dnHashOf(expected) : null,
+        );
+
+    test('DB בלי הטבלה: נוצרת, מתמלאת ומאומתת', () {
+      final base = buildDb('dn_new_base');
+      final expected = buildDb('dn_new_expected', version: 2, spans: [
+        [1, 0, 4, 1, 1],
+        [3, 5, 10, 5, 2],
+      ]);
+      final patch = buildPatch('dn_new_patch', snapshot: [
+        [3, 5, 10, 5, 2],
+        [1, 0, 4, 1, 1],
+      ]);
+
+      final r = _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifestFor(base, expected));
+
+      expect(r.optionalTablesReplaced, {dn: 2});
+      expect(r.upserts.keys, isNot(contains(dn)));
+      expect(r.hasChangesOutsideBooksTouched, isFalse);
+      expect(spansOf(base), [
+        [1, 0, 4, 1, 1],
+        [3, 5, 10, 5, 2],
+      ]);
+      expect(dnHashOf(base), dnHashOf(expected));
+    });
+
+    test('טבלה קיימת מוחלפת כולה, ו-snapshot ריק מרוקן אותה', () {
+      final base = buildDb('dn_empty_base', spans: [
+        [1, 0, 4, 1, 1],
+        [2, 0, 4, 1, 1],
+      ]);
+      final expected = buildDb('dn_empty_expected', version: 2, spans: []);
+      final patch = buildPatch('dn_empty_patch', snapshot: const []);
+
+      final r = _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifestFor(base, expected));
+
+      expect(r.optionalTablesReplaced, {dn: 0});
+      expect(spansOf(base), isEmpty);
+    });
+
+    test('snapshot שמפנה לשורה שנוספה ב-upsert של אותו patch', () {
+      final base = buildDb('dn_newline_base', spans: [
+        [1, 0, 4, 1, 1],
+      ]);
+      final expected = buildDb('dn_newline_expected', version: 2, lines: [
+        1,
+        2,
+        3,
+        4
+      ], spans: [
+        [1, 0, 4, 1, 1],
+        [4, 2, 6, 1, 1],
+      ]);
+      final patch = buildPatch('dn_newline_patch', upsertLines: [
+        4
+      ], snapshot: [
+        [1, 0, 4, 1, 1],
+        [4, 2, 6, 1, 1],
+      ]);
+
+      final r = _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifestFor(base, expected));
+
+      expect(r.upserts['line'], 1);
+      expect(r.optionalTablesReplaced, {dn: 2});
+      expect(spansOf(base), [
+        [1, 0, 4, 1, 1],
+        [4, 2, 6, 1, 1],
+      ]);
+    });
+
+    test('מחיקת שורה עם snapshot מעודכן', () {
+      final base = buildDb('dn_delline_base', spans: [
+        [1, 0, 4, 1, 1],
+        [3, 0, 4, 1, 1],
+      ]);
+      final expected = buildDb('dn_delline_expected', version: 2, lines: [
+        1,
+        2
+      ], spans: [
+        [1, 0, 4, 1, 1],
+      ]);
+      final patch = buildPatch('dn_delline_patch', deleteLines: [
+        3
+      ], snapshot: [
+        [1, 0, 4, 1, 1],
+      ]);
+
+      final r = _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifestFor(base, expected));
+
+      expect(r.deletes['line'], 1);
+      expect(spansOf(base), [
+        [1, 0, 4, 1, 1],
+      ]);
+    });
+
+    test('מחיקת שורה בלי snapshot: ה-CASCADE מסיר את שמותיה', () {
+      final base = buildDb('dn_cascade_base', spans: [
+        [1, 0, 4, 1, 1],
+        [3, 0, 4, 1, 1],
+      ]);
+      final expected =
+          buildDb('dn_cascade_expected', version: 2, lines: [1, 2]);
+      final patch = buildPatch('dn_cascade_patch', deleteLines: [3]);
+
+      final r = _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifestFor(base, expected, withOptionalHash: false));
+
+      expect(r.optionalTablesReplaced, isEmpty);
+      expect(spansOf(base), [
+        [1, 0, 4, 1, 1],
+      ]);
+    });
+
+    test('lineId יתום ב-snapshot נדחה גם בלי checkForeignKeys', () {
+      final base = buildDb('dn_orphan_base');
+      final before = _hashOf(base);
+      final patch = buildPatch('dn_orphan_patch', snapshot: [
+        [1, 0, 4, 1, 1],
+        [99, 0, 4, 1, 1],
+      ]);
+
+      expect(
+        () => _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          checkForeignKeys: false,
+          manifest: _manifest(from: 1, to: 2, fromHash: before, toHash: 'x'),
+        ),
+        throwsA(isA<PatchApplyException>()
+            .having((e) => e.hashMismatchStage, 'stage', isNull)),
+      );
+      expect(_hashOf(base), before);
+      expect(spansOf(base), isNull);
+    });
+
+    test('snapshot שמפנה לשורה שנמחקה באותו patch נדחה', () {
+      final base = buildDb('dn_deldangle_base');
+      final before = _hashOf(base);
+      final patch = buildPatch('dn_deldangle_patch', deleteLines: [
+        3
+      ], snapshot: [
+        [3, 0, 4, 1, 1],
+      ]);
+
+      expect(
+        () => _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          checkForeignKeys: false,
+          manifest: _manifest(from: 1, to: 2, fromHash: before, toHash: 'x'),
+        ),
+        throwsA(isA<PatchApplyException>()
+            .having((e) => e.hashMismatchStage, 'stage', isNull)),
+      );
+      expect(_hashOf(base), before);
+      expect(spansOf(base), isNull);
+    });
+
+    test('hash שגוי זורק ומגלגל לאחור', () {
+      final base = buildDb('dn_badhash_base', spans: [
+        [2, 0, 4, 1, 1],
+      ]);
+      final expected = buildDb('dn_badhash_expected', version: 2);
+      final patch = buildPatch('dn_badhash_patch', snapshot: [
+        [1, 0, 4, 1, 1],
+      ]);
+      final before = _hashOf(base);
+
+      expect(
+        () => _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: _manifest(
+            from: 1,
+            to: 2,
+            fromHash: before,
+            toHash: _hashOf(expected),
+            optionalTables: const {dn: 'wrong'},
+          ),
+        ),
+        throwsA(isA<PatchApplyException>()
+            .having((e) => e.hashMismatchStage, 'stage',
+                PatchHashMismatchStage.toContentHash)
+            .having((e) => e.mismatchedTables, 'mismatchedTables', [dn])),
+      );
+      expect(spansOf(base), [
+        [2, 0, 4, 1, 1],
+      ]);
+    });
+
+    test('golden: hash של line_divine_name ריקה ומלאה', () {
+      final path = '${tmp.path}/dn_golden.db';
+      final db = sqlite3.sqlite3.open(path);
+      db.execute('CREATE TABLE line (id INTEGER PRIMARY KEY)');
+      db.execute('INSERT INTO line VALUES (1),(2)');
+      db.execute(dnDdl);
+      db.close();
+      expect(dnHashOf(path), {dn: goldenEmptyDnHex});
+
+      final w = sqlite3.sqlite3.open(path);
+      for (final r in goldenRows) {
+        w.execute('INSERT INTO $dn VALUES (?,?,?,?,?)', r);
+      }
+      w.close();
+      expect(dnHashOf(path), {dn: goldenDnHex});
+    });
+  });
 }
 
 /// רושם את הגדרות החיבור בכל חישוב hash, ומאציל לחישוב האמיתי.

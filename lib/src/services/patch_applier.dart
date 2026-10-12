@@ -827,7 +827,7 @@ class PatchApplier {
           .select('PRAGMA main.foreign_key_check("${spec.name}")')
           .isNotEmpty) {
         throw PatchApplyException(
-            'ב-$snapshot שורות שמפנות לספר שאינו קיים — ה-patch אינו תקין');
+            'ב-$snapshot שורות שמפנות לרשומה שאינה קיימת — ה-patch אינו תקין');
       }
     }
     return counts;

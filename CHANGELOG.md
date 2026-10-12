@@ -13,6 +13,12 @@
 - `PatchApplyResult.optionalTablesReplaced`: ספירת השורות לכל טבלה שהוחלפה.
   אינה נכנסת ל-`upserts`, ולכן אינה מפעילה את `hasChangesOutsideBooksTouched`.
 - `patch_tables_contract.json` מקבל את הסעיף `optionalTables`.
+- טבלה אופציונלית שלישית `line_divine_name` (`lineId`, `charStart`, `charEnd`,
+  `kind`, `source`; PK `(lineId, charStart)`, `WITHOUT ROWID`, FK ל-`line` עם
+  `ON DELETE CASCADE`) — שמות הקודש המאומתים בכל שורה, באותו ערוץ צד. ההחלפה
+  רצה אחרי ה-upserts וה-deletes, כך ש-snapshot יכול להפנות לשורה שנוספה באותו
+  patch, ושורה יתומה נדחית ב-`foreign_key_check`. golden של ה-hash (מלאה וריקה)
+  משותף עם SeforimLibrary.
 - `downloadSplitToFile`: חיבור החלקים (קריאה, sha256 וכתיבה) רץ ב-isolate נפרד,
   אל קובץ זמני שעובר ל-`destPath` רק אחרי האימות. ה-API לא השתנה.
 - אימות sha256 של קובץ שכבר שלם (`downloadToFile`) או ארכיון שכבר חובר
