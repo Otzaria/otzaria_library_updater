@@ -8,6 +8,9 @@ import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 
+import '../hashing/fast_sha256.dart';
+import '../hashing/fast_sha256_sink.dart';
+import '../messages/library_updater_messages.dart';
 import '../models/delta_manifest.dart';
 import '../models/library_release.dart';
 import '../models/split_asset.dart';
@@ -17,7 +20,7 @@ class PatchDownloadException implements Exception {
   final String message;
   const PatchDownloadException(this.message);
   @override
-  String toString() => 'PatchDownloadException: $message';
+  String toString() => message;
 }
 
 /// נזרק כשהמשתמש ביטל את ההורדה.
@@ -25,39 +28,39 @@ class PatchDownloadCancelled implements Exception {
   const PatchDownloadCancelled();
 }
 
-/// נזרק כשהחיבור לרשת נקטע וגם הניסיונות החוזרים האוטומטיים לא הצליחו.
-/// קובץ חלקי ניתן-לחידוש נשמר, כך שקריאה חוזרת ממשיכה מהנקודה שנעצרה.
-///
-/// אינו יורש מ-[PatchDownloadException]: צרכנים ותיקים משתמשים בטיפוס ההוא
-/// לזיהוי נכס פגום ומוחקים בעקבותיו את הקובץ, בעוד שכשל רשת חייב לשמור partial.
+/// נזרק כשהחיבור לרשת נקטע וגם הניסיונות החוזרים לא הצליחו. קובץ חלקי
+/// ניתן-לחידוש נשמר; אינו [PatchDownloadException] כי זה אינו נכס פגום.
 class PatchNetworkException implements Exception {
   final Object cause;
-  final String message;
-  const PatchNetworkException(this.cause)
-      : message = 'החיבור לרשת נקטע במהלך ההורדה';
+  const PatchNetworkException(this.cause);
+  String get message => LibraryUpdaterMessages.current.networkInterrupted;
   @override
   String toString() => 'PatchNetworkException: $message ($cause)';
 }
 
-/// מוריד קובץ patch דחוס, מאמת sha256 וגודל (דחוס ומחולץ), ומחלץ ל-`.db`.
+/// מוריד קובצי patch ו-DB מלא, מאמת sha256 וגודל, ומחלץ patch ל-`.db`.
 ///
-/// ה-patches קטנים (עד עשרות MB מחולצים), לכן ההורדה והחילוץ בזיכרון. אם
-/// אימות נכשל — הקבצים נמחקים ונזרק [PatchDownloadException].
+/// [downloadToFile] ו-[downloadAndExtract] מקבלים גם נתיב מקומי במקום URL
+/// (מראה offline) — ראו [isRemoteUrl].
 class PatchDownloader {
-  /// חסם עליון על סבבי-המשך (206 קצר) בניסיון בודד. שרת ששולח מעט בייטים בכל
-  /// סבב היה גורם לאלפי בקשות על קובץ 1.1GB; מעבר לחסם = כשל הניסיון.
+  /// חסם עליון על סבבי-המשך (206 קצר) בניסיון בודד.
   static const int _maxContinuationRounds = 32;
+
+  /// `IOSink.add` אינו מפעיל לחץ-נגד; בלי flush תקופתי ההפרש בין רשת מהירה
+  /// ליעד איטי (כונן נייד) נערם ב-RAM.
+  static const int _writeBufferBytes = 4 << 20;
 
   final http.Client _httpClient;
   final bool _ownsClient;
 
   /// פונקציית חילוץ zstd — מוזרקת על-ידי הצרכן (החבילה אגנוסטית לפלטפורמה).
   final Future<Uint8List?> Function(Uint8List compressed) _decompress;
-  final Duration connectTimeout;
-  final Duration stallTimeout;
 
-  /// ההשהיות בין ניסיונות חוזרים אוטומטיים אחרי קטיעת רשת (חיבור שנסגר,
-  /// timeout). אורך הרשימה = מספר הניסיונות החוזרים; רשימה ריקה מבטלת אותם.
+  /// ניתנים לשינוי בזמן ריצה — נכנסים לתוקף בבקשה הבאה.
+  Duration connectTimeout;
+  Duration stallTimeout;
+
+  /// ההשהיות בין ניסיונות חוזרים אחרי קטיעת רשת; רשימה ריקה מבטלת אותם.
   final List<Duration> networkRetryDelays;
 
   static const List<Duration> defaultNetworkRetryDelays = [
@@ -76,8 +79,7 @@ class PatchDownloader {
         _ownsClient = httpClient == null,
         _decompress = decompress;
 
-  /// כשל רשת חולף: החיבור נסגר/אופס, או שהזרם נעצר מעבר ל-timeout. שגיאות
-  /// פרוטוקול/אימות (קוד HTTP, sha256, גודל) אינן חולפות ואינן מנוסות שוב.
+  /// כשל רשת חולף: החיבור נסגר/אופס, או שהזרם נעצר מעבר ל-timeout.
   static bool isTransientNetworkError(Object error) =>
       error is PatchNetworkException ||
       error is SocketException ||
@@ -86,11 +88,12 @@ class PatchDownloader {
       error is TimeoutException ||
       error is http.ClientException;
 
-  /// מוריד ומחלץ את [patchFile] מ-[downloadUrl] לתיקייה [destDir].
-  /// מחזיר את הנתיב לקובץ ה-`.db` המחולץ והמאומת.
-  ///
-  /// [onVerifyProgress] מדווח על קידום אימות ה-sha256 של הקובץ המחולץ
-  /// (בייטים שנקראו מתוך גודלו). במימוש הבסיסי האימות רץ בלי דיווח ביניים.
+  /// `true` לכתובת HTTP/HTTPS; `false` לנתיב קובץ מקומי (מראה offline).
+  static bool isRemoteUrl(String url) =>
+      url.startsWith('http://') || url.startsWith('https://');
+
+  /// מוריד ומחלץ את [patchFile] מ-[downloadUrl] לתיקייה [destDir] ומחזיר את
+  /// נתיב ה-`.db` המאומת. [onVerifyProgress] — אימות ה-sha256 של המחולץ.
   Future<String> downloadAndExtract({
     required PatchFileEntry patchFile,
     required String downloadUrl,
@@ -99,14 +102,17 @@ class PatchDownloader {
     void Function(int bytesDone, int bytesTotal)? onVerifyProgress,
     bool Function()? isCancelled,
   }) async {
+    final messages = LibraryUpdaterMessages.current;
     if (!destDir.existsSync()) {
       destDir.createSync(recursive: true);
     }
-    // שם הקובץ המחולץ: הסרת סיומת .zst
     final extractedName = patchFile.file.endsWith('.zst')
         ? patchFile.file.substring(0, patchFile.file.length - 4)
         : '${patchFile.file}.db';
     final extractedPath = p.join(destDir.path, extractedName);
+    if (!p.isWithin(destDir.path, extractedPath)) {
+      throw PatchDownloadException(messages.manifestMissingField('file'));
+    }
 
     try {
       final download = await _download(
@@ -120,34 +126,34 @@ class PatchDownloader {
       _verify(
         actual: compressed.length,
         expected: patchFile.size,
-        label: 'גודל הקובץ הדחוס',
+        label: messages.compressedFileSizeLabel,
       );
       _verifyDigest(
         actual: download.digest,
         expected: patchFile.sha256,
-        label: 'sha256 של הקובץ הדחוס',
+        label: messages.compressedFileHashLabel,
       );
 
       _throwIfCancelled(isCancelled);
 
       final extracted = await _decompress(compressed);
       if (extracted == null || extracted.isEmpty) {
-        throw const PatchDownloadException('חילוץ ה-patch נכשל או החזיר ריק');
+        throw PatchDownloadException(messages.patchExtractionFailed);
       }
 
       _verify(
         actual: extracted.length,
         expected: patchFile.uncompressedSize,
-        label: 'גודל הקובץ המחולץ',
+        label: messages.extractedFileSizeLabel,
       );
 
-      // כתיבה לפני אימות ה-hash: ה-hash מחושב מהדיסק ב-isolate, בלי להעביר את
-      // הבייטים דרך SendPort (העתקה שהייתה מכפילה את שיא הזיכרון).
+      // ה-hash מחושב מהדיסק ב-isolate, בלי להעתיק את הבייטים דרך SendPort.
       await File(extractedPath).writeAsBytes(extracted, flush: true);
       await _verifyFileHash(
         path: extractedPath,
         expected: patchFile.uncompressedSha256,
-        label: 'sha256 של הקובץ המחולץ',
+        label: messages.extractedFileHashLabel,
+        onVerifyProgress: onVerifyProgress,
       );
       return extractedPath;
     } catch (_) {
@@ -156,41 +162,18 @@ class PatchDownloader {
     }
   }
 
-  /// מוריד קובץ גדול ישירות לדיסק בזרימה (ללא טעינה ל-RAM) — ל-DB המלא
-  /// (~1.1GB), עם תמיכה בחידוש הורדה (resume): קובץ חלקי קיים משמש כנקודת
-  /// המשך דרך כותרת `Range`. מאמת sha256 אם [expectedSha256] סופק.
+  /// מוריד קובץ גדול לדיסק בזרימה, עם resume, אימות sha256 וניסיונות חוזרים
+  /// אחרי קטיעת רשת ([networkRetryDelays]).
   ///
-  /// קטיעת רשת (חיבור שנסגר, timeout) מנוסה שוב אוטומטית לפי
-  /// [networkRetryDelays], בהמשך מהחלקי כשהוא ניתן-לחידוש ואחרת מאפס; כשגם
-  /// הניסיונות נכשלו נזרק [PatchNetworkException].
+  /// [resumeToken] כובל קובץ חלקי לגרסת הנכס דרך `<destPath>.resume` (טוקן,
+  /// ETag חזק לשליחת If-Range, וסימון אימות `sha256|גודל|זמן-שינוי`). חלקי
+  /// בלי טוקן תואם נמחק, אלא אם הוא שלם ובאותו sha256 — אז הוא נקשר לטוקן
+  /// החדש. נכס שלם שסימון האימות שלו תואם אינו מגובב שוב; נכס שלם ופגום
+  /// יורד מחדש. קובץ הצד נמחק רק יחד עם הקובץ עצמו — הצרכן שמוחק את הקובץ
+  /// אחרי חילוץ מנקה אותו דרך [resumeSidecarPath].
   ///
-  /// בהפרעה (ביטול/timeout/רשת) קובץ חלקי נשמר רק אם הוא באמת ניתן-לחידוש:
-  /// יש טוקן **וגם** validator חזק בקובץ הצד (או שהקובץ כבר שלם). חלקי בלי
-  /// validator אינו נאמן ואינו ניתן להמשך — הוא נמחק מיד (יחד עם קובץ הצד) כדי
-  /// לא להשאיר עד 1.5GB תלויים על הדיסק שכלל ה-entry ימחק ממילא בריצה הבאה.
-  /// קובץ נמחק גם כאשר אימות סופי נכשל (אורך שגוי או sha256 שגוי) — קובץ
-  /// שלם-אך-פגום אסור שיישאר, אחרת הריצה הבאה "תמשיך" זבל.
-  ///
-  /// [resumeToken] הוא תנאי להמשך (resume): רק כשהוא אינו null נעשה שימוש בקובץ
-  /// חלקי קיים כנקודת המשך. הטוקן נשמר בקובץ צד `<destPath>.resume` בתחילת הורדה,
-  /// ונבדק בכניסה: אם קיים קובץ חלקי אך קובץ הצד חסר או תוכנו שונה מ-[resumeToken]
-  /// — החלקי נמחק וההורדה מתחילה מאפס. כך נמנעים מ"פרנקנשטיין" (חלקי מגרסה N
-  /// שממשיך עם בייטים מ-N+1) ומקובץ שלם ישן שעובר את בדיקת ה-alreadyComplete.
-  /// כש-null אין זהות יציבה לנכס — כל קובץ קיים ב-[destPath] נמחק בכניסה וההורדה
-  /// מתחילה מאפס (אין המשך על URL שתוכנו עלול להשתנות).
-  ///
-  /// הגנת ה"פרנקנשטיין" נשענת על שתי שכבות: הטוקן (מטא-דאטה בצד הלקוח) **וגם**
-  /// If-Range/ETag (הייצוג בצד השרת). ה-ETag החזק שהגיע עם הבייטים נשמר בקובץ
-  /// הצד; בכל בקשת המשך נשלח `If-Range: <etag>` יחד עם `Range`, כך שנכס שהוחלף
-  /// באותו URL (גם בגודל זהה) מחזיר 200 וההורדה מתחילה מאפס — ולא תופרת בייטים
-  /// מגרסאות שונות. כשלשרת אין ETag חזק אין validator: חלקי כזה אינו נאמן ונמחק
-  /// (בכניסה וגם בהפרעה) כדי להתחיל מאפס בפעם הבאה.
-  ///
-  /// קובץ הצד חי ומת יחד עם הנתונים: הוא נמחק רק היכן ש-[destPath] עצמו נמחק
-  /// (אי-התאמת טוקן, כשלי אימות, חריגת גודל). הורדה מוצלחת **אינה** מוחקת אותו —
-  /// אחרת ביטול בזמן החילוץ אצל הצרכן היה משאיר קובץ שלם בלי קובץ צד, ובריצה
-  /// הבאה כלל אי-ההתאמה מוחק 1.1GB לחינם. הצרכן שמוחק את הקובץ לאחר חילוץ מוצלח
-  /// (או בכשל חילוץ) מנקה גם את קובץ הצד דרך [resumeSidecarPath].
+  /// [onExistingBytes] — כמה מהקובץ כבר על הדיסק ואינו עובר ברשת (0 כשנמחק).
+  /// [onVerifyProgress] — קריאת קובץ שכבר על הדיסק לצורך אימות.
   Future<void> downloadToFile({
     required String url,
     required String destPath,
@@ -198,148 +181,231 @@ class PatchDownloader {
     String? expectedSha256,
     String? resumeToken,
     void Function(int downloaded, int? total)? onProgress,
+    void Function(int verified, int total)? onVerifyProgress,
+    void Function(int bytes)? onExistingBytes,
     bool Function()? isCancelled,
   }) async {
-    // ביטול בכניסה חייב לקדום לכל שינוי (מחיקת קובץ קיים, כתיבת קובץ צד) ולכל
-    // בקשת רשת — נזרק לפני ה-try כדי שניקוי ה-catch לא ימחק קובץ קיים.
+    // ביטול בכניסה קודם לכל שינוי בדיסק ולכל בקשת רשת.
     _throwIfCancelled(isCancelled);
+    final messages = LibraryUpdaterMessages.current;
+
+    if (!isRemoteUrl(url)) {
+      await _copyLocalFile(
+        url: url,
+        destPath: destPath,
+        expectedSize: expectedSize,
+        expectedSha256: expectedSha256,
+        onProgress: onProgress,
+        isCancelled: isCancelled,
+      );
+      return;
+    }
 
     final file = File(destPath);
     final sidecarPath = resumeSidecarPath(destPath);
+    // ביטול באמצע ה-hash של האימוץ אינו סיבה למחוק קובץ שלא נגענו בו.
+    var adopting = false;
 
     try {
-      // resume מותנה בטוקן: בלי טוקן אין זהות יציבה, ולכן כל קובץ קיים נמחק
-      // וההורדה מאפס — אחרת חלקי ישן היה נתפר לנכס חדש על אותו URL (frankenfile).
       String? storedValidator;
+      String? storedVerified;
       if (resumeToken == null) {
         _deleteRequired(
           destPath,
-          'מחיקת קובץ קיים ללא זהות resume נכשלה — לא ניתן להמשיך בהורדה',
+          messages.deleteExistingWithoutResumeIdentityFailed,
         );
         _deleteQuietly(sidecarPath);
       } else if (file.existsSync()) {
-        // כבילת החלקי לגרסת הנכס — חלקי בלי טוקן תואם נזרק כדי למנוע frankenfile.
         final sidecar = _readSidecar(sidecarPath);
-        if (sidecar?.token != resumeToken) {
-          // מחיקה היא תנאי תקינות: כשל שקט היה כובל תוכן ישן לטוקן החדש.
+        adopting = sidecar?.token != resumeToken;
+        final adopted = !adopting
+            ? null
+            : await _adoptSameContent(
+                file,
+                sidecarPath,
+                sidecar?.verified,
+                resumeToken,
+                expectedSize,
+                expectedSha256,
+                isCancelled,
+                onVerifyProgress,
+              );
+        if (adopted != null) {
+          adopting = false;
+          storedVerified = adopted;
+        } else if (adopting) {
+          adopting = false;
+          // כשל שקט היה כובל תוכן ישן לטוקן החדש (frankenfile).
           _deleteRequired(
             destPath,
-            'מחיקת קובץ חלקי מגרסה קודמת נכשלה — לא ניתן להמשיך בהורדה',
+            messages.deletePartialFromPreviousVersionFailed,
           );
           _deleteQuietly(sidecarPath);
         } else {
           storedValidator = _strongEtag(sidecar?.etag);
+          storedVerified = sidecar?.verified;
         }
       }
 
       var offset = file.existsSync() ? file.lengthSync() : 0;
-
-      // הקובץ החלקי כבר בגודל המלא (או גדול) — דילוג על ההורדה, ישר לאימות.
       final alreadyComplete = expectedSize != null && offset >= expectedSize;
 
-      // חלקי (לא שלם) בלי validator שמור אינו נאמן: אי אפשר לשלוח If-Range שיכבול
-      // את הבייטים לגרסת השרת, ולכן מוחקים ומתחילים מאפס (אינו שגיאה).
+      // חלקי בלי validator אינו נאמן: אין If-Range שיכבול אותו לגרסת השרת.
       if (!alreadyComplete && offset > 0 && storedValidator == null) {
-        _deleteRequired(
-          destPath,
-          'מחיקת קובץ חלקי ללא validator נכשלה — לא ניתן להמשיך בהורדה',
-        );
+        _deleteRequired(destPath, messages.deletePartialWithoutValidatorFailed);
         offset = 0;
       }
 
-      var downloaded = offset;
-      Digest? streamDigest;
-      // אחרי קטיעה אין טעם לקרוא ולגבות ב-hash את כל ה-partial לפני כל ניסיון
-      // נוסף. במסלול retry מאמתים את הקובץ השלם פעם אחת בלבד לאחר ההצלחה.
-      var retrying = false;
-      if (!alreadyComplete) {
-        final outcome = await _withNetworkRetry(
-          () async {
-            // ניסיון חוזר עשוי למצוא שהקטיעה הגיעה אחרי הבייט האחרון.
-            if (expectedSize != null && offset >= expectedSize) {
-              return (downloaded: offset, digest: null);
-            }
-            if (resumeToken != null) {
-              _writeSidecar(sidecarPath, resumeToken, storedValidator);
-            }
-            return _streamToFile(
-              url: url,
-              file: file,
-              offset: offset,
-              expectedSize: expectedSize,
-              computeHash: expectedSha256 != null && !retrying,
-              validator: storedValidator,
-              sidecarPath: resumeToken != null ? sidecarPath : null,
-              resumeToken: resumeToken,
-              onProgress: onProgress,
-              isCancelled: isCancelled,
-            );
-          },
-          isCancelled: isCancelled,
-          // אחרי קטיעה ממשיכים מהחלקי רק כשהוא כבול ל-validator; אחרת מאפס.
-          onRetry: () {
-            retrying = true;
-            if (_partialIsResumable(
-                destPath, sidecarPath, expectedSize, resumeToken)) {
-              storedValidator = _strongEtag(_readSidecar(sidecarPath)?.etag);
-              offset = file.lengthSync();
-              return;
-            }
-            if (file.existsSync()) {
-              _deleteRequired(
-                destPath,
-                'מחיקת קובץ חלקי לפני ניסיון חוזר נכשלה — לא ניתן להמשיך בהורדה',
-              );
-            }
-            storedValidator = null;
-            offset = 0;
-          },
-        );
-        downloaded = outcome.downloaded;
-        streamDigest = outcome.digest;
-      } else {
-        // _streamToFile לא רץ ולא דיווח — מקדמים ל-100% כדי שהמד לא ייתקע בזמן
-        // אימות ה-hash הארוך (>1GB) על מסלול הקובץ-שכבר-שלם.
-        onProgress?.call(downloaded, downloaded);
+      if (offset > 0) onExistingBytes?.call(offset);
+      if (alreadyComplete) {
+        onProgress?.call(offset, offset);
+        if (offset == expectedSize &&
+            await _completeFileVerified(
+              destPath,
+              sidecarPath,
+              resumeToken,
+              expectedSha256,
+              storedVerified,
+              isCancelled,
+              onVerifyProgress,
+            )) {
+          _throwIfCancelled(isCancelled);
+          return;
+        }
+        _deleteRequired(destPath, messages.deletePartialBeforeRetryFailed);
+        _deleteQuietly(sidecarPath);
+        storedValidator = null;
+        offset = 0;
+        onExistingBytes?.call(0);
       }
+
+      // אחרי קטיעה ה-hash מחושב פעם אחת על הקובץ המוגמר, לא על כל partial.
+      var retrying = false;
+      final outcome = await _withNetworkRetry(
+        () async {
+          if (expectedSize != null && offset >= expectedSize) {
+            return (downloaded: offset, digest: null);
+          }
+          if (resumeToken != null) {
+            _writeSidecar(sidecarPath, resumeToken, storedValidator);
+          }
+          return _streamToFile(
+            url: url,
+            file: file,
+            offset: offset,
+            expectedSize: expectedSize,
+            computeHash: expectedSha256 != null && !retrying,
+            validator: storedValidator,
+            sidecarPath: resumeToken != null ? sidecarPath : null,
+            resumeToken: resumeToken,
+            onProgress: onProgress,
+            onVerifyProgress: onVerifyProgress,
+            onExistingBytes: onExistingBytes,
+            isCancelled: isCancelled,
+          );
+        },
+        isCancelled: isCancelled,
+        onRetry: () {
+          retrying = true;
+          if (_partialIsResumable(
+              destPath, sidecarPath, expectedSize, resumeToken)) {
+            storedValidator = _strongEtag(_readSidecar(sidecarPath)?.etag);
+            offset = file.lengthSync();
+            onExistingBytes?.call(offset);
+            return;
+          }
+          if (file.existsSync()) {
+            _deleteRequired(destPath, messages.deletePartialBeforeRetryFailed);
+          }
+          storedValidator = null;
+          offset = 0;
+          onExistingBytes?.call(0);
+        },
+      );
+      final downloaded = outcome.downloaded;
 
       if (expectedSize != null && downloaded != expectedSize) {
         _deleteQuietly(destPath);
         _deleteQuietly(sidecarPath);
         throw PatchDownloadException(
-            'גודל ה-DB שהורד ($downloaded) אינו תואם לצפוי ($expectedSize)');
+          messages.fullDbSizeMismatch(downloaded, expectedSize),
+        );
       }
       if (expectedSha256 != null) {
-        // בלי retry ה-hash מחושב בזרימה. במסלול alreadyComplete או אחרי retry
-        // קוראים את הקובץ המוגמר פעם אחת, במקום לקרוא כל partial בכל ניסיון.
-        final actual = streamDigest?.toString() ??
-            await _hashFileSha256InIsolate(destPath, isCancelled);
-        if (actual != expectedSha256.toLowerCase()) {
+        final expected = expectedSha256.toLowerCase();
+        final actual = outcome.digest?.toString() ??
+            await _hashFileSha256InIsolate(
+                destPath, isCancelled, onVerifyProgress);
+        if (actual != expected) {
           _deleteQuietly(destPath);
           _deleteQuietly(sidecarPath);
-          throw const PatchDownloadException('sha256 של ה-DB המלא אינו תואם');
+          throw PatchDownloadException(messages.fullDbHashMismatch);
+        }
+        if (resumeToken != null) {
+          await _markVerified(sidecarPath, resumeToken, expected, file);
         }
       }
-      // ביטול שהתרחש אחרי שכל הבייטים הגיעו — הקובץ שלם ונשמר (עם resumeToken);
-      // הריצה הבאה תזהה alreadyComplete. עקביות: מאותת ביטול, לא הצלחה שקטה.
+      // ביטול אחרי שכל הבייטים הגיעו — הקובץ שלם ונשמר, אך מאותתים ביטול.
       _throwIfCancelled(isCancelled);
     } catch (_) {
-      // חלקי נשמר להמשך רק אם הוא באמת ניתן-לחידוש: יש validator חזק בקובץ הצד
-      // (או שהקובץ כבר שלם). אחרת כלל ה-entry ימחק אותו ממילא בריצה הבאה, והוא
-      // רק תופס עד 1.5GB עד אז — מוחקים מיד.
-      if (!_partialIsResumable(
-          destPath, sidecarPath, expectedSize, resumeToken)) {
+      // חלקי נשמר רק אם הוא ניתן-לחידוש; אחרת הריצה הבאה תמחק אותו ממילא.
+      if (!adopting &&
+          !_partialIsResumable(
+              destPath, sidecarPath, expectedSize, resumeToken)) {
         _deleteQuietly(destPath);
-        // קובץ הצד חי ומת עם הנתונים: נמחק רק אם הקובץ עצמו אכן נעלם.
         if (!file.existsSync()) _deleteQuietly(sidecarPath);
       }
       rethrow;
     }
   }
 
-  /// נתיב קובץ הצד (`.resume`) של [destPath]. חשוף כדי שהצרכן שמוחק את הקובץ
-  /// לאחר חילוץ מוצלח (או בכשל חילוץ) ינקה גם את קובץ הצד.
+  /// נתיב קובץ הצד (`.resume`) של [destPath].
   static String resumeSidecarPath(String destPath) => '$destPath.resume';
+
+  /// הטוקן שנשמר בקובץ הצד של [destPath], אם יש.
+  String? storedResumeToken(String destPath) =>
+      _readSidecar(resumeSidecarPath(destPath))?.token;
+
+  /// האם [destPath] כבר מחזיק בדיוק את [expectedSha256], לנכס שלא ירד דרך
+  /// [downloadToFile]. אינו מוחק דבר; סימון תואם חוסך את ה-hash.
+  Future<bool> verifyExistingFile({
+    required String destPath,
+    required int expectedSize,
+    required String expectedSha256,
+    required String resumeToken,
+    void Function(int verified, int total)? onVerifyProgress,
+    bool Function()? isCancelled,
+  }) async {
+    final file = File(destPath);
+    if (!file.existsSync() || file.lengthSync() != expectedSize) return false;
+    final expected = expectedSha256.toLowerCase();
+    final sidecar = _readSidecar(resumeSidecarPath(destPath));
+    if (sidecar?.token == resumeToken &&
+        _matchesVerifiedMark(sidecar?.verified, file, expected)) {
+      return true;
+    }
+    final actual =
+        await _hashFileSha256InIsolate(destPath, isCancelled, onVerifyProgress);
+    if (actual != expected) return false;
+    recordVerified(
+        destPath: destPath, resumeToken: resumeToken, sha256: expected);
+    return true;
+  }
+
+  /// רושם ש-[destPath] אומת מול [sha256], כדי שהריצה הבאה תדלג על ה-hash.
+  /// כשל כתיבה נבלע — הסימון הוא חיסכון בלבד.
+  void recordVerified({
+    required String destPath,
+    required String resumeToken,
+    required String sha256,
+  }) {
+    final mark = _verifiedMarkFor(File(destPath), sha256.toLowerCase());
+    if (mark == null) return;
+    try {
+      _writeSidecar(resumeSidecarPath(destPath), resumeToken, null,
+          verified: mark);
+    } catch (_) {}
+  }
 
   /// נתיב החלק [index] של ארכיון מפוצל שמורכב אל [destPath].
   static String splitPartPath(String destPath, int index) =>
@@ -405,7 +471,7 @@ class PatchDownloader {
     }
     _deleteRequired(
       destPath,
-      'מחיקת ארכיון קודם נכשלה — לא ניתן לחבר את חלקי ההורדה',
+      LibraryUpdaterMessages.current.deletePreviousArchiveFailed,
     );
     _deleteQuietly(sidecarPath);
     _deleteSplitParts(destPath, from: split.parts.length);
@@ -430,24 +496,16 @@ class PatchDownloader {
     }
     _throwIfCancelled(isCancelled);
 
-    await _joinSplitParts(split, destPath);
+    await _joinPartsInIsolate(
+      [for (var i = 0; i < split.parts.length; i++) splitPartPath(destPath, i)],
+      destPath,
+      split.size,
+      split.sha256,
+    );
     if (joinedToken != null) _writeSidecar(sidecarPath, joinedToken, null);
   }
 
-  /// מצרף את החלקים ב-isolate נפרד (קריאה, sha256 וכתיבה של מאות MB).
-  Future<void> _joinSplitParts(SplitAsset split, String destPath) =>
-      _joinPartsInIsolate(
-        [
-          for (var i = 0; i < split.parts.length; i++)
-            splitPartPath(destPath, i)
-        ],
-        destPath,
-        split.size,
-        split.sha256,
-      );
-
-  /// מוחק חלקים (ואת קבצי הצד שלהם) מהאינדקס [from] והלאה — שרידים של
-  /// פיצול קודם שהיו בו יותר חלקים, או כל החלקים אחרי חיבור מוצלח.
+  /// מוחק חלקים (ואת קבצי הצד שלהם) מהאינדקס [from] והלאה.
   void _deleteSplitParts(String destPath, {required int from}) {
     final dir = Directory(p.dirname(destPath));
     if (!dir.existsSync()) return;
@@ -464,9 +522,8 @@ class PatchDownloader {
     } catch (_) {}
   }
 
-  /// זורם את גוף התגובה אל [file], תוך המשך מ-[offset] בעזרת `Range`.
-  /// מחזיר את גודל הקובץ הכולל שנכתב ואת ה-sha256 שחושב בזרימה (או null אם
-  /// [computeHash] כבוי). שמירת חלקי בהפרעה נקבעת על-ידי [downloadToFile].
+  /// זורם את גוף התגובה אל [file], תוך המשך מ-[offset] בעזרת `Range`, ומחזיר
+  /// את הגודל שנכתב ואת ה-sha256 שחושב בזרימה (null כש-[computeHash] כבוי).
   Future<({int downloaded, Digest? digest})> _streamToFile({
     required String url,
     required File file,
@@ -477,194 +534,166 @@ class PatchDownloader {
     String? sidecarPath,
     String? resumeToken,
     void Function(int downloaded, int? total)? onProgress,
+    void Function(int verified, int total)? onVerifyProgress,
+    void Function(int bytes)? onExistingBytes,
     bool Function()? isCancelled,
   }) async {
-    // כובל את הבייטים לגרסת השרת דרך קובץ הצד: נכתב ברגע שהם מגיעים כדי שהפרעה
-    // תשאיר validator להמשך בריצה הבאה.
+    final messages = LibraryUpdaterMessages.current;
+    // נכתב ברגע שהבייטים מגיעים, כדי שהפרעה תשאיר validator להמשך.
     void persistValidator(String? etag) {
       if (sidecarPath != null && resumeToken != null) {
         _writeSidecar(sidecarPath, resumeToken, etag);
       }
     }
 
-    // עד 2 ניסיונות "מאפס": 206 שאינו תואם לבקשה, 416 שאינו מוכיח שלמות, שרת
-    // שמתעלם מ-Range, קטע 206 באורך שגוי, או 206 בלי total ידוע — כולם מובילים
-    // לניסיון חוזר מאפס בלי Range. המשך תקין של 206 קצר (subset לגיטימי לפי
-    // RFC 9110 §15.3.7) אינו ניסיון-שגיאה: הוא ממשיך באותו ניסיון עד ה-total.
+    // עד 2 ניסיונות "מאפס" (206/416 לא עקביים, שרת שמתעלם מ-Range); המשך
+    // תקין של 206 קצר ממשיך באותו ניסיון עד ה-total.
     var currentOffset = offset;
     for (var attempt = 0; attempt < 2; attempt++) {
-      // hasher — נבנה פעם לכל ניסיון; רץ ברצף על התחילית ועל כל סבבי-ההמשך.
-      // ה-hash של התחילית מחושב לפני שליחת הבקשה: ביטול/כשל-קריאה כאן אינם
-      // משאירים תגובת HTTP פתוחה.
-      _ChunkedDigestSink? digestSink;
-      ByteConversionSink? hashInput;
-      if (computeHash) {
-        digestSink = _ChunkedDigestSink();
-        hashInput = sha256.startChunkedConversion(digestSink);
-        if (currentOffset > 0) {
-          await for (final chunk in file.openRead(0, currentOffset)) {
-            _throwIfCancelled(isCancelled);
-            hashInput.add(chunk);
-          }
+      Sha256DigestCollector? digestSink;
+      FastSha256Sink? hashInput;
+      // התחילית מגובבת רק אחרי ש-206 מוכיח שה-Range כובד: ה-CDN של GitHub
+      // מחזיר 200, וגיבוב מוקדם של ~1.4GB מהדיסק היה נזרק לחינם.
+      var prefixHashed = false;
+      try {
+        if (computeHash) {
+          digestSink = Sha256DigestCollector();
+          hashInput = FastSha256.start(digestSink);
         }
-      }
 
-      var roundOffset = currentOffset;
-      var downloaded = currentOffset;
-      var restart = false;
-      // ה-total הראשון שדווח בסבב 206 — כל סבב המשך חייב לדווח את אותו total,
-      // אחרת ('/40' ואז '/31') היה מתקבל קובץ קטוע כ"הצלחה". מתאפס לכל ניסיון.
-      int? sessionTotal;
-      var rounds = 0;
+        var roundOffset = currentOffset;
+        var downloaded = currentOffset;
+        var restart = false;
+        // ה-total הראשון שדווח ב-206; כל סבב המשך חייב לדווח אותו total.
+        int? sessionTotal;
+        var rounds = 0;
 
-      // לולאת המשך: 206 קצר חוקי (downloaded < total) שולח Range נוסף עד ה-total.
-      while (true) {
-        _throwIfCancelled(isCancelled);
-        // חסם קשיח על סבבי-המשך: שרת ששולח מעט בייטים בכל 206 היה מציף בבקשות.
-        // חריגה = כשל הניסיון; החלקי (בייטים תקינים) נשמר והריצה הבאה תמשיך.
-        if (rounds++ >= _maxContinuationRounds) {
-          hashInput?.close();
-          throw PatchDownloadException(
-            'חידוש ההורדה חרג ממספר הסבבים המרבי ($_maxContinuationRounds): $url',
-          );
-        }
-        final headers = <String, String>{'Accept': 'application/octet-stream'};
-        if (roundOffset > 0) {
-          headers['Range'] = 'bytes=$roundOffset-';
-          // כובל את ההמשך לגרסת הנכס: אם הייצוג הוחלף השרת יחזיר 200 ולא 206.
-          if (validator != null) headers['If-Range'] = validator;
-        }
-        final response = await _sendWithManualRedirects(url, headers);
-
-        if (response.statusCode == 200) {
-          // השרת התעלם מ-Range — גוף מלא מאפס (200 = משאב שלם בהגדרה).
-          try {
-            // הבייטים הישנים נמחקים לפני שמירת ה-validator החדש: קריסה בין
-            // השניים הייתה משאירה בייטים ישנים כבולים ל-ETag חדש (frankenfile).
-            if (file.existsSync()) {
-              _deleteRequired(
-                file.path,
-                'מחיקת קובץ חלקי מייצוג קודם נכשלה — לא ניתן להמשיך בהורדה',
-              );
-            }
-            validator = _strongEtag(response.headers['etag']);
-            persistValidator(validator);
-          } catch (_) {
-            // התגובה כבר פתוחה — משחררים את החיבור לפני הפצת השגיאה.
-            await _abandonBody(response);
-            rethrow;
-          }
-          final responseLength = response.contentLength;
-          if (expectedSize != null &&
-              responseLength != null &&
-              responseLength != expectedSize) {
+        while (true) {
+          _throwIfCancelled(isCancelled);
+          if (rounds++ >= _maxContinuationRounds) {
             hashInput?.close();
-            await _abandonBody(response);
-            _deleteQuietly(file.path);
-            if (sidecarPath != null) _deleteQuietly(sidecarPath);
             throw PatchDownloadException(
-              'Content-Length של ההורדה ($responseLength) אינו תואם '
-              'לגודל הצפוי ($expectedSize)',
+              messages.resumeRoundLimit(_maxContinuationRounds, url),
             );
           }
-          if (computeHash) {
-            // ה-hasher הקודם כבר קיבל את התחילית הישנה; תגובת 200 היא גוף מלא
-            // מאפס, ולכן סוגרים אותו לפני יצירת hasher חדש.
-            hashInput?.close();
-            digestSink = _ChunkedDigestSink();
-            hashInput = sha256.startChunkedConversion(digestSink);
+          final headers = <String, String>{
+            'Accept': 'application/octet-stream'
+          };
+          if (roundOffset > 0) {
+            headers['Range'] = 'bytes=$roundOffset-';
+            if (validator != null) headers['If-Range'] = validator;
           }
-          final outcome = await _consumeBody(
-            response: response,
-            file: file,
-            resumeOffset: 0,
-            // גם כשאין גודל מה-manifest, Content-Length הוא חוזה אורך של גוף
-            // ה-200: הוא משמש כחסם כתיבה ולא רק כחיווי התקדמות.
-            expectedSize: expectedSize ?? responseLength,
-            overallTotal: expectedSize ?? responseLength,
-            hashInput: hashInput,
-            onProgress: onProgress,
-            isCancelled: isCancelled,
-          );
-          downloaded = outcome.downloaded;
-          hashInput?.close();
-          if (responseLength != null && downloaded != responseLength) {
-            _deleteQuietly(file.path);
-            if (sidecarPath != null) _deleteQuietly(sidecarPath);
-            throw PatchDownloadException(
-              'גוף ההורדה נקטע: Content-Length הצהיר $responseLength בייטים, '
-              'אך התקבלו $downloaded',
-            );
-          }
-          _throwIfCancelled(isCancelled);
-          return (downloaded: downloaded, digest: digestSink?.value);
-        }
+          final response = await _sendWithManualRedirects(url, headers);
 
-        if (response.statusCode == 416) {
-          // 416 אינו הוכחה לשלמות: ייתכן שהחלקי המקומי גדול מהנכס המרוחק.
-          // מקבלים כשלם רק אם ה-total ב-Content-Range תואם ל-offset (ולצפוי).
-          final total =
-              _parseUnsatisfiedRangeTotal(response.headers['content-range']);
-          await _abandonBody(response);
-          // 416 שסותר total שכבר דווח ב-206 קודם ('/40' ואז '*/21') אינו שלמות.
-          final complete = roundOffset > 0 &&
-              file.existsSync() &&
-              file.lengthSync() == roundOffset &&
-              total != null &&
-              total == roundOffset &&
-              (sessionTotal == null || total == sessionTotal) &&
-              (expectedSize == null || total == expectedSize);
-          if (complete) {
-            hashInput?.close();
-            _throwIfCancelled(isCancelled);
-            return (downloaded: roundOffset, digest: digestSink?.value);
-          }
-          hashInput?.close();
-          _throwIfCancelled(isCancelled);
-          _deleteQuietly(file.path);
-          restart = true;
-          break;
-        }
-
-        if (response.statusCode != 206) {
-          await _abandonBody(response);
-          hashInput?.close();
-          throw PatchDownloadException(
-            'שגיאה בהורדה (${response.statusCode}): $url',
-          );
-        }
-
-        // עקביות ה-validator לאורך סבבי 206. סבב ראשון (validator ריק) קובע את
-        // ה-validator; סבב עם ETag ששונה מהמאומץ = ייצוג שהתחלף באמצע → restart.
-        // סבב בלי ETag כש-validator קיים: If-Range כבר נשלח, אז 206 מוכיח התאמה.
-        final roundEtag = _strongEtag(response.headers['etag']);
-        if (validator == null) {
-          if (roundEtag != null) {
-            validator = roundEtag;
+          if (response.statusCode == 200) {
+            // השרת התעלם מ-Range — גוף מלא מאפס.
             try {
-              persistValidator(roundEtag);
+              // הבייטים הישנים נמחקים לפני שמירת ה-validator החדש (frankenfile).
+              if (file.existsSync()) {
+                _deleteRequired(
+                  file.path,
+                  messages.deletePartialFromPreviousRepresentationFailed,
+                );
+              }
+              validator = _strongEtag(response.headers['etag']);
+              persistValidator(validator);
+              onExistingBytes?.call(0);
             } catch (_) {
-              // כשל דיסק אחרי שהתגובה נפתחה — משחררים את החיבור לפני ההפצה.
               await _abandonBody(response);
               rethrow;
             }
+            final responseLength = response.contentLength;
+            if (expectedSize != null &&
+                responseLength != null &&
+                responseLength != expectedSize) {
+              hashInput?.close();
+              await _abandonBody(response);
+              _deleteQuietly(file.path);
+              if (sidecarPath != null) _deleteQuietly(sidecarPath);
+              throw PatchDownloadException(
+                messages.contentLengthMismatch(responseLength, expectedSize),
+              );
+            }
+            if (computeHash) {
+              hashInput?.dispose();
+              digestSink = Sha256DigestCollector();
+              hashInput = FastSha256.start(digestSink);
+            }
+            final outcome = await _consumeBody(
+              response: response,
+              file: file,
+              resumeOffset: 0,
+              // Content-Length הוא חוזה האורך של גוף ה-200, גם בלי גודל צפוי.
+              expectedSize: expectedSize ?? responseLength,
+              overallTotal: expectedSize ?? responseLength,
+              hashInput: hashInput,
+              onProgress: onProgress,
+              isCancelled: isCancelled,
+            );
+            downloaded = outcome.downloaded;
+            hashInput?.close();
+            if (responseLength != null && downloaded != responseLength) {
+              _deleteQuietly(file.path);
+              if (sidecarPath != null) _deleteQuietly(sidecarPath);
+              throw PatchDownloadException(
+                messages.truncatedBody(responseLength, downloaded),
+              );
+            }
+            _throwIfCancelled(isCancelled);
+            return (downloaded: downloaded, digest: digestSink?.value);
           }
-        } else if (roundEtag != null && roundEtag != validator) {
-          await _abandonBody(response);
-          hashInput?.close();
-          _throwIfCancelled(isCancelled);
-          _deleteQuietly(file.path);
-          restart = true;
-          break;
-        }
 
-        final range = _parseContentRange(response.headers['content-range']);
+          if (response.statusCode == 416) {
+            // 416 מתקבל כשלמות רק כשה-total תואם ל-offset (ולצפוי).
+            final total =
+                _parseUnsatisfiedRangeTotal(response.headers['content-range']);
+            await _abandonBody(response);
+            final complete = roundOffset > 0 &&
+                file.existsSync() &&
+                file.lengthSync() == roundOffset &&
+                total != null &&
+                total == roundOffset &&
+                (sessionTotal == null || total == sessionTotal) &&
+                (expectedSize == null || total == expectedSize);
+            if (complete) {
+              // ה-digest המוחזר הוא של כל הקובץ — כאן התחילית חייבת להיגבב.
+              if (computeHash && !prefixHashed && roundOffset > 0) {
+                prefixHashed = true;
+                await _hashPrefix(file, roundOffset, hashInput!, isCancelled,
+                    onVerifyProgress);
+              }
+              hashInput?.close();
+              _throwIfCancelled(isCancelled);
+              return (downloaded: roundOffset, digest: digestSink?.value);
+            }
+            hashInput?.close();
+            _throwIfCancelled(isCancelled);
+            _deleteQuietly(file.path);
+            restart = true;
+            break;
+          }
 
-        // ה-total חייב להישאר עקבי לאורך סבבי-ההמשך. שרת שמשנה אותו באמצע
-        // (למשל '/40' ואז '/31') אינו אמין → מוחקים ומתחילים מאפס.
-        if (range?.total != null) {
-          sessionTotal ??= range!.total;
-          if (range!.total != sessionTotal) {
+          if (response.statusCode != 206) {
+            await _abandonBody(response);
+            hashInput?.close();
+            throw PatchDownloadException(
+              messages.downloadHttpError(response.statusCode, url),
+            );
+          }
+
+          // סבב ראשון קובע את ה-validator; ETag שהתחלף באמצע → restart.
+          final roundEtag = _strongEtag(response.headers['etag']);
+          if (validator == null) {
+            if (roundEtag != null) {
+              validator = roundEtag;
+              try {
+                persistValidator(roundEtag);
+              } catch (_) {
+                await _abandonBody(response);
+                rethrow;
+              }
+            }
+          } else if (roundEtag != null && roundEtag != validator) {
             await _abandonBody(response);
             hashInput?.close();
             _throwIfCancelled(isCancelled);
@@ -672,105 +701,165 @@ class PatchDownloader {
             restart = true;
             break;
           }
-        }
 
-        final validRange = range != null &&
-            range.start == roundOffset &&
-            range.end >= range.start &&
-            (range.total == null || range.end < range.total!) &&
-            (expectedSize == null || range.total == expectedSize) &&
-            (response.contentLength == null ||
-                response.contentLength == range.end - range.start + 1);
-        if (!validRange) {
-          await _abandonBody(response);
-          hashInput?.close();
-          _throwIfCancelled(isCancelled);
-          restart = true;
-          break;
-        }
+          final range = _parseContentRange(response.headers['content-range']);
 
-        final expectedRoundBytes = range.end - range.start + 1;
-        final outcome = await _consumeBody(
-          response: response,
-          file: file,
-          resumeOffset: roundOffset,
-          expectedSize: expectedSize,
-          // מד ההתקדמות חייב לשקף את הגודל הכולל, לא את גודל הסבב הנוכחי, אחרת
-          // הורדה רב-סבבית הייתה מדווחת 100% מוקדם. עדיפות: expectedSize→total.
-          overallTotal: expectedSize ?? sessionTotal,
-          // חסם כתיבה פר-סבב: שרת שחורג מהטווח שהצהיר נעצר מיד, לא אחרי GB.
-          maxRoundBytes: expectedRoundBytes,
-          hashInput: hashInput,
-          onProgress: onProgress,
-          isCancelled: isCancelled,
-        );
-        downloaded = outcome.downloaded;
+          if (range?.total != null) {
+            sessionTotal ??= range!.total;
+            if (range!.total != sessionTotal) {
+              await _abandonBody(response);
+              hashInput?.close();
+              _throwIfCancelled(isCancelled);
+              _deleteQuietly(file.path);
+              restart = true;
+              break;
+            }
+          }
 
-        // אורך הגוף חייב להיות בדיוק end-start+1 — גם כש-Content-Length חסר.
-        // חוסר התאמה = קטע לא אמין → מוחקים ומתחילים מאפס.
-        if (outcome.overrun || downloaded - roundOffset != expectedRoundBytes) {
-          hashInput?.close();
-          _throwIfCancelled(isCancelled);
-          _deleteQuietly(file.path);
-          restart = true;
-          break;
-        }
+          final validRange = range != null &&
+              range.start == roundOffset &&
+              range.end >= range.start &&
+              (range.total == null || range.end < range.total!) &&
+              (expectedSize == null || range.total == expectedSize) &&
+              (response.contentLength == null ||
+                  response.contentLength == range.end - range.start + 1);
+          if (!validRange) {
+            await _abandonBody(response);
+            hashInput?.close();
+            _throwIfCancelled(isCancelled);
+            restart = true;
+            break;
+          }
 
-        // ללא total ידוע (206 עם `*` ו-expectedSize חסר) אי אפשר לאשר שלמות —
-        // 206 בודד אינו מוכיח שהנכס הושלם; מתחילים מאפס (GET מלא → 200).
-        final knownTotal = range.total;
-        if (knownTotal == null) {
-          hashInput?.close();
-          _throwIfCancelled(isCancelled);
-          _deleteQuietly(file.path);
-          restart = true;
-          break;
-        }
-        if (downloaded >= knownTotal) {
-          hashInput?.close();
-          _throwIfCancelled(isCancelled);
-          return (downloaded: downloaded, digest: digestSink?.value);
-        }
-        // 206 קצר חוקי — סבב המשך. חייב להתקדם, אחרת נעצור כדי לא להיתקע.
-        if (downloaded <= roundOffset) {
-          hashInput?.close();
-          throw PatchDownloadException('חידוש ההורדה לא התקדם: $url');
-        }
-        roundOffset = downloaded;
-      }
+          if (computeHash && !prefixHashed && currentOffset > 0) {
+            prefixHashed = true;
+            try {
+              await _hashPrefix(file, currentOffset, hashInput!, isCancelled,
+                  onVerifyProgress);
+            } catch (_) {
+              await _abandonBody(response);
+              hashInput?.close();
+              rethrow;
+            }
+          }
 
-      if (restart) {
-        // התחלה מאפס = משיכת ייצוג טרי; ה-validator ייקבע מחדש מהתגובה הבאה.
-        // הבייטים הישנים נמחקים כאן (לכל מסלולי ה-restart, כולל invalidRange) —
-        // אחרת persistValidator של הניסיון הבא היה כובל בייטים ישנים ל-ETag חדש.
-        if (file.existsSync()) {
-          _deleteRequired(
-            file.path,
-            'מחיקת קובץ חלקי לפני ניסיון חוזר נכשלה — לא ניתן להמשיך בהורדה',
+          final expectedRoundBytes = range.end - range.start + 1;
+          final outcome = await _consumeBody(
+            response: response,
+            file: file,
+            resumeOffset: roundOffset,
+            expectedSize: expectedSize,
+            // המד משקף את הגודל הכולל, לא את גודל הסבב הנוכחי.
+            overallTotal: expectedSize ?? sessionTotal,
+            maxRoundBytes: expectedRoundBytes,
+            hashInput: hashInput,
+            onProgress: onProgress,
+            isCancelled: isCancelled,
           );
+          downloaded = outcome.downloaded;
+
+          // אורך הגוף חייב להיות בדיוק end-start+1 — גם כש-Content-Length חסר.
+          if (outcome.overrun ||
+              downloaded - roundOffset != expectedRoundBytes) {
+            hashInput?.close();
+            _throwIfCancelled(isCancelled);
+            _deleteQuietly(file.path);
+            restart = true;
+            break;
+          }
+
+          // בלי total ידוע 206 בודד אינו מוכיח שלמות; מתחילים מאפס.
+          final knownTotal = range.total;
+          if (knownTotal == null) {
+            hashInput?.close();
+            _throwIfCancelled(isCancelled);
+            _deleteQuietly(file.path);
+            restart = true;
+            break;
+          }
+          if (downloaded >= knownTotal) {
+            hashInput?.close();
+            _throwIfCancelled(isCancelled);
+            return (downloaded: downloaded, digest: digestSink?.value);
+          }
+          if (downloaded <= roundOffset) {
+            hashInput?.close();
+            throw PatchDownloadException(messages.resumeMadeNoProgress(url));
+          }
+          roundOffset = downloaded;
         }
-        currentOffset = 0;
-        validator = null;
-        continue;
+
+        if (restart) {
+          // הבייטים הישנים נמחקים לפני שהניסיון הבא כובל validator חדש.
+          if (file.existsSync()) {
+            _deleteRequired(
+              file.path,
+              messages.deletePartialBeforeRetryFailed,
+            );
+          }
+          currentOffset = 0;
+          onExistingBytes?.call(0);
+          validator = null;
+          continue;
+        }
+      } finally {
+        hashInput?.dispose();
       }
     }
-    throw PatchDownloadException('חידוש ההורדה נכשל לאחר ניסיון חוזר: $url');
+    throw PatchDownloadException(messages.resumeFailedAfterRetry(url));
   }
 
-  /// נוטש מיד את גוף התגובה במסלולי שגיאה של הנכס (1.5GB): מבטל את המנוי לזרם
-  /// בלי לרוקן אותו, אחרת שרת שממשיך לשדר היה מזרים את כל הנכס רק כדי לדווח כשל
-  /// מקומי. אובדן שימוש-חוזר בחיבור נסבל במסלול שגיאה.
+  /// מזרים ל-[hashInput] את [length] הבתים הראשונים של [file].
+  Future<void> _hashPrefix(
+    File file,
+    int length,
+    FastSha256Sink hashInput,
+    bool Function()? isCancelled,
+    void Function(int verified, int total)? onVerifyProgress,
+  ) async {
+    var hashed = 0;
+    await for (final chunk in file.openRead(0, length)) {
+      _throwIfCancelled(isCancelled);
+      hashInput.add(chunk);
+      hashed += chunk.length;
+      onVerifyProgress?.call(hashed, length);
+    }
+  }
+
+  /// נוטש את גוף התגובה בלי לרוקן אותו, כדי ששרת שממשיך לשדר לא יזרים את
+  /// כל הנכס רק כדי לדווח כשל מקומי.
   Future<void> _abandonBody(http.StreamedResponse response) async {
     try {
       await response.stream.listen((_) {}).cancel();
     } catch (_) {}
   }
 
+  /// בקשת GET שנזנחת באמת ב-timeout של החיבור, ולא רק נשכחת.
+  Future<http.StreamedResponse> _sendGet(
+    Uri uri,
+    Map<String, String> headers, {
+    bool followRedirects = true,
+  }) async {
+    final abort = Completer<void>();
+    final request = http.AbortableRequest(
+      'GET',
+      uri,
+      abortTrigger: abort.future,
+    )
+      ..followRedirects = followRedirects
+      ..headers.addAll(headers);
+    final pending = _httpClient.send(request);
+    try {
+      return await pending.timeout(connectTimeout);
+    } on TimeoutException {
+      abort.complete();
+      unawaited(pending.then(_abandonBody, onError: (Object _) {}));
+      rethrow;
+    }
+  }
+
   /// כותב את גוף התגובה לקובץ מ-[resumeOffset] ומחזיר את הגודל הכולל שנכתב,
-  /// עם דגל `overrun` כשהגוף חרג מ-[maxRoundBytes] (נעצר לפני הכתיבה החורגת).
-  /// ה-hasher (אם קיים) כבר הוזן בתחילית ע"י [_streamToFile]; כאן מוסיפים רק
-  /// את בייטי הזרם ולא סוגרים אותו — הסגירה נעשית ב-[_streamToFile] אחרי
-  /// שכל סבבי-ההמשך הסתיימו.
+  /// עם `overrun` כשהגוף חרג מ-[maxRoundBytes]. אינו סוגר את [hashInput].
   Future<({int downloaded, bool overrun})> _consumeBody({
     required http.StreamedResponse response,
     required File file,
@@ -783,18 +872,16 @@ class PatchDownloader {
     bool Function()? isCancelled,
   }) async {
     final append = resumeOffset > 0;
+    final messages = LibraryUpdaterMessages.current;
 
     final sink =
         file.openWrite(mode: append ? FileMode.append : FileMode.write);
-    // גודל כולל למד ההתקדמות: המחשב ([overallTotal]) גובר על אומדן-הסבב, שאינו
-    // נכון בהורדה רב-סבבית. נופלים לאומדן-הסבב רק כשאין total מחושב.
     final total = overallTotal ??
         (response.contentLength == null
             ? null
             : resumeOffset + response.contentLength!);
     var downloaded = resumeOffset;
-    // סגירה שקטה — רק במסלול שגיאה/ביטול, כדי לא להסתיר את החריגה המקורית
-    // ולשחרר את ה-handle (ב-Windows handle פתוח חוסם מחיקה/resume).
+    // ב-Windows handle פתוח חוסם מחיקה/resume — נסגר גם במסלול שגיאה.
     var closed = false;
     Future<void> closeQuietly() async {
       if (closed) return;
@@ -805,19 +892,19 @@ class PatchDownloader {
     }
 
     var overrun = false;
+    var buffered = 0;
     try {
       await for (final chunk in response.stream.timeout(stallTimeout)) {
         _throwIfCancelled(isCancelled);
-        // חריגה מהגודל הצפוי = נתונים שגויים — מוחקים וזורקים.
         if (expectedSize != null && downloaded + chunk.length > expectedSize) {
           await closeQuietly();
           _deleteQuietly(file.path);
           _deleteQuietly(resumeSidecarPath(file.path));
           throw PatchDownloadException(
-              'ההורדה חורגת מהגודל הצפוי ($expectedSize בייטים)');
+            messages.downloadExceedsExpectedSize(expectedSize),
+          );
         }
-        // גוף שחורג מהטווח שהוצהר ב-Content-Range נעצר לפני הכתיבה — בלי זה
-        // שרת עוין/תקול היה כותב בלי גבול; ה-break מבטל את המנוי לזרם.
+        // גוף שחורג מהטווח שהוצהר נעצר לפני הכתיבה.
         if (maxRoundBytes != null &&
             (downloaded - resumeOffset) + chunk.length > maxRoundBytes) {
           overrun = true;
@@ -826,35 +913,34 @@ class PatchDownloader {
         sink.add(chunk);
         hashInput?.add(chunk);
         downloaded += chunk.length;
+        buffered += chunk.length;
         onProgress?.call(downloaded, total);
+        if (buffered >= _writeBufferBytes) {
+          buffered = 0;
+          await sink.flush();
+        }
       }
-      // ביטול שהתרחש ב-onProgress של הצ'אנק האחרון — הלולאה מסתיימת בלי בדיקה,
-      // ולכן בודקים כאן כדי לא לחזור בהצלחה שקטה אחרי ביטול.
+      // ביטול שהתרחש ב-onProgress של הצ'אנק האחרון.
       _throwIfCancelled(isCancelled);
     } catch (_) {
       await closeQuietly();
       rethrow;
     }
-    // מסלול הצלחה: flush/close חייבים להפיץ שגיאה (דיסק מלא / כשל IO). כישלון
-    // כאן משאיר קובץ שאורכו מלא אך תוכנו פגום, שהיה עובר alreadyComplete בריצה
-    // הבאה — לכן מוחקים קובץ+צד לפני הזריקה.
+    // כשל flush/close משאיר קובץ באורך מלא ובתוכן פגום — נמחק לפני הזריקה.
     try {
       await sink.flush();
       await sink.close();
       closed = true;
     } catch (error) {
-      // flush שנכשל משאיר sink פתוח — חובה לסגור לפני המחיקה, אחרת ב-Windows
-      // המחיקה נכשלת בשקט והקובץ הפגום עובר alreadyComplete בריצה הבאה.
       await closeQuietly();
       _deleteQuietly(file.path);
       _deleteQuietly(resumeSidecarPath(file.path));
-      throw PatchDownloadException('שמירת הקובץ שהורד לדיסק נכשלה: $error');
+      throw PatchDownloadException(messages.saveDownloadedFileFailed('$error'));
     }
     return (downloaded: downloaded, overrun: overrun);
   }
 
-  /// עוקב אחר הפניות (3xx) ידנית — `package:http` משמיט את כל הכותרות (כולל
-  /// `Range`) כשהוא עוקב אוטומטית, וכתובות GitHub Releases מפנות ל-objects.
+  /// עוקב אחר הפניות ידנית — `package:http` משמיט את `Range` כשהוא עוקב לבד.
   Future<http.StreamedResponse> _sendWithManualRedirects(
     String url,
     Map<String, String> headers,
@@ -862,21 +948,19 @@ class PatchDownloader {
     var uri = Uri.parse(url);
     const maxHops = 6;
     for (var hop = 0; hop <= maxHops; hop++) {
-      final request = http.Request('GET', uri)..followRedirects = false;
-      request.headers.addAll(headers);
-      final response = await _httpClient.send(request).timeout(connectTimeout);
+      final response = await _sendGet(uri, headers, followRedirects: false);
       if (_isRedirect(response.statusCode)) {
         final location = response.headers['location'];
-        if (location == null) return response; // ללא Location → יטופל כשגיאה
-        // נטישה מיידית ולא drain: גוף redirect גדול/זורם היה מעכב את ההפניה
-        // בלי גבול ומבזבז רוחב פס.
+        if (location == null) return response;
         await _abandonBody(response);
-        uri = uri.resolve(location); // resolve תומך ב-Location יחסי
+        uri = uri.resolve(location);
         continue;
       }
       return response;
     }
-    throw PatchDownloadException('יותר מדי הפניות (redirects): $url');
+    throw PatchDownloadException(
+      LibraryUpdaterMessages.current.tooManyRedirects(url),
+    );
   }
 
   bool _isRedirect(int status) =>
@@ -886,8 +970,7 @@ class PatchDownloader {
       status == 307 ||
       status == 308;
 
-  /// מפענח כותרת `Content-Range: bytes start-end/total` של תגובת 206.
-  /// `total` עשוי להיות `*` לפי RFC 9110, ואז מוחזר null.
+  /// מפענח `Content-Range: bytes start-end/total` של 206; total `*` ⇒ null.
   ({int start, int end, int? total})? _parseContentRange(String? contentRange) {
     if (contentRange == null) return null;
     final match = RegExp(
@@ -905,29 +988,24 @@ class PatchDownloader {
     return (start: start, end: end, total: total);
   }
 
-  /// מפענח את ה-total מכותרת `Content-Range: bytes */N` של תגובת 416 (RFC 9110,
-  /// case-insensitive). מחזיר null אם הכותרת חסרה או שאינה בפורמט הצפוי.
+  /// מפענח את ה-total מ-`Content-Range: bytes */N` של 416.
   int? _parseUnsatisfiedRangeTotal(String? contentRange) {
     if (contentRange == null) return null;
-    // מעוגן (^...$) בדיוק כמו פענוח ה-206: כותרת עם זבל נלווה אינה הוכחת שלמות.
     final match = RegExp(r'^\s*bytes\s+\*/(\d+)\s*$', caseSensitive: false)
         .firstMatch(contentRange.trim());
     if (match == null) return null;
     return int.tryParse(match.group(1)!);
   }
 
-  /// חלקי ניתן-לחידוש רק אם קובץ הצד מחזיק validator חזק (אפשר לשלוח If-Range),
-  /// או שהקובץ כבר שלם ([expectedSize] מולא). חלקי בלי validator שאינו שלם
-  /// יימחק ממילא ע"י כלל ה-entry בריצה הבאה, ולכן אין ערך לשמור אותו.
+  /// חלקי ניתן-לחידוש רק עם validator חזק בקובץ הצד, או כשהוא כבר שלם.
   bool _partialIsResumable(
     String destPath,
     String sidecarPath,
     int? expectedSize,
     String? resumeToken,
   ) {
-    // בלי טוקן, או עם sidecar שאינו תואם לו, כלל ה-entry ימחק את הקובץ ממילא.
     if (resumeToken == null) return false;
-    // רץ מתוך catch — כשל מערכת-קבצים כאן אסור שיסתיר את החריגה המקורית.
+    // רץ מתוך catch — כשל כאן אסור שיסתיר את החריגה המקורית.
     try {
       final file = File(destPath);
       if (!file.existsSync()) return false;
@@ -942,34 +1020,126 @@ class PatchDownloader {
     }
   }
 
-  /// קורא את קובץ הצד: שורה ראשונה = טוקן, שורה שנייה (אופציונלית) = ה-ETag
-  /// החזק. מחזיר null אם חסר או שגיאה בקריאה.
-  ({String token, String? etag})? _readSidecar(String sidecarPath) {
+  /// קובץ הצד: טוקן, ETag חזק (אופציונלי), סימון אימות (אופציונלי).
+  ({String token, String? etag, String? verified})? _readSidecar(
+      String sidecarPath) {
     try {
       final f = File(sidecarPath);
       if (!f.existsSync()) return null;
       final lines = f.readAsStringSync().split('\n');
       final etag = lines.length > 1 && lines[1].isNotEmpty ? lines[1] : null;
-      return (token: lines.first, etag: etag);
+      final verified =
+          lines.length > 2 && lines[2].isNotEmpty ? lines[2] : null;
+      return (token: lines.first, etag: etag, verified: verified);
     } catch (_) {
       return null;
     }
   }
 
-  /// כותב את הטוקן (וה-ETag אם קיים) לקובץ הצד: טוקן בשורה הראשונה, ETag בשנייה.
-  void _writeSidecar(String sidecarPath, String token, String? etag) {
+  /// בלי ETag ובלי סימון נכתב הטוקן לבדו — וכך גם נמחק סימון של תוכן משתנה.
+  void _writeSidecar(String sidecarPath, String token, String? etag,
+      {String? verified}) {
     try {
-      final content = etag == null ? token : '$token\n$etag';
-      File(sidecarPath).writeAsStringSync(content, flush: true);
+      final lines = <String>[
+        token,
+        if (etag != null || verified != null) etag ?? '',
+        if (verified != null) verified,
+      ];
+      File(sidecarPath).writeAsStringSync(lines.join('\n'), flush: true);
     } catch (error) {
       throw PatchDownloadException(
-        'כתיבת קובץ הזהות להמשך ההורדה נכשלה ($sidecarPath): $error',
+        LibraryUpdaterMessages.current
+            .writeResumeSidecarFailed(sidecarPath, '$error'),
       );
     }
   }
 
-  /// מחזיר את ה-ETag רק אם הוא חזק (ללא קידומת `W/`) — ETag חלש אינו שמיש עם
-  /// If-Range, ולכן נחשב כאילו אין validator. גרשיים מיותרים/רווחים מנוקים.
+  /// `sha256|גודל|זמן-שינוי` כפי שהיו ברגע האימות; null כשאין stat קריא.
+  String? _verifiedMarkFor(File file, String digest) {
+    try {
+      final stat = file.statSync();
+      return '$digest|${stat.size}|${stat.modified.microsecondsSinceEpoch}';
+    } catch (_) {
+      return null;
+    }
+  }
+
+  bool _matchesVerifiedMark(String? mark, File file, String expectedSha256) =>
+      mark != null && mark == _verifiedMarkFor(file, expectedSha256);
+
+  Future<bool> _completeFileVerified(
+    String destPath,
+    String sidecarPath,
+    String? resumeToken,
+    String? expectedSha256,
+    String? storedVerified,
+    bool Function()? isCancelled,
+    void Function(int verified, int total)? onVerifyProgress,
+  ) async {
+    if (expectedSha256 == null) return true;
+    final expected = expectedSha256.toLowerCase();
+    final file = File(destPath);
+    if (_matchesVerifiedMark(storedVerified, file, expected)) return true;
+    final actual =
+        await _hashFileSha256InIsolate(destPath, isCancelled, onVerifyProgress);
+    if (actual != expected) return false;
+    if (resumeToken != null) {
+      await _markVerified(sidecarPath, resumeToken, expected, file);
+    }
+    return true;
+  }
+
+  /// flush לפני הסימון, כדי שזמן-השינוי שנרשם יהיה הסופי.
+  Future<void> _markVerified(
+      String sidecarPath, String token, String digest, File file) async {
+    try {
+      final handle = await file.open(mode: FileMode.append);
+      try {
+        await handle.flush();
+      } finally {
+        await handle.close();
+      }
+    } catch (_) {
+      return;
+    }
+    final mark = _verifiedMarkFor(file, digest);
+    if (mark == null) return;
+    try {
+      _writeSidecar(sidecarPath, token, _readSidecar(sidecarPath)?.etag,
+          verified: mark);
+    } catch (_) {}
+  }
+
+  /// נכס שפורסם מחדש בזהות חדשה אך בתוכן זהה נקשר לטוקן החדש במקום להימחק.
+  /// מחזיר את סימון האימות, או null אם התוכן אינו זהה.
+  Future<String?> _adoptSameContent(
+    File file,
+    String sidecarPath,
+    String? storedVerified,
+    String resumeToken,
+    int? expectedSize,
+    String? expectedSha256,
+    bool Function()? isCancelled,
+    void Function(int verified, int total)? onVerifyProgress,
+  ) async {
+    if (expectedSha256 == null ||
+        expectedSize == null ||
+        file.lengthSync() != expectedSize) {
+      return null;
+    }
+    final expected = expectedSha256.toLowerCase();
+    if (!_matchesVerifiedMark(storedVerified, file, expected)) {
+      final actual = await _hashFileSha256InIsolate(
+          file.path, isCancelled, onVerifyProgress);
+      if (actual != expected) return null;
+    }
+    final mark = _verifiedMarkFor(file, expected);
+    if (mark == null) return null;
+    _writeSidecar(sidecarPath, resumeToken, null, verified: mark);
+    return mark;
+  }
+
+  /// ETag חזק בלבד (ללא `W/`) — ETag חלש אינו שמיש עם If-Range.
   String? _strongEtag(String? raw) {
     if (raw == null) return null;
     final trimmed = raw.trim();
@@ -977,15 +1147,22 @@ class PatchDownloader {
     return trimmed;
   }
 
-  /// מוריד לזיכרון ומחשב את ה-sha256 תוך כדי הזרימה — צ'אנק-צ'אנק, כדי שלא
-  /// יורץ hash על מערך של מאות MB בפעימה אחת על ה-isolate הראשי.
+  /// מוריד לזיכרון ומחשב sha256 בזרימה; patch קטן מתחיל מחדש אחרי קטיעה.
   Future<({Uint8List bytes, Digest digest})> _download(
     String url, {
     required int maxBytes,
     void Function(int downloaded, int? total)? onProgress,
     bool Function()? isCancelled,
-  }) {
-    // ה-patch קטן — קטיעת רשת פשוט מתחילה אותו מחדש (אין מה להמשיך).
+  }) async {
+    if (!isRemoteUrl(url)) {
+      final bytes = await _readLocalFile(
+        url,
+        maxBytes: maxBytes,
+        onProgress: onProgress,
+        isCancelled: isCancelled,
+      );
+      return (bytes: bytes, digest: FastSha256.convert(bytes));
+    }
     return _withNetworkRetry(
       () => _downloadOnce(
         url,
@@ -1003,33 +1180,39 @@ class PatchDownloader {
     void Function(int downloaded, int? total)? onProgress,
     bool Function()? isCancelled,
   }) async {
-    final request = http.Request('GET', Uri.parse(url))
-      ..headers['Accept'] = 'application/octet-stream';
-    final response = await _httpClient.send(request).timeout(connectTimeout);
+    final messages = LibraryUpdaterMessages.current;
+    final response = await _sendGet(
+      Uri.parse(url),
+      const {'Accept': 'application/octet-stream'},
+    );
     if (response.statusCode != 200) {
       await _abandonBody(response);
       throw PatchDownloadException(
-        'שגיאה בהורדה (${response.statusCode}): $url',
+        messages.downloadHttpError(response.statusCode, url),
       );
     }
     final total = response.contentLength;
     final builder = BytesBuilder(copy: false);
-    final digestSink = _ChunkedDigestSink();
-    final hashInput = sha256.startChunkedConversion(digestSink);
-    var downloaded = 0;
-    await for (final chunk in response.stream.timeout(stallTimeout)) {
-      _throwIfCancelled(isCancelled);
-      // בדיקה לפני הצבירה — לא צוברים לזיכרון בייטים שחורגים מהגודל הצפוי.
-      if (downloaded + chunk.length > maxBytes) {
-        throw PatchDownloadException(
-            'ההורדה חורגת מהגודל הצפוי ($maxBytes בייטים)');
+    final digestSink = Sha256DigestCollector();
+    final hashInput = FastSha256.start(digestSink);
+    try {
+      var downloaded = 0;
+      await for (final chunk in response.stream.timeout(stallTimeout)) {
+        _throwIfCancelled(isCancelled);
+        if (downloaded + chunk.length > maxBytes) {
+          throw PatchDownloadException(
+            messages.downloadExceedsExpectedSize(maxBytes),
+          );
+        }
+        builder.add(chunk);
+        hashInput.add(chunk);
+        downloaded += chunk.length;
+        onProgress?.call(downloaded, total);
       }
-      builder.add(chunk);
-      hashInput.add(chunk);
-      downloaded += chunk.length;
-      onProgress?.call(downloaded, total);
+      hashInput.close();
+    } finally {
+      hashInput.dispose();
     }
-    hashInput.close();
     return (bytes: builder.takeBytes(), digest: digestSink.value);
   }
 
@@ -1040,7 +1223,9 @@ class PatchDownloader {
   }) {
     if (actual != expected) {
       throw PatchDownloadException(
-          '$label אינו תואם: צפוי $expected, התקבל $actual');
+        LibraryUpdaterMessages.current
+            .checksumMismatchDetailed(label, '$expected', '$actual'),
+      );
     }
   }
 
@@ -1050,20 +1235,24 @@ class PatchDownloader {
     required String label,
   }) {
     if (actual.toString() != expected.toLowerCase()) {
-      throw PatchDownloadException('$label אינו תואם');
+      throw PatchDownloadException(
+        LibraryUpdaterMessages.current.checksumMismatch(label),
+      );
     }
   }
 
-  /// מאמת sha256 של קובץ שעל הדיסק; החישוב רץ ב-isolate נפרד (בזרימה) כדי לא
-  /// לחסום את ה-isolate הראשי, ומקבל נתיב בלבד — לא מערך בייטים.
+  /// מאמת sha256 של קובץ שעל הדיסק; החישוב רץ ב-isolate נפרד.
   Future<void> _verifyFileHash({
     required String path,
     required String expected,
     required String label,
+    void Function(int bytesDone, int bytesTotal)? onVerifyProgress,
   }) async {
-    final actual = await _hashFileSha256InIsolate(path);
+    final actual = await _hashFileSha256InIsolate(path, null, onVerifyProgress);
     if (actual != expected.toLowerCase()) {
-      throw PatchDownloadException('$label אינו תואם');
+      throw PatchDownloadException(
+        LibraryUpdaterMessages.current.checksumMismatch(label),
+      );
     }
   }
 
@@ -1073,9 +1262,8 @@ class PatchDownloader {
     }
   }
 
-  /// מריץ את [run] ומנסה שוב על כשל רשת חולף לפי [networkRetryDelays]. אחרי
-  /// הניסיון האחרון הכשל נזרק כ-[PatchNetworkException]; שאר החריגות מופצות כפי
-  /// שהן. [onRetry] רץ לפני כל ניסיון חוזר (לחישוב נקודת ההמשך).
+  /// מריץ את [run] ומנסה שוב על כשל רשת חולף לפי [networkRetryDelays]; אחרי
+  /// הניסיון האחרון נזרק [PatchNetworkException]. [onRetry] רץ לפני כל ניסיון.
   Future<T> _withNetworkRetry<T>(
     Future<T> Function() run, {
     bool Function()? isCancelled,
@@ -1129,36 +1317,137 @@ class PatchDownloader {
     }
   }
 
+  Future<Uint8List> _readLocalFile(
+    String path, {
+    required int maxBytes,
+    void Function(int downloaded, int? total)? onProgress,
+    bool Function()? isCancelled,
+  }) async {
+    final messages = LibraryUpdaterMessages.current;
+    final file = File(path);
+    if (!await file.exists()) {
+      throw PatchDownloadException(messages.localFileNotFound(path));
+    }
+    _throwIfCancelled(isCancelled);
+    if (await file.length() > maxBytes) {
+      throw PatchDownloadException(messages.localFileTooLarge(maxBytes, path));
+    }
+    final bytes = await file.readAsBytes();
+    if (bytes.length > maxBytes) {
+      throw PatchDownloadException(messages.localFileTooLarge(maxBytes, path));
+    }
+    onProgress?.call(bytes.length, bytes.length);
+    return bytes;
+  }
+
+  /// מעתיק קובץ מנתיב מקומי אל [destPath] בזרימה, עם אימות גודל ו-sha256.
+  /// ללא resume; [destPath] נמחק בכל כשל או ביטול.
+  Future<void> _copyLocalFile({
+    required String url,
+    required String destPath,
+    int? expectedSize,
+    String? expectedSha256,
+    void Function(int downloaded, int? total)? onProgress,
+    bool Function()? isCancelled,
+  }) async {
+    final messages = LibraryUpdaterMessages.current;
+    final source = File(url);
+    if (!await source.exists()) {
+      throw PatchDownloadException(messages.localSourceNotFound(url));
+    }
+    final size = await source.length();
+    if (expectedSize != null && size != expectedSize) {
+      throw PatchDownloadException(
+        messages.localFileSizeMismatch(expectedSize, size, url),
+      );
+    }
+    IOSink? sink;
+    final digestSink = expectedSha256 != null ? Sha256DigestCollector() : null;
+    final input = digestSink != null ? FastSha256.start(digestSink) : null;
+    try {
+      _deleteQuietly(destPath);
+      sink = File(destPath).openWrite();
+      var copied = 0;
+      var buffered = 0;
+      await for (final chunk in source.openRead()) {
+        _throwIfCancelled(isCancelled);
+        sink.add(chunk);
+        input?.add(chunk);
+        copied += chunk.length;
+        buffered += chunk.length;
+        onProgress?.call(copied, size);
+        if (buffered >= _writeBufferBytes) {
+          buffered = 0;
+          await sink.flush();
+        }
+      }
+      await sink.flush();
+      await sink.close();
+      sink = null;
+      input?.close();
+      if (expectedSha256 != null &&
+          digestSink!.value.toString() != expectedSha256.toLowerCase()) {
+        throw PatchDownloadException(messages.localFileHashMismatch(url));
+      }
+    } catch (_) {
+      // ב-Windows handle פתוח חוסם את המחיקה.
+      if (sink != null) {
+        try {
+          await sink.close();
+        } catch (_) {}
+      }
+      _deleteQuietly(destPath);
+      rethrow;
+    } finally {
+      input?.dispose();
+    }
+  }
+
   void dispose() {
     if (_ownsClient) _httpClient.close();
   }
 }
 
-/// sha256 של קובץ ב-isolate נפרד. [isCancelled] אינו עובר בין isolates, ולכן
-/// נבדק כאן כל 100ms ומגיע ל-worker כהודעה; ביטול נזרק כ-[PatchDownloadCancelled].
-Future<String> _hashFileSha256InIsolate(String path,
-    [bool Function()? isCancelled]) async {
-  if (isCancelled == null) return _runHashWorker(path, null);
-  if (isCancelled()) throw const PatchDownloadCancelled();
+/// sha256 של קובץ ב-isolate נפרד. ביטול ([isCancelled] נדגם כל 100ms) והתקדמות
+/// עוברים כהודעות; ביטול נזרק כ-[PatchDownloadCancelled].
+Future<String> _hashFileSha256InIsolate(
+  String path, [
+  bool Function()? isCancelled,
+  void Function(int verified, int total)? onProgress,
+]) async {
+  if (isCancelled == null && onProgress == null) {
+    return _runHashWorker(path, null);
+  }
+  if (isCancelled != null && isCancelled()) {
+    throw const PatchDownloadCancelled();
+  }
   final control = ReceivePort();
   SendPort? workerCancel;
   var cancelled = false;
-  control.listen((port) {
-    workerCancel = port as SendPort;
-    if (cancelled) workerCancel!.send(null);
+  control.listen((message) {
+    if (message is SendPort) {
+      workerCancel = message;
+      if (cancelled) workerCancel!.send(null);
+    } else if (message is List && onProgress != null) {
+      onProgress(message[0] as int, message[1] as int);
+    }
   });
-  final poll = Timer.periodic(const Duration(milliseconds: 100), (_) {
-    if (cancelled || !isCancelled()) return;
-    cancelled = true;
-    workerCancel?.send(null);
-  });
+  final poll = isCancelled == null
+      ? null
+      : Timer.periodic(const Duration(milliseconds: 100), (_) {
+          if (cancelled || !isCancelled()) return;
+          cancelled = true;
+          workerCancel?.send(null);
+        });
   try {
     final digest = await _runHashWorker(path, control.sendPort);
-    // hash קצר יכול להסתיים לפני הדגימה הבאה, או לפני שה-worker קיבל ביטול.
-    if (cancelled || isCancelled()) throw const PatchDownloadCancelled();
+    // hash קצר יכול להסתיים לפני הדגימה הבאה של הביטול.
+    if (cancelled || (isCancelled?.call() ?? false)) {
+      throw const PatchDownloadCancelled();
+    }
     return digest;
   } finally {
-    poll.cancel();
+    poll?.cancel();
     control.close();
   }
 }
@@ -1172,41 +1461,68 @@ Future<String> _runHashWorker(String path, SendPort? control) =>
       cancel.listen((_) => cancelled = true);
       control.send(cancel.sendPort);
       try {
-        return await _hashFileSha256(path, () => cancelled);
+        return await _hashFileSha256(
+          path,
+          () => cancelled,
+          (verified, total) => control.send([verified, total]),
+        );
       } finally {
         cancel.close();
       }
     });
 
-/// מחשב sha256 של קובץ בזרימה (עשוי לעבור 1GB — לא readAsBytes). רץ רק בתוך
-/// worker; מבחוץ קוראים ל-[_hashFileSha256InIsolate].
-Future<String> _hashFileSha256(String path,
-    [bool Function()? isCancelled]) async {
-  final digestSink = _ChunkedDigestSink();
-  final input = sha256.startChunkedConversion(digestSink);
-  await for (final chunk in File(path).openRead()) {
-    if (isCancelled != null && isCancelled()) {
-      throw const PatchDownloadCancelled();
+/// sha256 של קובץ בזרימה; רץ רק בתוך worker. התקדמות מדווחת כל ~4MB.
+Future<String> _hashFileSha256(
+  String path, [
+  bool Function()? isCancelled,
+  void Function(int verified, int total)? onProgress,
+]) async {
+  const reportEvery = 4 << 20;
+  final file = File(path);
+  final total = onProgress == null ? 0 : await file.length();
+  final digestSink = Sha256DigestCollector();
+  final input = FastSha256.start(digestSink);
+  try {
+    var verified = 0;
+    var lastReported = 0;
+    await for (final chunk in file.openRead()) {
+      if (isCancelled != null && isCancelled()) {
+        throw const PatchDownloadCancelled();
+      }
+      input.add(chunk);
+      verified += chunk.length;
+      if (onProgress != null &&
+          (verified - lastReported >= reportEvery || verified == total)) {
+        lastReported = verified;
+        onProgress(verified, total);
+      }
     }
-    input.add(chunk);
+    input.close();
+  } finally {
+    input.dispose();
   }
-  input.close();
   return digestSink.value.toString();
 }
 
 /// top-level כדי שה-closure של `Isolate.run` לא ילכוד את ה-PatchDownloader.
+/// המלל הפעיל עובר ל-isolate, אחרת הודעת כשל הייתה חוזרת בעברית.
 Future<void> _joinPartsInIsolate(List<String> partPaths, String destPath,
-        int expectedSize, String expectedSha256) =>
-    Isolate.run(
-        () => _joinParts(partPaths, destPath, expectedSize, expectedSha256));
+    int expectedSize, String expectedSha256) {
+  final messages = LibraryUpdaterMessages.current;
+  return Isolate.run(() {
+    LibraryUpdaterMessages.current = messages;
+    _joinParts(partPaths, destPath, expectedSize, expectedSha256);
+  });
+}
 
 /// מצרף לקובץ זמני, מוחק כל חלק אחרי צירופו, ומעביר ל-[destPath] רק אחרי
-/// אימות. אינו נעצר בביטול: חיבור שנקטע היה מאבד את החלקים שכבר צורפו.
+/// אימות. אינו נעצר בביטול: חיבור שנקטע היה מאבד חלקים שכבר צורפו.
 void _joinParts(List<String> partPaths, String destPath, int expectedSize,
     String expectedSha256) {
+  final messages = LibraryUpdaterMessages.current;
   final tempPath = '$destPath.joining';
-  final digestSink = _ChunkedDigestSink();
-  final hasher = sha256.startChunkedConversion(digestSink);
+  final digestSink = Sha256DigestCollector();
+  final hasher = FastSha256.start(digestSink);
   var written = 0;
   try {
     final output = File(tempPath).openSync(mode: FileMode.writeOnly);
@@ -1234,15 +1550,18 @@ void _joinParts(List<String> partPaths, String destPath, int expectedSize,
     hasher.close();
     if (written != expectedSize) {
       throw PatchDownloadException(
-          'גודל הארכיון המחובר ($written) אינו תואם לצפוי ($expectedSize)');
+        messages.joinedArchiveSizeMismatch(written, expectedSize),
+      );
     }
     if (digestSink.value.toString() != expectedSha256) {
-      throw const PatchDownloadException('sha256 של הארכיון המחובר אינו תואם');
+      throw PatchDownloadException(messages.joinedArchiveHashMismatch);
     }
     File(tempPath).renameSync(destPath);
   } catch (_) {
     _deleteFileQuietly(tempPath);
     rethrow;
+  } finally {
+    hasher.dispose();
   }
 }
 
@@ -1251,14 +1570,4 @@ void _deleteFileQuietly(String path) {
     final file = File(path);
     if (file.existsSync()) file.deleteSync();
   } catch (_) {}
-}
-
-/// אוסף את ה-Digest מ-`startChunkedConversion` של sha256 — בכל המסלולים
-/// הזורמים: הורדה לדיסק, הורדה לזיכרון, וחישוב מקובץ קיים.
-class _ChunkedDigestSink implements Sink<Digest> {
-  late Digest value;
-  @override
-  void add(Digest data) => value = data;
-  @override
-  void close() {}
 }

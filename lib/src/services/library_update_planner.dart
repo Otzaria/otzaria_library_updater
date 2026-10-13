@@ -1,3 +1,4 @@
+import '../messages/library_updater_messages.dart';
 import '../models/library_release.dart';
 import '../models/library_update_plan.dart';
 import '../models/patch_table_spec.dart';
@@ -67,8 +68,11 @@ class LibraryUpdatePlanner {
     final unsupportedLatest = advertisedSchema != null &&
         advertisedSchema > supportedDbSchemaVersion &&
         fullDbAsset == null;
-    final updateAppReason = 'הספרייה עברה לסכמת DB $advertisedSchema, '
-        'חדשה מהנתמך (DB $supportedDbSchemaVersion) — נדרש עדכון אפליקציה';
+    final messages = LibraryUpdaterMessages.current;
+    final updateAppReason = advertisedSchema == null
+        ? ''
+        : messages.planSchemaNeedsAppUpdate(
+            advertisedSchema, supportedDbSchemaVersion);
     if (!hasLocalVersionMeta) {
       return _fullOrBlocked(
         localVersion: localVersion,
@@ -77,7 +81,7 @@ class LibraryUpdatePlanner {
         tag: latestReleaseTag,
         reason: unsupportedLatest
             ? updateAppReason
-            : 'גרסת ה-DB המקומי אינה ידועה (חסר schema_meta.db_version)',
+            : messages.planLocalVersionUnknown,
       );
     }
 
@@ -88,9 +92,8 @@ class LibraryUpdatePlanner {
       );
     }
 
-    // חוזה ה-DB וחוזה פורמט ה-patch נבדקים בנפרד. מניפסטים היסטוריים אינם
-    // כוללים patchFormatVersion; בהם ה-applier נשאר שער ה-preflight.
-    // מחסום סכמה (fullRebase) אינו patch אמיתי — לעולם לא שלב במסלול.
+    // סכמת ה-DB ופורמט ה-patch נבדקים בנפרד (בלי פורמט — ב-preflight של
+    // ה-applier). מחסום סכמה (fullRebase) לעולם אינו שלב במסלול.
     final validEdges = edges.where((e) {
       if (e.manifest.fullRebase) return false;
       final fromSchema = e.manifest.fromSchemaVersion;
@@ -130,8 +133,7 @@ class LibraryUpdatePlanner {
         fullDbAsset: fullDbAsset,
         fullDbReleaseTag: latestReleaseTag,
         heavyDeltaReason: isHeavy
-            ? 'מסלול הדלתא פורס ${_size(deltaBytes)} לעומת DB מקומי בגודל '
-                '${_size(dbBytes)}, ושלב ההחלה עלול להימשך זמן רב'
+            ? messages.planHeavyDelta(_size(deltaBytes), _size(dbBytes))
             : null,
       );
     }
@@ -153,9 +155,9 @@ class LibraryUpdatePlanner {
         asset: fullDbAsset,
         tag: latestReleaseTag,
         reason: toSchema <= supportedDbSchemaVersion
-            ? 'הספרייה עברה לסכמת DB $toSchema; המעבר מחייב הורדה מלאה'
-            : 'הספרייה עברה לסכמת DB $toSchema, חדשה מהנתמך '
-                '(DB $supportedDbSchemaVersion) — נדרש עדכון אפליקציה',
+            ? messages.planSchemaBarrierNeedsFullDownload(toSchema)
+            : messages.planSchemaNeedsAppUpdate(
+                toSchema, supportedDbSchemaVersion),
       );
     }
 
@@ -175,10 +177,9 @@ class LibraryUpdatePlanner {
       asset: fullDbAsset,
       tag: latestReleaseTag,
       reason: blockedByCapability
-          ? 'מסלול הדלתא לגרסה $latestVersion דורש סכמת DB או פורמט patch '
-              'חדשים מהנתמך (DB $supportedDbSchemaVersion, '
-              'patch $supportedPatchFormatVersion) — נדרש עדכון אפליקציה'
-          : 'אין מסלול דלתא רציף מגרסה $localVersion לגרסה $latestVersion',
+          ? messages.planDeltaNeedsAppUpdate(latestVersion,
+              supportedDbSchemaVersion, supportedPatchFormatVersion)
+          : messages.planNoDeltaRoute(localVersion, latestVersion),
     );
   }
 
@@ -234,7 +235,7 @@ class LibraryUpdatePlanner {
     return LibraryUpdatePlan.blocked(
       localVersion: localVersion,
       targetVersion: latestVersion,
-      reason: '$reason, ואין DB מלא זמין להורדה',
+      reason: LibraryUpdaterMessages.current.planNoFullDbEither(reason),
     );
   }
 

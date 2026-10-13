@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:seforim_library_updater/src/messages/library_updater_messages.dart';
 import 'package:seforim_library_updater/src/models/library_release.dart';
 import 'package:seforim_library_updater/src/models/split_asset.dart';
 import 'package:seforim_library_updater/src/services/github_library_release_client.dart';
@@ -331,6 +332,21 @@ void main() {
       expect(File(dest).existsSync(), isFalse);
     });
 
+    test('הודעת הכשל מה-isolate של החיבור באה מהמלל הפעיל', () async {
+      LibraryUpdaterMessages.current = const _MarkedMessages();
+      addTearDown(() => LibraryUpdaterMessages.current =
+          const HebrewLibraryUpdaterMessages());
+      await expectLater(
+        server([]).downloadSplitToFile(
+          split: _split(wholeSha: 'a' * 64),
+          destPath: dest,
+          resumeToken: 'v31',
+        ),
+        throwsA(isA<PatchDownloadException>()
+            .having((e) => e.message, 'message', 'joined hash mismatch')),
+      );
+    });
+
     test('חיבור חלקים גדולים מגוש קריאה אחד זהה בייט-לבייט', () async {
       final big = Uint8List.fromList(List.generate(
           3 * 1024 * 1024 + 7, (i) => (i * 31 + (i >> 9)) & 0xff));
@@ -541,4 +557,11 @@ void main() {
       expect(File(dest).readAsBytesSync(), _full);
     });
   });
+}
+
+class _MarkedMessages extends HebrewLibraryUpdaterMessages {
+  const _MarkedMessages();
+
+  @override
+  String get joinedArchiveHashMismatch => 'joined hash mismatch';
 }
