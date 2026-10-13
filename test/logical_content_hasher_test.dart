@@ -1,4 +1,7 @@
+import 'dart:convert';
 import 'dart:io';
+
+import 'package:crypto/crypto.dart';
 
 import 'package:test/test.dart';
 import 'package:seforim_library_updater/src/models/patch_table_spec.dart';
@@ -98,6 +101,30 @@ void main() {
           isNot(_hasher.compute(without, tableOrder: kHashTableOrder)));
       withBom.close();
       without.close();
+    });
+  });
+
+  // REAL נכתב לזרם כ-`Double.toString` של Java, כמו ב-LogicalContentHasher.kt.
+  group('javaDoubleToString', () {
+    test('ה-hash של עמודת REAL משתמש בפורמט של Java', () {
+      final db = sqlite3.sqlite3.openInMemory();
+      db.execute('CREATE TABLE source (id INTEGER PRIMARY KEY, w REAL)');
+      db.execute('INSERT INTO source VALUES (1, 0.0001)');
+      final stream = <int>[
+        ...utf8.encode(' table:source '),
+        ...utf8.encode('cols:id,w'),
+        0x00,
+        0x02,
+        ...utf8.encode('1'),
+        0x1F,
+        0x02,
+        ...utf8.encode('1.0E-4'),
+        0x1F,
+        0xFF,
+      ];
+      expect(_hasher.compute(db, tableOrder: const ['source']),
+          sha256.convert(stream).toString());
+      db.close();
     });
   });
 

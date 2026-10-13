@@ -1,13 +1,14 @@
 /// לקוח Dart לצריכת הפצות הדלתא של `Otzaria/SeforimLibrary`.
 ///
-/// מייצא את ה-API הציבורי בלבד: מודלים של פורמט ההפצה, גילוי ותכנון מסלול,
-/// הורדה ואימות, חישוב hash לוגי, והחלת patch אטומית.
+/// מייצא את ה-API הציבורי בלבד: מודלים של פורמט ההפצה, גילוי ותכנון מסלול
+/// (מקוון, ומסלול המראה המקומית ב-`Offline*`), הורדה ואימות, חישוב hash
+/// לוגי, והחלת patch אטומית. המלל להצגה — [LibraryUpdaterMessages].
 ///
 /// **פעולות חוסמות:** `LogicalContentHasher.compute` ו-`PatchApplier.apply`
-/// סינכרוניות וכבדות (ה-hash עד עשרות שניות על DB מלא). אל תריץ אותן על ה-UI
-/// isolate — עטוף ב-`Isolate.run`.
+/// סינכרוניות וכבדות — עטוף ב-`Isolate.run`.
 library;
 
+export 'src/hashing/fast_sha256.dart' show Sha256Stream;
 export 'src/models/delta_manifest.dart' show DeltaManifest, PatchFileEntry;
 export 'src/models/library_release.dart'
     show LibraryRelease, ReleaseAsset, fullDbArchiveNameForSchema;
