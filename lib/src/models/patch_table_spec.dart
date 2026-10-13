@@ -296,3 +296,22 @@ const List<String> kHashTableOrderSchema1 = [
   'default_targum',
   'schema_meta',
 ];
+
+/// מפרט טבלה אופציונלית: אינה בחוזה ה-hash של הסכמה ואינה ב-upserts/deletes.
+/// ה-patch נושא עבורה snapshot מלא (`optional_<name>`) שמחליף את כל תוכנה.
+class OptionalPatchTableSpec {
+  final String name;
+  final List<String> primaryKey;
+
+  /// העמודות בסדר ה-DDL — אלה שמועתקות מה-snapshot.
+  final List<String> columns;
+
+  const OptionalPatchTableSpec(this.name, this.primaryKey, this.columns);
+}
+
+/// הטבלאות האופציונליות שה-applier מכיר, משוכפל מ-SeforimLibrary.
+/// TODO: בסכמה 7 להעביר אותן לחוזה הסכמה ולבטל את ערוץ הצד.
+const List<OptionalPatchTableSpec> kOptionalPatchTables = [
+  OptionalPatchTableSpec('book_banner', ['bookId'], ['bookId', 'text']),
+  OptionalPatchTableSpec('book_protection', ['bookId'], ['bookId', 'level']),
+];
