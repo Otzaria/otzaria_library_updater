@@ -100,6 +100,8 @@ void main() {
     http.StreamedResponse? Function(http.BaseRequest request, Uint8List body)?
         respond,
     int? Function(String path)? freeBytesFor,
+    int maxConnections = PatchDownloader.defaultMaxConnections,
+    int segmentThresholdBytes = PatchDownloader.defaultSegmentThresholdBytes,
   }) {
     Uint8List bodyFor(String name) {
       if (!name.endsWith('.manifest.json')) {
@@ -182,6 +184,8 @@ void main() {
         applyTime: applyTime,
         scheduler: scheduler,
         freeBytesFor: freeBytesFor,
+        maxConnections: maxConnections,
+        segmentThresholdBytes: segmentThresholdBytes,
       ),
       fetched: fetched,
     );
@@ -1792,8 +1796,6 @@ void main() {
     });
   });
 
-  // ה-CDN של GitHub מתעלם מ-`Range`, ולכן אי אפשר לפצל קובץ בודד לכמה
-  // חיבורים; מה שכן מאיץ הוא להוריד נכסים **שונים** בו-זמנית.
   group('export — בדיקת מקום פנוי לפני ההורדה', () {
     const assetSize = 3 << 20;
     final releases = [
@@ -1845,6 +1847,35 @@ void main() {
       expect(assetOnDisk(destDir, 'v3', 'seforim.db.zst'), isTrue);
     });
 
+    test('קובץ שיורד בטווחים דורש גם את הטווח הגדול ביותר לזמן הצירוף',
+        () async {
+      // 3MB בשני חיבורים: טווח גדול ביותר של 1.5MB.
+      const exact = assetSize +
+          (assetSize + 1) ~/ 2 +
+          DiskSpaceProbe.defaultHeadroomBytes;
+      DownloadScheduler single() => DownloadScheduler(maxConcurrent: 1);
+      await expectLater(
+        buildExporter(
+          releases,
+          assetSizes: const {'seforim.db.zst': assetSize},
+          scheduler: single(),
+          maxConnections: 2,
+          segmentThresholdBytes: 1 << 20,
+          freeBytesFor: (_) => exact - 1,
+        ).exporter.export(destDir: destDir),
+        throwsA(isA<StateError>()),
+      );
+      await buildExporter(
+        releases,
+        assetSizes: const {'seforim.db.zst': assetSize},
+        scheduler: single(),
+        maxConnections: 2,
+        segmentThresholdBytes: 1 << 20,
+        freeBytesFor: (_) => exact,
+      ).exporter.export(destDir: destDir);
+      expect(assetOnDisk(destDir, 'v3', 'seforim.db.zst'), isTrue);
+    });
+
     test('מדידה שנכשלה (null) אינה חוסמת', () async {
       await buildExporter(
         releases,
@@ -1871,6 +1902,21 @@ void main() {
       ).exporter.export(destDir: destDir);
       expect(probes, 0);
     });
+  });
+
+  test('סך החיבורים בייצוא אינו עובר את התקרה', () {
+    int perFile({int maxConcurrent = 4, int maxConnections = 4}) =>
+        LibraryMirrorExporter(
+          supportedDbSchemaVersion: kSupportedDbSchemaVersion,
+          scheduler: DownloadScheduler(maxConcurrent: maxConcurrent),
+          maxConnections: maxConnections,
+        ).connectionsPerFile;
+    expect(LibraryMirrorExporter.maxTotalConnections, 8);
+    expect(perFile(), 2);
+    expect(perFile(maxConcurrent: 1), 4);
+    expect(perFile(maxConcurrent: 1, maxConnections: 16), 8);
+    expect(perFile(maxConcurrent: 16), 1);
+    expect(perFile(maxConnections: 1), 1);
   });
 
   group('export — הורדה מקבילה', () {

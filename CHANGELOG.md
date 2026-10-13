@@ -9,6 +9,9 @@
   `<dest>.seg-N`, כבולים לטוקן, לכתובת, לגודל, ל-sha256 ול-ETag), והטווחים
   מצורפים לפי הסדר ב-isolate. sha256 שגוי מקבל ניסיון נקי אחד.
   `maxConnections: 1` מבטל. `PatchDownloader.deleteSegmentFiles` מנקה שאריות.
+- `LibraryMirrorExporter`: מקבל `maxConnections`/`segmentThresholdBytes`; סך
+  החיבורים בייצוא עד `maxTotalConnections` (8), מחולק שווה בין משבצות ה-scheduler.
+  בדיקת המקום הפנוי כוללת את הטווח הגדול ביותר של כל קובץ שיורד בטווחים.
 
 - `downloadSplitToFile`: חיבור החלקים (קריאה, sha256 וכתיבה) רץ ב-isolate נפרד,
   אל קובץ זמני שעובר ל-`destPath` רק אחרי האימות. ה-API לא השתנה.
