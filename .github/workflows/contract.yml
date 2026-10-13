@@ -14,7 +14,7 @@ jobs:
       KOTLIN_FIXTURE: seforim-library/generator/common/src/jvmTest/resources/patch_tables_contract.json
       KOTLIN_HASH_FIXTURE: seforim-library/generator/common/src/jvmTest/resources/logical_hash_contract.json
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # A coordinated contract change spans two repositories. On a PR, prefer
       # a linked open companion PR by the same author; on push (or when none is
@@ -44,7 +44,7 @@ jobs:
           echo "ref=otzaria" >> "$GITHUB_OUTPUT"
 
       - name: Checkout Otzaria/SeforimLibrary (צד ה-Kotlin)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ steps.seforim.outputs.repository }}
           ref: ${{ steps.seforim.outputs.ref }}
