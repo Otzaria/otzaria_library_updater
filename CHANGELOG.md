@@ -2,17 +2,18 @@
 
 ## Unreleased
 
-- `downloadToFile`: קובץ מרוחק של 64MB ומעלה (`segmentThresholdBytes`) יורד
-  ב-`maxConnections` (ברירת מחדל 4) טווחים מקבילים, אחרי שהבקשה הראשונה
-  מאשרת 206 עם הגודל הצפוי; שרת שעונה 200 ננטש לפני הגוף וממשיך בחיבור
-  אחד. כל טווח ממשיך לבד אחרי קטיעה וגם אחרי הפעלה מחדש (`<dest>.segments`,
+- `downloadToFile`: כשהשרת מכבד `Range`, קובץ מרוחק של 64MB ומעלה
+  (`segmentThresholdBytes`) יורד ב-`maxConnections` (ברירת מחדל 4) טווחים
+  מקבילים, אחרי שהבקשה הראשונה מאשרת 206 עם הגודל הצפוי. שרת שעונה 200
+  (כך עונים כרגע נכסי GitHub ברשת נטפרי) ננטש לפני הגוף, וההורדה ממשיכה
+  בחיבור אחד. כל טווח ממשיך לבד אחרי קטיעה וגם אחרי הפעלה מחדש (`<dest>.segments`,
   `<dest>.seg-N`, כבולים לטוקן, לכתובת, לגודל, ל-sha256 ול-ETag), והטווחים
   מצורפים לפי הסדר ב-isolate. sha256 שגוי מקבל ניסיון נקי אחד.
   `maxConnections: 1` מבטל. `PatchDownloader.deleteSegmentFiles` מנקה שאריות.
+  הורדה שנייה לאותו יעד נכשלת מיד (`<dest>.lock`) בלי לגעת בקבצים.
 - `LibraryMirrorExporter`: מקבל `maxConnections`/`segmentThresholdBytes`; סך
   החיבורים בייצוא עד `maxTotalConnections` (8), מחולק שווה בין משבצות ה-scheduler.
   בדיקת המקום הפנוי כוללת את הטווח הגדול ביותר של כל קובץ שיורד בטווחים.
-
 - `downloadSplitToFile`: חיבור החלקים (קריאה, sha256 וכתיבה) רץ ב-isolate נפרד,
   אל קובץ זמני שעובר ל-`destPath` רק אחרי האימות. ה-API לא השתנה.
 - אימות sha256 של קובץ שכבר שלם (`downloadToFile`) או ארכיון שכבר חובר

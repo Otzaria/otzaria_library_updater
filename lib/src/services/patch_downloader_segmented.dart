@@ -39,23 +39,20 @@ void _writeSegmentStateFile(String statePath, Map<String, Object?> state) {
   temp.renameSync(statePath);
 }
 
-/// מוחק את קובץ המצב ואת קובצי הטווחים (לא את dest עצמו).
+/// מוחק את קובצי הטווחים ואת קובץ המצב (לא את dest עצמו). קובץ המצב נמחק
+/// אחרון, כדי שמחיקה שנכשלה באמצע תנוסה שוב בריצה הבאה.
 void _deleteSegmentLeftovers(String destPath) {
   final statePath = _segmentStatePath(destPath);
-  if (!File(statePath).existsSync() &&
-      !File(_segmentPath(destPath, 1)).existsSync()) {
-    return;
-  }
-  final dir = Directory(p.dirname(destPath));
   final pattern = RegExp('^${RegExp.escape(p.basename(destPath))}'
-      r'\.(segments(\.tmp)?|seg-\d+)$');
+      r'\.(segments\.tmp|seg-\d+)$');
   try {
-    for (final entity in dir.listSync()) {
+    for (final entity in Directory(p.dirname(destPath)).listSync()) {
       if (entity is File && pattern.hasMatch(p.basename(entity.path))) {
         _deleteFileQuietly(entity.path);
       }
     }
   } catch (_) {}
+  _deleteFileQuietly(statePath);
 }
 
 extension _SegmentedDownload on PatchDownloader {
@@ -106,11 +103,8 @@ extension _SegmentedDownload on PatchDownloader {
       if (etag == null && sha256 == null) return null;
       final dest = File(destPath);
       final destLength = dest.existsSync() ? dest.lengthSync() : 0;
-      if (assembled == 1
-          ? destLength > bounds[1]
-          : destLength < bounds[assembled]) {
-        return null;
-      }
+      // זנב מעבר ל-bounds[assembled] הוא צירוף שנקטע; הצירוף הבא חותך אותו.
+      if (assembled > 1 && destLength < bounds[assembled]) return null;
       for (var i = assembled; i < plan.count; i++) {
         final segment = File(_segmentPath(destPath, i));
         if (segment.existsSync() && segment.lengthSync() > plan.length(i)) {
@@ -282,14 +276,18 @@ extension _SegmentedDownload on PatchDownloader {
     void Function(int bytes)? onExistingBytes,
     bool Function()? isCancelled,
   }) async {
+    int onDisk(int i) {
+      final file = File(_segmentPath(destPath, i));
+      final length = file.existsSync() ? file.lengthSync() : 0;
+      return length < plan.length(i) ? length : plan.length(i);
+    }
+
     final present = <int>[
       for (var i = 0; i < plan.count; i++)
         if (plan.assembled > 1 && i < plan.assembled)
           plan.length(i)
         else
-          File(_segmentPath(destPath, i)).existsSync()
-              ? File(_segmentPath(destPath, i)).lengthSync()
-              : 0,
+          onDisk(i),
     ];
     int presentTotal() => present.fold(0, (sum, value) => sum + value);
     onExistingBytes?.call(presentTotal());
@@ -507,7 +505,7 @@ extension _SegmentedDownload on PatchDownloader {
 }
 
 /// מצרף את הטווחים [assembled].. אל dest ב-isolate נפרד ומחזיר את ה-sha256
-/// של הקובץ כולו (null כש-[hash] כבוי). הביטול נבדק בין קטעים.
+/// של הקובץ כולו (null כש-[hash] כבוי). הביטול נבדק בכל MB.
 Future<String?> _assembleSegmentsInIsolate({
   required String destPath,
   required List<int> bounds,
@@ -524,6 +522,7 @@ Future<String?> _assembleSegmentsInIsolate({
       onProgress,
     );
 
+/// המלל הפעיל עובר ל-isolate, אחרת הודעת כשל הייתה חוזרת בעברית.
 _WorkerBody<String?> _assembleWork(
   String destPath,
   List<int> bounds,
@@ -531,13 +530,24 @@ _WorkerBody<String?> _assembleWork(
   String? statePath,
   Map<String, Object?> state,
   bool hash,
-) =>
-    (isCancelled, onProgress) async => _assembleSegments(destPath, bounds,
-        assembled, statePath, state, hash, isCancelled, onProgress);
+) {
+  final messages = LibraryUpdaterMessages.current;
+  return (isCancelled, onProgress) async {
+    LibraryUpdaterMessages.current = messages;
+    try {
+      return await _assembleSegments(destPath, bounds, assembled, statePath,
+          state, hash, isCancelled, onProgress);
+    } on FileSystemException catch (error) {
+      throw PatchDownloadException(
+          LibraryUpdaterMessages.current.saveDownloadedFileFailed('$error'));
+    }
+  };
+}
 
 /// כל טווח נרשם כמצורף בקובץ המצב לפני שקובצו נמחק; קריסה באמצע צירוף
-/// משאירה זנב ב-dest שנחתך בריצה הבאה לפי [bounds].
-String? _assembleSegments(
+/// משאירה זנב ב-dest שנחתך בריצה הבאה לפי [bounds]. מוותר על התור אחרי כל
+/// קטע, אחרת הודעת הביטול שמגיעה ל-isolate לא הייתה מטופלת עד הסוף.
+Future<String?> _assembleSegments(
   String destPath,
   List<int> bounds,
   int assembled,
@@ -546,7 +556,7 @@ String? _assembleSegments(
   bool hash,
   bool Function()? isCancelled,
   void Function(int done, int total)? onProgress,
-) {
+) async {
   const chunkSize = 1 << 20;
   const reportEvery = 4 << 20;
   final total = bounds.last;
@@ -554,7 +564,8 @@ String? _assembleSegments(
   final hasher = digestSink == null ? null : FastSha256.start(digestSink);
   var done = 0;
   var lastReported = 0;
-  void advance(List<int> chunk) {
+  Future<void> advance(List<int> chunk) async {
+    await Future<void>.delayed(Duration.zero);
     if (isCancelled != null && isCancelled()) {
       throw const PatchDownloadCancelled();
     }
@@ -574,7 +585,7 @@ String? _assembleSegments(
         for (var left = prefix; left > 0;) {
           final chunk = input.readSync(left < chunkSize ? left : chunkSize);
           if (chunk.isEmpty) break;
-          advance(chunk);
+          await advance(chunk);
           left -= chunk.length;
         }
       } finally {
@@ -595,7 +606,7 @@ String? _assembleSegments(
           for (var chunk = input.readSync(chunkSize);
               chunk.isNotEmpty;
               chunk = input.readSync(chunkSize)) {
-            advance(chunk);
+            await advance(chunk);
             output.writeFromSync(chunk);
           }
         } finally {

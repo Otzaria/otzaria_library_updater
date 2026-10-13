@@ -190,6 +190,9 @@ class PatchDownloader {
   ///
   /// [onExistingBytes] — כמה מהקובץ כבר על הדיסק ואינו עובר ברשת (0 כשנמחק).
   /// [onVerifyProgress] — קריאת קובץ שכבר על הדיסק לצורך אימות.
+  ///
+  /// הורדה שנייה לאותו [destPath] בזמן שהראשונה רצה נכשלת מיד ב-
+  /// [PatchDownloadException], בלי לגעת בקבצים (`<destPath>.lock`).
   Future<void> downloadToFile({
     required String url,
     required String destPath,
@@ -203,6 +206,35 @@ class PatchDownloader {
   }) async {
     // ביטול בכניסה קודם לכל שינוי בדיסק ולכל בקשת רשת.
     _throwIfCancelled(isCancelled);
+    final lock = _DestinationLock.acquire(destPath);
+    try {
+      await _downloadToFileLocked(
+        url: url,
+        destPath: destPath,
+        expectedSize: expectedSize,
+        expectedSha256: expectedSha256,
+        resumeToken: resumeToken,
+        onProgress: onProgress,
+        onVerifyProgress: onVerifyProgress,
+        onExistingBytes: onExistingBytes,
+        isCancelled: isCancelled,
+      );
+    } finally {
+      lock.release();
+    }
+  }
+
+  Future<void> _downloadToFileLocked({
+    required String url,
+    required String destPath,
+    int? expectedSize,
+    String? expectedSha256,
+    String? resumeToken,
+    void Function(int downloaded, int? total)? onProgress,
+    void Function(int verified, int total)? onVerifyProgress,
+    void Function(int bytes)? onExistingBytes,
+    bool Function()? isCancelled,
+  }) async {
     final messages = LibraryUpdaterMessages.current;
 
     if (!isRemoteUrl(url)) {
@@ -1638,6 +1670,52 @@ void _joinParts(List<String> partPaths, String destPath, int expectedSize,
     rethrow;
   } finally {
     hasher.dispose();
+  }
+}
+
+/// נעילה בלעדית של יעד הורדה: קבוצה בתהליך (נעילת קובץ ב-POSIX אינה חוסמת
+/// את אותו תהליך) ונעילת `<dest>.lock` בין תהליכים.
+class _DestinationLock {
+  _DestinationLock._(this._key, this._file, this._path);
+
+  static final Set<String> _held = {};
+
+  final String _key;
+  final RandomAccessFile _file;
+  final String _path;
+
+  static _DestinationLock acquire(String destPath) {
+    final path = '$destPath.lock';
+    final key = p.canonicalize(destPath);
+    final messages = LibraryUpdaterMessages.current;
+    if (!_held.add(key)) {
+      throw PatchDownloadException(messages.writeResumeSidecarFailed(
+          path, 'already being downloaded in this process'));
+    }
+    RandomAccessFile? file;
+    try {
+      file = File(path).openSync(mode: FileMode.append);
+      file.lockSync(FileLock.exclusive);
+      return _DestinationLock._(key, file, path);
+    } catch (error) {
+      try {
+        file?.closeSync();
+      } catch (_) {}
+      _held.remove(key);
+      throw PatchDownloadException(
+          messages.writeResumeSidecarFailed(path, '$error'));
+    }
+  }
+
+  void release() {
+    try {
+      _file.unlockSync();
+    } catch (_) {}
+    try {
+      _file.closeSync();
+    } catch (_) {}
+    _deleteFileQuietly(_path);
+    _held.remove(_key);
   }
 }
 

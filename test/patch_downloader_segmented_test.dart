@@ -335,17 +335,19 @@ void main() {
     expect(leftovers(), isEmpty);
   });
 
-  test('קריסה באמצע הצירוף: זנב עודף נחתך והצירוף ממשיך', () async {
-    // מצב שאחרי צירוף טווח 1 וחלק מטווח 2, לפני רישום טווח 2 כמצורף.
+  /// מצב של כל הטווחים שלמים, כש-[assembled] מהם כבר ב-dest ואחריהם זנב
+  /// של צירוף שנקטע לפני שנרשם.
+  void writeCompleteSegments(int assembled) {
     final quarter = size ~/ 4;
     final bounds = [0, quarter, 2 * quarter, 3 * quarter, size];
     File(dest).writeAsBytesSync([
-      ...server.data.sublist(0, 2 * quarter),
+      ...server.data.sublist(0, bounds[assembled]),
       ...List.filled(1000, 0xEE),
     ]);
-    File('$dest.seg-2')
-        .writeAsBytesSync(server.data.sublist(2 * quarter, 3 * quarter));
-    File('$dest.seg-3').writeAsBytesSync(server.data.sublist(3 * quarter));
+    for (var i = assembled; i < 4; i++) {
+      File('$dest.seg-$i')
+          .writeAsBytesSync(server.data.sublist(bounds[i], bounds[i + 1]));
+    }
     File('$dest.resume').writeAsStringSync('asset-1\n"v1"');
     File('$dest.segments').writeAsStringSync(jsonEncode({
       'v': 1,
@@ -355,14 +357,89 @@ void main() {
       'sha256': _sha(server.data),
       'etag': '"v1"',
       'bounds': bounds,
-      'assembled': 2,
+      'assembled': assembled,
     }));
+  }
 
-    await download(downloader(), sha: _sha(server.data));
+  for (final assembled in [1, 2]) {
+    test('קריסה באמצע הצירוף (assembled: $assembled): הזנב נחתך, בלי הורדה',
+        () async {
+      writeCompleteSegments(assembled);
+      await download(downloader(), sha: _sha(server.data));
 
+      expect(File(dest).readAsBytesSync(), server.data);
+      expect(server.requests, isEmpty);
+      expect(leftovers(), isEmpty);
+    });
+  }
+
+  test('ביטול באמצע הצירוף נתפס ושומר את הטווחים שטרם צורפו', () async {
+    server.data = _data(64 << 20);
+    final sha = _sha(server.data);
+    var cancel = false;
+    await expectLater(
+      downloader().downloadToFile(
+        url: server.url,
+        destPath: dest,
+        expectedSize: server.data.length,
+        expectedSha256: sha,
+        resumeToken: 'asset-1',
+        onVerifyProgress: (_, __) => cancel = true,
+        isCancelled: () => cancel,
+      ),
+      throwsA(isA<PatchDownloadCancelled>()),
+    );
+    final state = jsonDecode(File('$dest.segments').readAsStringSync()) as Map;
+    expect(state['assembled'], lessThan(4));
+    expect(File('$dest.seg-3').existsSync(), isTrue);
+
+    client.received = 0;
+    await download(downloader(), sha: sha);
+    expect(client.received, 0);
     expect(File(dest).readAsBytesSync(), server.data);
-    expect(server.requests, isEmpty);
     expect(leftovers(), isEmpty);
+  });
+
+  test('כשל דיסק בצירוף → PatchDownloadException, הטווחים נשמרים', () async {
+    writeCompleteSegments(1);
+    // dest לקריאה בלבד: הגיבוב קורא אותו, והפתיחה לכתיבה נכשלת.
+    await Process.run('attrib', ['+r', dest]);
+    try {
+      await expectLater(download(downloader(), sha: _sha(server.data)),
+          throwsA(isA<PatchDownloadException>()));
+    } finally {
+      await Process.run('attrib', ['-r', dest]);
+    }
+    expect(File('$dest.segments').existsSync(), isTrue);
+    expect(File('$dest.seg-3').existsSync(), isTrue);
+  }, testOn: 'windows');
+
+  test('הורדה שנייה לאותו יעד נכשלת מיד ואינה נוגעת בקבצים', () async {
+    server.chunkDelay = const Duration(milliseconds: 5);
+    final first = download(downloader(), sha: _sha(server.data));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    await expectLater(download(downloader(), sha: _sha(server.data)),
+        throwsA(isA<PatchDownloadException>()));
+    await first;
+    expect(File(dest).readAsBytesSync(), server.data);
+    expect(File('$dest.lock').existsSync(), isFalse);
+
+    // אחרי שהראשונה סיימה, אותו יעד פנוי שוב ונשאר שלם.
+    await download(downloader(), sha: _sha(server.data));
+    expect(File(dest).readAsBytesSync(), server.data);
+  });
+
+  test('שאריות טווחים בלי קובץ מצב נמחקות בתחילת ההורדה', () async {
+    // קובץ קטן: הורדה בחיבור יחיד, שלא כותבת קובץ מצב משלה.
+    server.data = _data(threshold - 1);
+    File('$dest.seg-2').writeAsStringSync('stale');
+    File('$dest.segments.tmp').writeAsStringSync('stale');
+    await download(downloader(), sha: _sha(server.data));
+    expect(File(dest).readAsBytesSync(), server.data);
+    expect(
+        tmp.listSync().map((f) => p.basename(f.path)),
+        isNot(anyOf(contains('seforim.db.zst.seg-2'),
+            contains('seforim.db.zst.segments.tmp'))));
   });
 
   test('sha256 שגוי → ניסיון נקי אחד; שגוי שוב → כשל ומחיקה', () async {
