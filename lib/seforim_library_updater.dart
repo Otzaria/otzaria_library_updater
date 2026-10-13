@@ -57,6 +57,12 @@ export 'src/services/local_db_version_reader.dart'
         LocalDbUnreadableReason;
 export 'src/services/logical_content_hasher.dart'
     show LogicalContentHasher, LogicalContentHashReport;
+export 'src/services/offline_library_db_recovery_service.dart'
+    show OfflineLibraryDbRecoveryService;
+export 'src/services/offline_library_update_discovery.dart'
+    show OfflineLibraryUpdateDiscovery, OfflineLibraryDiscoveryResult;
+export 'src/services/offline_library_update_planner.dart'
+    show OfflineLibraryUpdatePlanner;
 export 'src/services/patch_applier.dart'
     show
         PatchApplier,
