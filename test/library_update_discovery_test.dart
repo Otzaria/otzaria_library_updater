@@ -93,6 +93,14 @@ void main() {
     test('null אם אין מספר', () {
       expect(LibraryUpdateDiscovery.parseVersionFromTag('latest'), isNull);
     });
+    test('מעוגן לתחילת ה-tag: ספרות באמצע אינן גרסה', () {
+      expect(
+          LibraryUpdateDiscovery.parseVersionFromTag(
+              'lines-snapshot-sha256-0123abcd'),
+          isNull);
+      expect(
+          LibraryUpdateDiscovery.parseVersionFromTag('v20-20260807110905'), 20);
+    });
   });
 
   group('discover (mock client)', () {
