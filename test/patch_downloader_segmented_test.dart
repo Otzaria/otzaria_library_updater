@@ -309,12 +309,14 @@ void main() {
     );
     final state = jsonDecode(File('$dest.segments').readAsStringSync()) as Map;
     final bounds = (state['bounds'] as List).cast<int>();
+    // טווח שעוד לא שלח בקשה כשהראשון נקטע אין לו קובץ — גם טווח 0 (dest).
     final kept = [
-      File(dest).lengthSync(),
-      for (var i = 1; i < 4; i++)
-        File('$dest.seg-$i').existsSync()
-            ? File('$dest.seg-$i').lengthSync()
-            : 0,
+      for (var i = 0; i < 4; i++)
+        if (File(i == 0 ? dest : '$dest.seg-$i') case final f
+            when f.existsSync())
+          f.lengthSync()
+        else
+          0,
     ];
     final keptTotal = kept.fold<int>(0, (a, b) => a + b);
     expect(keptTotal, greaterThan(0));
