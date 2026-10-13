@@ -296,3 +296,22 @@ const List<String> kHashTableOrderSchema1 = [
   'default_targum',
   'schema_meta',
 ];
+
+/// סדרי ה-hash לפי גרסת סכמת ה-DB — מקור האמת לשאלה איזו סכמה אפשר להחיל.
+const Map<int, List<String>> kHashTableOrderBySchemaVersion = {
+  1: kHashTableOrderSchema1,
+  2: kHashTableOrderSchema2,
+  3: kHashTableOrderSchema3,
+  4: kHashTableOrderSchema4,
+  5: kHashTableOrderSchema5,
+  6: kHashTableOrderSchema6,
+};
+
+/// האם קיים סדר hash לסכמה — כלומר האם אפשר להחיל patch שנוגע בה.
+bool isSupportedSchemaVersion(int schemaVersion) =>
+    kHashTableOrderBySchemaVersion.containsKey(schemaVersion);
+
+/// האם ה-applier יודע להחיל את פורמט ה-`patch.db` הזה.
+bool isSupportedPatchFormatVersion(int patchFormatVersion) =>
+    patchFormatVersion >= 1 &&
+    patchFormatVersion <= kSupportedPatchFormatVersion;

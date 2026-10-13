@@ -9,6 +9,8 @@
 library;
 
 export 'src/hashing/fast_sha256.dart' show Sha256Stream;
+export 'src/messages/library_updater_messages.dart'
+    show LibraryUpdaterMessages, HebrewLibraryUpdaterMessages;
 export 'src/models/delta_manifest.dart' show DeltaManifest, PatchFileEntry;
 export 'src/models/library_release.dart'
     show LibraryRelease, ReleaseAsset, fullDbArchiveNameForSchema;
@@ -21,8 +23,19 @@ export 'src/models/patch_table_spec.dart'
         PatchTableSpec,
         kPatchTablesInFkOrder,
         kHashTableOrder,
+        // הסדרים הקפואים — לגיבוב DB בסכמה היסטורית.
+        kHashTableOrderSchema1,
+        kHashTableOrderSchema2,
+        kHashTableOrderSchema3,
+        kHashTableOrderSchema4,
+        kHashTableOrderSchema5,
+        kHashTableOrderSchema6,
+        kHashTableOrderBySchemaVersion,
         kDefaultConsumerDbSchemaVersion,
-        kSupportedDbSchemaVersion;
+        kSupportedDbSchemaVersion,
+        kSupportedPatchFormatVersion,
+        isSupportedSchemaVersion,
+        isSupportedPatchFormatVersion;
 export 'src/services/github_library_release_client.dart'
     show GithubLibraryReleaseClient;
 export 'src/services/library_db_recovery_service.dart'
