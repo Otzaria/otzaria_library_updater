@@ -9,6 +9,64 @@
 - ביטול נבדק גם עם חזרת ה-hash מה-isolate, כך שחישוב קצר שמסתיים בין
   דגימות הביטול אינו מדווח הצלחה ואינו מוחק את שרידי החלקים לפני resume.
 
+### Hash לוגי
+
+- **שינוי hash:** ערכי REAL נכתבים לזרם ה-hash בפורמט `Double.toString` של
+  Java (`1.0E-4`, `1.0E7`), כמו `LogicalContentHasher.kt`. עד עכשיו Dart כתב
+  `0.0001`/`10000000.0`, וה-hash לא תאם ליצרן בכל טבלה עם ערך כזה.
+  `javaDoubleToString` חדש.
+- `FastSha256` / `Sha256Stream`: SHA-256 דרך CNG ב-Windows ו-CommonCrypto
+  ב-macOS וב-iOS, עם בדיקה עצמית ונפילה ל-`package:crypto` (גם כשפתיחת חישוב
+  נכשלת). `close()` אחרי `dispose()` זורק `StateError`. נטען בייבוא מותנה —
+  בלי `dart:ffi` ב-web. בתי-הסוג של שורה נקראים כמסכה אחת; זרם הבתים זהה.
+
+### גילוי ותכנון
+
+- `parseVersionFromTag` מעוגן לתחילת ה-tag (`^v?(\d+)`): `lines-snapshot-sha256-…`
+  כבר אינו גרסה 256. `LibraryUpdateDiscovery.releaseVersionOf` ציבורית.
+- `LibraryRelease.fromJson` מתעלם מנכסים שעדיין עולים (`state` שאינו
+  `uploaded`), ו-`fullDbAssetFor` מתעלם מ-DB מלא בגודל 0.
+- `PatchEdge.hasSupportedSchema`/`hasSupportedPatchFormat`/`isApplicable`,
+  `isSupportedSchemaVersion`, `isSupportedPatchFormatVersion`,
+  `kHashTableOrderBySchemaVersion` והסדרים הקפואים מיוצאים.
+- `LibraryUpdatePlan`: `fullDownloadFallback`, `followUpDelta`,
+  `finalTargetVersion`, ו-`reason` גם בתוכנית delta.
+
+### מסלול המראה המקומית (offline)
+
+- `LibraryReleaseSource`, `LocalMirrorLibraryReleaseClient`,
+  `LibraryMirrorExporter`, `DownloadScheduler`/`ByteProgressAggregator`,
+  `DiskSpaceProbe`, `ApplyTimeEstimate`; `ReleaseAsset`/`LibraryRelease`
+  מקבלים `toMirrorJson`/`fromMirrorJson`.
+- `OfflineLibraryUpdateDiscovery`, `OfflineLibraryUpdatePlanner`,
+  `OfflineLibraryDbRecoveryService` — מדיניות המראה, לצד המחלקות המקוונות שלא
+  השתנו. הסכמה הנתמכת היא פרמטר חובה. `RecoveryAction.interrupted` הוא שם נוסף
+  ל-`blockedMissingBackup`.
+- `GithubLibraryReleaseClient` מממש `LibraryReleaseSource`, שולח User-Agent
+  (`userAgent`), ו-`timeout` ניתן לשינוי.
+
+### החלה והורדה
+
+- `PatchApplier.apply(verifyToHash:)`; `PatchApplyResult.resultHash` הוא עכשיו
+  `String?` (null כשהאימות כובה). התנגשות UNIQUE ב-upsert נזרקת כ-
+  `PatchApplyException`, ו-`sqlite_stat4` מתנקה כשה-patch מחליף את `sqlite_stat1`.
+- `PatchDownloader`: העתקה ממראה מקומית (נתיב במקום URL), `verifyExistingFile`,
+  `recordVerified`, `storedResumeToken`, ו-`onVerifyProgress`/`onExistingBytes`
+  ב-`downloadToFile`. קובץ הצד `.resume` מקבל שורה שלישית — סימון אימות
+  `sha256|גודל|זמן-שינוי` — ונכס שלם שסימונו תואם אינו מגובב שוב. נכס שלם
+  ופגום יורד מחדש במקום להיכשל; נכס שפורסם מחדש באותו תוכן נקשר לטוקן החדש.
+  `connectTimeout`/`stallTimeout` ניתנים לשינוי.
+- `LocalDbVersionReader`: מסד נעול או כתיבה שנקטעה נזרקים כ-
+  `LocalDbUnreadableException` (במקום "אין גרסה"); מסד פגום מחזיר
+  `hasVersionMeta=false`. `readInIsolate` ו-`busyTimeout` חדשים.
+
+### מלל
+
+- כל המלל עובר דרך `LibraryUpdaterMessages.current`, עם ברירת מחדל עברית
+  זהה למלל הקודם; צרכן מציב מימוש משלו. החבילה מעבירה אותו ל-isolates שלה.
+- `toString()` של `PatchApplyException` ו-`PatchDownloadException` הוא ההודעה
+  עצמה, בלי קידומת שם המחלקה.
+
 ## 0.8.1
 
 DB מלא מפוצל: כשה-DB המלא גדול ממגבלת ה-2 GiB לנכס ב-GitHub, SeforimLibrary
