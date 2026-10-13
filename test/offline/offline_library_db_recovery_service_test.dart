@@ -138,6 +138,20 @@ void main() {
       expect(File(dbPath).readAsStringSync(), 'ORIGINAL');
     });
 
+    test('שאריות הורדה מלאה מפוצלת לטווחים נמחקות', () async {
+      final staging = '$dbPath.download.zst';
+      for (final suffix in ['', '.resume', '.segments', '.seg-1', '.seg-3']) {
+        File('$staging$suffix').writeAsStringSync('PARTIAL');
+      }
+
+      await service.recoverIfNeeded(dbPath);
+      expect(
+        tmp.listSync().map((f) => f.path.split(RegExp(r'[\\/]')).last),
+        isNot(contains(startsWith('seforim.db.download'))),
+      );
+      expect(File(dbPath).readAsStringSync(), 'ORIGINAL');
+    });
+
     test('שאריות גיבוי נמחקות גם כשיש marker', () async {
       File('$dbPath.backup').writeAsStringSync('OLD-BACKUP');
       File(service.markerPathFor(dbPath)).writeAsStringSync('{}');

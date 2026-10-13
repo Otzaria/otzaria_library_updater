@@ -15,6 +15,8 @@ import '../models/delta_manifest.dart';
 import '../models/library_release.dart';
 import '../models/split_asset.dart';
 
+part 'patch_downloader_segmented.dart';
+
 /// נזרק כשהורדה או אימות נכשלים. הקבצים הפגומים נמחקים לפני הזריקה.
 class PatchDownloadException implements Exception {
   final String message;
@@ -69,12 +71,23 @@ class PatchDownloader {
     Duration(seconds: 15),
   ];
 
+  /// מספר החיבורים המקבילים לקובץ גדול ב-[downloadToFile]; 1 מבטל את הפיצול.
+  final int maxConnections;
+
+  /// קובץ מרוחק בגודל צפוי זה ומעלה יורד ב-[maxConnections] טווחים.
+  final int segmentThresholdBytes;
+
+  static const int defaultMaxConnections = 4;
+  static const int defaultSegmentThresholdBytes = 64 << 20;
+
   PatchDownloader({
     required Future<Uint8List?> Function(Uint8List compressed) decompress,
     http.Client? httpClient,
     this.connectTimeout = const Duration(seconds: 20),
     this.stallTimeout = const Duration(seconds: 30),
     this.networkRetryDelays = defaultNetworkRetryDelays,
+    this.maxConnections = defaultMaxConnections,
+    this.segmentThresholdBytes = defaultSegmentThresholdBytes,
   })  : _httpClient = httpClient ?? http.Client(),
         _ownsClient = httpClient == null,
         _decompress = decompress;
@@ -172,6 +185,9 @@ class PatchDownloader {
   /// יורד מחדש. קובץ הצד נמחק רק יחד עם הקובץ עצמו — הצרכן שמוחק את הקובץ
   /// אחרי חילוץ מנקה אותו דרך [resumeSidecarPath].
   ///
+  /// קובץ מרוחק מ-[segmentThresholdBytes] ומעלה יורד בכמה טווחים מקבילים
+  /// כשהשרת מכבד `Range` — ראו [_downloadSegmented].
+  ///
   /// [onExistingBytes] — כמה מהקובץ כבר על הדיסק ואינו עובר ברשת (0 כשנמחק).
   /// [onVerifyProgress] — קריאת קובץ שכבר על הדיסק לצורך אימות.
   Future<void> downloadToFile({
@@ -249,9 +265,18 @@ class PatchDownloader {
 
       var offset = file.existsSync() ? file.lengthSync() : 0;
       final alreadyComplete = expectedSize != null && offset >= expectedSize;
+      final segmented = _segmentationApplies(expectedSize);
+      final resumedPlan = segmented && !alreadyComplete
+          ? _readSegmentPlan(destPath, resumeToken, url, expectedSize!,
+              expectedSha256?.toLowerCase())
+          : null;
+      if (resumedPlan == null) _deleteSegmentLeftovers(destPath);
 
       // חלקי בלי validator אינו נאמן: אין If-Range שיכבול אותו לגרסת השרת.
-      if (!alreadyComplete && offset > 0 && storedValidator == null) {
+      if (!alreadyComplete &&
+          offset > 0 &&
+          storedValidator == null &&
+          resumedPlan == null) {
         _deleteRequired(destPath, messages.deletePartialWithoutValidatorFailed);
         offset = 0;
       }
@@ -277,6 +302,29 @@ class PatchDownloader {
         storedValidator = null;
         offset = 0;
         onExistingBytes?.call(0);
+      }
+
+      if (segmented) {
+        final result = await _downloadSegmented(
+          url: url,
+          destPath: destPath,
+          size: expectedSize!,
+          sha256: expectedSha256?.toLowerCase(),
+          resumeToken: resumeToken,
+          resumed: resumedPlan,
+          validator: storedValidator,
+          onProgress: onProgress,
+          onVerifyProgress: onVerifyProgress,
+          onExistingBytes: onExistingBytes,
+          isCancelled: isCancelled,
+        );
+        if (result.done) {
+          _throwIfCancelled(isCancelled);
+          return;
+        }
+        storedValidator = result.validator;
+        offset = file.existsSync() ? file.lengthSync() : 0;
+        onExistingBytes?.call(offset);
       }
 
       // אחרי קטיעה ה-hash מחושב פעם אחת על הקובץ המוגמר, לא על כל partial.
@@ -353,6 +401,7 @@ class PatchDownloader {
           !_partialIsResumable(
               destPath, sidecarPath, expectedSize, resumeToken)) {
         _deleteQuietly(destPath);
+        _deleteSegmentLeftovers(destPath);
         if (!file.existsSync()) _deleteQuietly(sidecarPath);
       }
       rethrow;
@@ -361,6 +410,11 @@ class PatchDownloader {
 
   /// נתיב קובץ הצד (`.resume`) של [destPath].
   static String resumeSidecarPath(String destPath) => '$destPath.resume';
+
+  /// מוחק את קובצי ההורדה המפוצלת של [destPath] (`.segments`, `.seg-N`),
+  /// לצד [destPath] ו-[resumeSidecarPath] שהצרכן מוחק בעצמו.
+  static void deleteSegmentFiles(String destPath) =>
+      _deleteSegmentLeftovers(destPath);
 
   /// הטוקן שנשמר בקובץ הצד של [destPath], אם יש.
   String? storedResumeToken(String destPath) =>
@@ -839,12 +893,15 @@ class PatchDownloader {
     Uri uri,
     Map<String, String> headers, {
     bool followRedirects = true,
+    Future<void>? abortTrigger,
   }) async {
     final abort = Completer<void>();
     final request = http.AbortableRequest(
       'GET',
       uri,
-      abortTrigger: abort.future,
+      abortTrigger: abortTrigger == null
+          ? abort.future
+          : Future.any([abort.future, abortTrigger]),
     )
       ..followRedirects = followRedirects
       ..headers.addAll(headers);
@@ -943,12 +1000,14 @@ class PatchDownloader {
   /// עוקב אחר הפניות ידנית — `package:http` משמיט את `Range` כשהוא עוקב לבד.
   Future<http.StreamedResponse> _sendWithManualRedirects(
     String url,
-    Map<String, String> headers,
-  ) async {
+    Map<String, String> headers, {
+    Future<void>? abortTrigger,
+  }) async {
     var uri = Uri.parse(url);
     const maxHops = 6;
     for (var hop = 0; hop <= maxHops; hop++) {
-      final response = await _sendGet(uri, headers, followRedirects: false);
+      final response = await _sendGet(uri, headers,
+          followRedirects: false, abortTrigger: abortTrigger);
       if (_isRedirect(response.statusCode)) {
         final location = response.headers['location'];
         if (location == null) return response;
@@ -1007,6 +1066,7 @@ class PatchDownloader {
     if (resumeToken == null) return false;
     // רץ מתוך catch — כשל כאן אסור שיסתיר את החריגה המקורית.
     try {
+      if (_hasSegmentState(destPath, resumeToken)) return true;
       final file = File(destPath);
       if (!file.existsSync()) return false;
       final sidecar = _readSidecar(sidecarPath);
@@ -1414,9 +1474,26 @@ Future<String> _hashFileSha256InIsolate(
   String path, [
   bool Function()? isCancelled,
   void Function(int verified, int total)? onProgress,
-]) async {
+]) =>
+    _runCancellableWorker(_hashFileWork(path), isCancelled, onProgress);
+
+/// נבנה בפונקציה נפרדת כדי שה-closure ילכוד רק את [path].
+_WorkerBody<String> _hashFileWork(String path) =>
+    (isCancelled, onProgress) => _hashFileSha256(path, isCancelled, onProgress);
+
+typedef _WorkerBody<T> = Future<T> Function(
+  bool Function()? isCancelled,
+  void Function(int done, int total)? onProgress,
+);
+
+/// מריץ את [work] ב-isolate נפרד; ביטול נדגם כל 100ms ונמסר בהודעה.
+Future<T> _runCancellableWorker<T>(
+  _WorkerBody<T> work,
+  bool Function()? isCancelled,
+  void Function(int done, int total)? onProgress,
+) async {
   if (isCancelled == null && onProgress == null) {
-    return _runHashWorker(path, null);
+    return _runWorker(work, null);
   }
   if (isCancelled != null && isCancelled()) {
     throw const PatchDownloadCancelled();
@@ -1440,31 +1517,30 @@ Future<String> _hashFileSha256InIsolate(
           workerCancel?.send(null);
         });
   try {
-    final digest = await _runHashWorker(path, control.sendPort);
-    // hash קצר יכול להסתיים לפני הדגימה הבאה של הביטול.
+    final result = await _runWorker(work, control.sendPort);
+    // עבודה קצרה יכולה להסתיים לפני הדגימה הבאה של הביטול.
     if (cancelled || (isCancelled?.call() ?? false)) {
       throw const PatchDownloadCancelled();
     }
-    return digest;
+    return result;
   } finally {
     poll?.cancel();
     control.close();
   }
 }
 
-/// נפרד מ-[_hashFileSha256InIsolate] כדי שה-closure לא ילכוד את ה-ReceivePort.
-Future<String> _runHashWorker(String path, SendPort? control) =>
+/// נפרד מ-[_runCancellableWorker] כדי שה-closure לא ילכוד את ה-ReceivePort.
+Future<T> _runWorker<T>(_WorkerBody<T> work, SendPort? control) =>
     Isolate.run(() async {
-      if (control == null) return _hashFileSha256(path);
+      if (control == null) return work(null, null);
       final cancel = ReceivePort();
       var cancelled = false;
       cancel.listen((_) => cancelled = true);
       control.send(cancel.sendPort);
       try {
-        return await _hashFileSha256(
-          path,
+        return await work(
           () => cancelled,
-          (verified, total) => control.send([verified, total]),
+          (done, total) => control.send([done, total]),
         );
       } finally {
         cancel.close();

@@ -2,8 +2,8 @@ import 'dart:async';
 
 /// מריץ הורדות של **קבצים שונים** במקביל, עד [maxConcurrent] בכל רגע.
 ///
-/// ה-CDN של נכסי GitHub מתעלם מ-`Range`, אבל החנק שלו הוא לכל חיבור — ולכן
-/// מה שמאיץ הוא ריבוי קבצים. המופע הוא סמפור משותף לכמה קוראים.
+/// החנק של ה-CDN הוא לכל חיבור, ולכן גם ריבוי קבצים מאיץ (קובץ גדול גם
+/// מתפצל לטווחים ב-`PatchDownloader`). המופע הוא סמפור משותף לכמה קוראים.
 class DownloadScheduler {
   DownloadScheduler({int maxConcurrent = defaultMaxConcurrent})
       : maxConcurrent = maxConcurrent < 1 ? 1 : maxConcurrent;

@@ -54,9 +54,9 @@ String mirrorRelativePath(String path,
 /// המצב הזה נועד לחסוך אותו, לא להשאיר את המשתמש עם העדכון היקר מבין
 /// השניים.
 ///
-/// **הנכסים יורדים במקביל, הגדול ראשון** — ראו [DownloadScheduler]. זה כל
-/// ה"מאיץ" שאפשר לבנות מול GitHub: פיצול קובץ בודד לכמה חיבורים אינו עובד
-/// שם, אבל קובצי ה-patch רצים לצד המסד הגדול במקום לחכות לו.
+/// **הנכסים יורדים במקביל, הגדול ראשון** — ראו [DownloadScheduler]: קובצי
+/// ה-patch רצים לצד המסד הגדול במקום לחכות לו. קובץ גדול יורד גם בכמה
+/// טווחים כשהשרת מכבד `Range` — ראו [PatchDownloader.maxConnections].
 class LibraryMirrorExporter {
   LibraryMirrorExporter({
     GithubLibraryReleaseClient? client,
@@ -100,9 +100,8 @@ class LibraryMirrorExporter {
   final http.Client _httpClient;
   final bool _ownsHttpClient;
 
-  /// מה שמריץ את הנכסים במקביל — ראו [DownloadScheduler] להסבר למה זו
-  /// ההאצה היחידה שאפשרית מול GitHub. ניתן להזרקה כדי שהקבצים הנלווים
-  /// יחלקו את אותה תקרת חיבורים ולא יפתחו תקרה משלהם.
+  /// מה שמריץ את הנכסים במקביל — ראו [DownloadScheduler]. ניתן להזרקה כדי
+  /// שהקבצים הנלווים יחלקו את אותה תקרת חיבורים ולא יפתחו תקרה משלהם.
   final DownloadScheduler _scheduler;
 
   final int? Function(String path) _freeBytesFor;

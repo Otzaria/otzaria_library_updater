@@ -8,6 +8,7 @@ import 'package:seforim_library_updater/src/sqlite/sqlite3_api.dart' as sqlite3;
 import '../messages/library_updater_messages.dart';
 import 'library_db_recovery_service.dart';
 import 'local_db_version_reader.dart';
+import 'patch_downloader.dart';
 
 /// התאוששות למסלול המראה (offline), **בלי גיבוי של המסד**: patch עטוף
 /// ב-transaction, ומסד מלא מחולץ ל-`<db>.new` ומוחלף ב-rename רק אחרי אימות.
@@ -113,6 +114,7 @@ class OfflineLibraryDbRecoveryService {
         if (file.existsSync()) file.deleteSync();
       } catch (_) {}
     }
+    PatchDownloader.deleteSegmentFiles('$dbPath.download.zst');
   }
 
   /// בודק תקינות DB אחרי עדכון שנקטע. מחזיר `true` אם ה-DB תקין (עבר
