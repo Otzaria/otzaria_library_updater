@@ -13,8 +13,9 @@
   הטבלאות ב-`migrations` ואחריהן upserts. ה-hash לפני ההחלה בסדר סכמה 6 ואחריה
   בסדר סכמה 7. מחיקת `line`/`book` מתגלגלת אליהן ב-`ON DELETE CASCADE`, ומחיקת
   `line_note` מתגלגלת ל-`line_note_divine_name`.
-- `line_note` ו-`line_note_divine_name` ממופות ל-`booksTouched` דרך `line`;
-  שינוי בשלוש טבלאות התצוגה לבדן אינו מסמן `hasChangesOutsideBooksTouched`.
+- `line_note` ממופה ל-`booksTouched` דרך `line`; שינוי בטבלאות התצוגה
+  (`book_banner`, `book_protection`, `line_divine_name`, `line_note_divine_name`)
+  לבדן אינו מסמן `hasChangesOutsideBooksTouched`.
 - `patch_tables_contract.json` בסכמה 7, בלי הסעיף `optionalTables`.
 - `downloadSplitToFile`: חיבור החלקים (קריאה, sha256 וכתיבה) רץ ב-isolate נפרד,
   אל קובץ זמני שעובר ל-`destPath` רק אחרי האימות. ה-API לא השתנה.

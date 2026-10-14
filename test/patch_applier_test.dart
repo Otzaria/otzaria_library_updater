@@ -1978,7 +1978,7 @@ void main() {
       expect(r.upserts, containsPair('line_divine_name', 1));
       expect(r.upserts, containsPair('line_note', 3));
       expect(r.upserts, containsPair('line_note_divine_name', 2));
-      // טבלאות ההערות ממופות לספרים דרך line; שלוש טבלאות התצוגה אינן תוכן חיפוש.
+      // line_note ממופה לספרים דרך line; טבלאות שמות הקודש והמו"ל אינן תוכן חיפוש.
       expect(r.booksTouched, {1, 2});
       expect(r.hasChangesOutsideBooksTouched, isFalse);
       for (final t in newTables) {
@@ -2148,6 +2148,46 @@ void main() {
       expect(rowsOf(base, 'line_note'), [notes[1], notes[2]]);
       expect(rowsOf(base, 'line_note_divine_name'), [noteDivineNames[1]]);
       expect(rowsOf(base, 'line_divine_name'), divineNames);
+    });
+
+    test('שינוי שמות קודש בגוף הערה לבדו אינו נוגע לספרים ולאינדקס', () {
+      final base =
+          buildDb('s7_ndn_only_base', version: 1, schema: 7, rows: newRows());
+      final changed = [
+        [10, 0, 4, 9, 1, 1],
+        [30, 0, 0, 4, 5, 3],
+      ];
+      final expected = buildDb('s7_ndn_only_expected',
+          version: 2,
+          schema: 7,
+          rows: {...newRows(), 'line_note_divine_name': changed});
+      final patch = buildPatchDb(from: 1, to: 2, schemaVersion: 4);
+      final pdb = sqlite3.sqlite3.open(patch);
+      pdb.execute('CREATE TABLE upsert_line_note_divine_name (lineId INTEGER, '
+          'noteIndex INTEGER, charStart INTEGER, charEnd INTEGER, '
+          'kind INTEGER, source INTEGER, '
+          'PRIMARY KEY (lineId, noteIndex, charStart))');
+      pdb.execute('INSERT INTO upsert_line_note_divine_name VALUES '
+          '(30, 0, 0, 4, 5, 3)');
+      pdb.close();
+
+      final r = _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: _manifest(
+          from: 1,
+          to: 2,
+          fromSchema: 7,
+          toSchema: 7,
+          fromHash: _hashWithOrder(base, kHashTableOrderSchema7),
+          toHash: _hashWithOrder(expected, kHashTableOrderSchema7),
+        ),
+      );
+
+      expect(r.upserts, containsPair('line_note_divine_name', 1));
+      expect(r.booksTouched, isEmpty);
+      expect(r.hasChangesOutsideBooksTouched, isFalse);
+      expect(rowsOf(base, 'line_note_divine_name'), changed);
     });
 
     // golden משותף עם SeforimLibrary: אותן שורות (בכל סדר הכנסה) חייבות לתת
