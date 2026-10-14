@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- סכמת DB 7: `book_banner`, `book_protection`, `line_divine_name` ו-`line_note`
+  (הערות השוליים של השורה: `lineId`, `noteIndex`, `marker`, `body`) הן טבלאות
+  חוזה רגילות. `kSupportedDbSchemaVersion` = 7; `kPatchTablesInFkOrder` ו-
+  `kHashTableOrderSchema7` (43 טבלאות) מוסיפים את ארבען, בסדר הזה, מיד לפני
+  `schema_meta`; `hashTableOrderForSchemaVersion(7)` נתמך, והסדרים 1–6 קפואים.
+  `kDefaultConsumerDbSchemaVersion` נשאר 5 — צרכן שקורא סכמה 7 מצהיר על כך.
+- patch 6→7 הוא דלתא רגילה בפורמט 4: ה-`CREATE TABLE IF NOT EXISTS` של ארבע
+  הטבלאות ב-`migrations` ואחריהן upserts. ה-hash לפני ההחלה בסדר סכמה 6 ואחריה
+  בסדר סכמה 7. מחיקת `line`/`book` מתגלגלת אליהן ב-`ON DELETE CASCADE`.
+- `line_note` ממופה ל-`booksTouched` דרך `line`; שינוי בשלוש טבלאות התצוגה
+  לבדן אינו מסמן `hasChangesOutsideBooksTouched`.
+- `patch_tables_contract.json` בסכמה 7, בלי הסעיף `optionalTables`.
+
 - `downloadSplitToFile`: חיבור החלקים (קריאה, sha256 וכתיבה) רץ ב-isolate נפרד,
   אל קובץ זמני שעובר ל-`destPath` רק אחרי האימות. ה-API לא השתנה.
 - אימות sha256 של קובץ שכבר שלם (`downloadToFile`) או ארכיון שכבר חובר

@@ -68,6 +68,11 @@ const List<PatchTableSpec> kPatchTablesInFkOrder = [
   PatchTableSpec('default_commentator', ['bookId', 'commentatorBookId'],
       updatable: true),
   PatchTableSpec('default_targum', ['bookId', 'targumBookId'], updatable: true),
+  // סכמה 7. באנר והגבלת מו"ל לספר, שמות קודש מאומתים והערות שוליים לשורה.
+  PatchTableSpec('book_banner', ['bookId'], updatable: true),
+  PatchTableSpec('book_protection', ['bookId'], updatable: true),
+  PatchTableSpec('line_divine_name', ['lineId', 'charStart'], updatable: true),
+  PatchTableSpec('line_note', ['lineId', 'noteIndex'], updatable: true),
   PatchTableSpec('schema_meta', ['key'], updatable: true),
 ];
 
@@ -111,7 +116,7 @@ const List<String> kHashTableOrderSchema2 = [
 ];
 
 /// גרסת סכמת ה-DB הלוגית הגבוהה ביותר שה-hasher וה-planner מכירים.
-const int kSupportedDbSchemaVersion = 6;
+const int kSupportedDbSchemaVersion = 7;
 
 /// הסכמה שצרכן מקבל כשאינו מצהיר אחרת. קורא `line_content` (סכמה 6) מצהיר
 /// במפורש, כך ש-build של אפליקציה ישנה מול `ref: main` צף לא יוריד DB שאינו קורא.
@@ -256,8 +261,56 @@ const List<String> kHashTableOrderSchema6 = [
   'schema_meta',
 ];
 
-/// סדר ה-hash הנוכחי (סכמה 6).
-const List<String> kHashTableOrder = kHashTableOrderSchema6;
+/// סדר ה-hash של סכמה 7 (43 טבלאות): סדר סכמה 6, ולפני `schema_meta` ארבע
+/// הטבלאות `book_banner`, `book_protection`, `line_divine_name` ו-`line_note`.
+const List<String> kHashTableOrderSchema7 = [
+  'source',
+  'author',
+  'topic',
+  'pub_place',
+  'pub_date',
+  'connection_type',
+  'generation',
+  'category',
+  'category_closure',
+  'tocText',
+  'book',
+  'book_topic',
+  'book_author',
+  'book_base_text',
+  'book_pub_place',
+  'book_pub_date',
+  'book_generation',
+  'tocEntry',
+  'line',
+  'line_content',
+  'zstd_dict',
+  'line_toc',
+  'line_ref',
+  'line_dh',
+  'link',
+  'link_anchor',
+  'link_range',
+  'link_coverage',
+  'link_suppressed_side',
+  'book_has_links',
+  'book_version',
+  'version_line',
+  'book_acronym',
+  'alt_toc_structure',
+  'alt_toc_entry',
+  'line_alt_toc',
+  'default_commentator',
+  'default_targum',
+  'book_banner',
+  'book_protection',
+  'line_divine_name',
+  'line_note',
+  'schema_meta',
+];
+
+/// סדר ה-hash הנוכחי (סכמה 7).
+const List<String> kHashTableOrder = kHashTableOrderSchema7;
 
 /// סדר ה-hash הקפוא של סכמה-1 (33 טבלאות, ללא `book_base_text`) — משחזר בדיוק
 /// את ה-hash של ארטיפקטי סכמה-1 ההיסטוריים. לעולם אין לערוך.
