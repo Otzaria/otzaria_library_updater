@@ -18,9 +18,7 @@ export 'src/models/split_asset.dart'
 export 'src/models/patch_table_spec.dart'
     show
         PatchTableSpec,
-        OptionalPatchTableSpec,
         kPatchTablesInFkOrder,
-        kOptionalPatchTables,
         kHashTableOrder,
         kDefaultConsumerDbSchemaVersion,
         kSupportedDbSchemaVersion;

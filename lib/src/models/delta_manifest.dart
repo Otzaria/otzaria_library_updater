@@ -87,10 +87,6 @@ class DeltaManifest extends Equatable {
   /// [toSchemaVersion]. מאפשר ללקוח לאמת רק את הטבלאות שהשתנו.
   final Map<String, String>? toTableContentHashes;
 
-  /// hash לכל טבלה אופציונלית (ראו `kOptionalPatchTables`) של ה-DB *אחרי*
-  /// ה-patch, באותו אלגוריתם טבלה. רק טבלאות שקיימות ב-DB החדש. null כשחסר.
-  final Map<String, String>? optionalTableContentHashes;
-
   /// מניפסט "מחסום" של מעבר סכמה: אינו patch אמיתי ולעולם אינו שלב במסלול
   /// דלתא — מסמן שהמעבר מ-[fromVersion] מחייב הורדת DB מלא.
   final bool fullRebase;
@@ -109,7 +105,6 @@ class DeltaManifest extends Equatable {
     required this.toContentHash,
     this.fromTableContentHashes,
     this.toTableContentHashes,
-    this.optionalTableContentHashes,
     required this.patchFiles,
     this.fullRebase = false,
     this.booksTouched = const [],
@@ -150,8 +145,6 @@ class DeltaManifest extends Equatable {
       toContentHash: _requireString(json, 'toContentHash'),
       fromTableContentHashes: fromTables,
       toTableContentHashes: toTables,
-      optionalTableContentHashes:
-          _optionalStringMap(json, 'optionalTableContentHashes'),
       patchFiles: patchFilesRaw
           .map((e) => PatchFileEntry.fromJson(e as Map<String, dynamic>))
           .toList(growable: false),
@@ -178,7 +171,6 @@ class DeltaManifest extends Equatable {
         toContentHash,
         fromTableContentHashes,
         toTableContentHashes,
-        optionalTableContentHashes,
         patchFiles,
         fullRebase,
         booksTouched,
