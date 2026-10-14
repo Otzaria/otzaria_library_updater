@@ -1753,9 +1753,21 @@ void main() {
       'CREATE TABLE IF NOT EXISTS line_note (\n'
           '    lineId INTEGER NOT NULL REFERENCES line(id) ON DELETE CASCADE,\n'
           '    noteIndex INTEGER NOT NULL,\n'
+          '    charPos INTEGER NOT NULL,\n'
           '    marker TEXT,\n'
           '    body TEXT NOT NULL,\n'
           '    PRIMARY KEY (lineId, noteIndex)\n'
+          ') WITHOUT ROWID',
+      'CREATE TABLE IF NOT EXISTS line_note_divine_name (\n'
+          '    lineId INTEGER NOT NULL,\n'
+          '    noteIndex INTEGER NOT NULL,\n'
+          '    charStart INTEGER NOT NULL,\n'
+          '    charEnd INTEGER NOT NULL,\n'
+          '    kind INTEGER NOT NULL,\n'
+          '    source INTEGER NOT NULL,\n'
+          '    PRIMARY KEY (lineId, noteIndex, charStart),\n'
+          '    FOREIGN KEY (lineId, noteIndex) REFERENCES line_note(lineId, '
+          'noteIndex) ON DELETE CASCADE\n'
           ') WITHOUT ROWID',
     ];
     const newTables = [
@@ -1763,6 +1775,7 @@ void main() {
       'book_protection',
       'line_divine_name',
       'line_note',
+      'line_note_divine_name',
     ];
     const lineWithNotes = 'פסוק<sup class="footnote-marker">1</sup> וסוף';
     const banners = [
@@ -1774,10 +1787,15 @@ void main() {
     const divineNames = [
       [10, 0, 4, 1, 1],
     ];
+    // charPos: מיקום גלוי בשורה המופשטת — אחרי ה-sup המעוגן, או בסוף השורה.
     const notes = [
-      [10, 0, '1', 'גוף <i>ההערה</i>'],
-      [10, 1, null, 'הערה בלי סימן'],
-      [30, 0, '*', 'בספר השני'],
+      [10, 0, 5, '1', 'גוף <i>ההערה</i>'],
+      [10, 1, 10, null, 'הערה בלי סימן'],
+      [30, 0, 0, '*', 'בספר השני'],
+    ];
+    const noteDivineNames = [
+      [10, 0, 4, 9, 1, 1],
+      [30, 0, 0, 4, 5, 2],
     ];
 
     Map<String, List<List<Object?>>> newRows() => {
@@ -1785,6 +1803,7 @@ void main() {
           'book_protection': protections,
           'line_divine_name': divineNames,
           'line_note': notes,
+          'line_note_divine_name': noteDivineNames,
         };
 
     void insertRows(sqlite3.Database db, String prefix,
@@ -1874,8 +1893,12 @@ void main() {
           'charStart INTEGER, charEnd INTEGER, kind INTEGER, source INTEGER, '
           'PRIMARY KEY (lineId, charStart))');
       db.execute('CREATE TABLE upsert_line_note (lineId INTEGER, '
-          'noteIndex INTEGER, marker TEXT, body TEXT, '
+          'noteIndex INTEGER, charPos INTEGER, marker TEXT, body TEXT, '
           'PRIMARY KEY (lineId, noteIndex))');
+      db.execute('CREATE TABLE upsert_line_note_divine_name (lineId INTEGER, '
+          'noteIndex INTEGER, charStart INTEGER, charEnd INTEGER, '
+          'kind INTEGER, source INTEGER, '
+          'PRIMARY KEY (lineId, noteIndex, charStart))');
       insertRows(db, 'upsert_', rows ?? newRows());
       db.close();
       return path;
@@ -1934,7 +1957,7 @@ void main() {
               perTable ? tableHashes(expected, kHashTableOrderSchema7) : null,
         );
 
-    test('אימות מלא: migrations יוצרות את ארבע הטבלאות וה-upserts ממלאים', () {
+    test('אימות מלא: migrations יוצרות את חמש הטבלאות וה-upserts ממלאים', () {
       final base = buildSchema6Base('s7_full_base');
       final expected = buildExpected7('s7_full_expected');
       final patch = buildPatch6to7('s7_full_patch');
@@ -1947,14 +1970,15 @@ void main() {
           patchPath: patch,
           manifest: manifest6to7(base, expected));
 
-      expect(r.migrations, 4);
+      expect(r.migrations, 5);
       expect(r.resultHash, _hashWithOrder(expected, kHashTableOrderSchema7));
       expect(r.upserts, containsPair('line_content', 1));
       expect(r.upserts, containsPair('book_banner', 1));
       expect(r.upserts, containsPair('book_protection', 1));
       expect(r.upserts, containsPair('line_divine_name', 1));
       expect(r.upserts, containsPair('line_note', 3));
-      // line_note ממופה לספרים דרך line; שלוש טבלאות התצוגה אינן תוכן חיפוש.
+      expect(r.upserts, containsPair('line_note_divine_name', 2));
+      // טבלאות ההערות ממופות לספרים דרך line; שלוש טבלאות התצוגה אינן תוכן חיפוש.
       expect(r.booksTouched, {1, 2});
       expect(r.hasChangesOutsideBooksTouched, isFalse);
       for (final t in newTables) {
@@ -2000,7 +2024,9 @@ void main() {
       final patch = buildPatch6to7('s7_bad_patch', rows: {
         ...newRows(),
         'line_note': [
-          [10, 0, '1', 'גוף אחר'],
+          [10, 0, 5, '1', 'גוף אחר'],
+          [10, 1, 10, null, 'הערה בלי סימן'],
+          [30, 0, 0, '*', 'בספר השני'],
         ],
       });
       final before = _hashWithOrder(base, kHashTableOrderSchema6);
@@ -2047,7 +2073,7 @@ void main() {
       );
     });
 
-    test('מחיקת שורה וספר בסכמה 7 מתגלגלת לארבע הטבלאות', () {
+    test('מחיקת שורה וספר בסכמה 7 מתגלגלת לכל הטבלאות החדשות', () {
       final base =
           buildDb('s7_cascade_base', version: 1, schema: 7, rows: newRows());
       final expected = buildDb('s7_cascade_expected',
@@ -2081,9 +2107,47 @@ void main() {
       expect(r.deletes['line'], 2);
       expect(r.deletes['book'], 1);
       expect(rowsOf(base, 'line_note'), isEmpty);
+      expect(rowsOf(base, 'line_note_divine_name'), isEmpty);
       expect(rowsOf(base, 'line_divine_name'), isEmpty);
       expect(rowsOf(base, 'book_protection'), isEmpty);
       expect(rowsOf(base, 'book_banner'), banners);
+    });
+
+    test('מחיקת הערה מתגלגלת לשמות הקודש שבגופה בלבד', () {
+      final base = buildDb('s7_notecascade_base',
+          version: 1, schema: 7, rows: newRows());
+      final expected =
+          buildDb('s7_notecascade_expected', version: 2, schema: 7, rows: {
+        ...newRows(),
+        'line_note': [notes[1], notes[2]],
+        'line_note_divine_name': [noteDivineNames[1]],
+      });
+      final patch = buildPatchDb(from: 1, to: 2, schemaVersion: 4);
+      final pdb = sqlite3.sqlite3.open(patch);
+      pdb.execute('CREATE TABLE delete_line_note (lineId INTEGER, '
+          'noteIndex INTEGER, PRIMARY KEY (lineId, noteIndex))');
+      pdb.execute('INSERT INTO delete_line_note VALUES (10, 0)');
+      pdb.close();
+
+      // אין delete_line_note_divine_name: ה-CASCADE מה-FK המורכב מוחק אותה.
+      final r = _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: _manifest(
+          from: 1,
+          to: 2,
+          fromSchema: 7,
+          toSchema: 7,
+          fromHash: _hashWithOrder(base, kHashTableOrderSchema7),
+          toHash: _hashWithOrder(expected, kHashTableOrderSchema7),
+        ),
+      );
+
+      expect(r.deletes['line_note'], 1);
+      expect(r.booksTouched, {1});
+      expect(rowsOf(base, 'line_note'), [notes[1], notes[2]]);
+      expect(rowsOf(base, 'line_note_divine_name'), [noteDivineNames[1]]);
+      expect(rowsOf(base, 'line_divine_name'), divineNames);
     });
 
     // golden משותף עם SeforimLibrary: אותן שורות (בכל סדר הכנסה) חייבות לתת
@@ -2107,7 +2171,9 @@ void main() {
         'line_divine_name':
             '278213e576ad7f0865c73036789d82ec801bb65e594d9eee0ec6e6e799325b85',
         'line_note':
-            'e484b003c6701873e28a91136af62ff0b41f6416aec35fee56749eabb85a35c2',
+            '027c225d40b02cfc2025d0c279668dcd341af7ab68c725b3b187fac0dbdce8a8',
+        'line_note_divine_name':
+            '4c7710872d55a8575723dac795a2de02e09085ec0643712cc4aa41014d5320aa',
       });
 
       final w = sqlite3.sqlite3.open(path);
@@ -2131,10 +2197,16 @@ void main() {
           [1, 12, 17, 5, 2],
         ],
         'line_note': [
-          [2, 0, null, 'הערה בלי סימן'],
-          [1, 1, '<b>ב</b>', 'גוף עם <i>נטוי</i> פנימי'],
-          [1, 0, '1', 'הערה ראשונה'],
-          [3, 0, '*', ''],
+          [2, 0, 7, null, 'הערה בלי סימן'],
+          [1, 1, 12, '<b>ב</b>', 'גוף עם <i>נטוי</i> פנימי'],
+          [1, 0, 3, '1', 'הערה ראשונה'],
+          [3, 0, 0, '*', ''],
+        ],
+        'line_note_divine_name': [
+          [1, 1, 8, 12, 3, 4],
+          [1, 0, 0, 4, 1, 1],
+          [2, 0, 5, 9, 7, 3],
+          [1, 0, 6, 11, 5, 2],
         ],
       });
       w.close();
@@ -2146,7 +2218,9 @@ void main() {
         'line_divine_name':
             'e0b9cc2885495c4bf2ebdfe044b06948aa8cb0c859e777d45b880e59f3d4e799',
         'line_note':
-            'ed408b011d06079b6a0c61c10e4406a79fc3a701a489e7faba9306db5e89e3be',
+            'faaf50adcffcf819341d2c49153a0d641f2de65efda01aa92a465f7617bd7fb0',
+        'line_note_divine_name':
+            '85daae62eaacd8c85f7c3ae1c572e37be89da49f9b73278a5fbfbf91dc4bd673',
       });
     });
   });
@@ -2199,12 +2273,13 @@ void main() {
             ..remove('zstd_dict'),
           kHashTableOrderSchema5);
     });
-    test('סכמה-7 → סדר 43 הנוכחי, ארבע הטבלאות החדשות לפני schema_meta', () {
+    test('סכמה-7 → סדר 44 הנוכחי, חמש הטבלאות החדשות לפני schema_meta', () {
       const added = [
         'book_banner',
         'book_protection',
         'line_divine_name',
         'line_note',
+        'line_note_divine_name',
       ];
       expect(hashTableOrderForSchemaVersion(7), same(kHashTableOrderSchema7));
       expect(kHashTableOrder, same(kHashTableOrderSchema7));
@@ -2214,7 +2289,7 @@ void main() {
         'schema_meta',
       ]);
       final fk = kPatchTablesInFkOrder.map((t) => t.name).toList();
-      expect(fk.sublist(fk.length - 5), [...added, 'schema_meta']);
+      expect(fk.sublist(fk.length - 6), [...added, 'schema_meta']);
       expect(fk.toSet(), kHashTableOrderSchema7.toSet());
       expect({
         for (final t in kPatchTablesInFkOrder)
@@ -2225,6 +2300,7 @@ void main() {
         'book_protection': 'bookId true',
         'line_divine_name': 'lineId,charStart true',
         'line_note': 'lineId,noteIndex true',
+        'line_note_divine_name': 'lineId,noteIndex,charStart true',
       });
     });
     test('גרסת סכמה לא מוכרת → זורק PatchApplyException', () {

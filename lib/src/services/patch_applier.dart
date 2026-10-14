@@ -12,13 +12,14 @@ import 'logical_content_hasher.dart';
 /// `line_ref` ו-`line_dh` (סכמה 4) מוחרגות במכוון: הן אינדקסים נגזרים
 /// (הפניה→שורה, דיבור-המתחיל→שורה) ולא תוכן שנכנס לאינדקס החיפוש, ושינוי
 /// בהן לבדן לא צריך לגרור רענון אינדקס לספר — שינוי תוכן אמיתי מגיע תמיד
-/// דרך `line` / `line_content` שכבר מכוסות. `line_note` (סכמה 7) מכוסה: גוף
-/// הערת השוליים היה חלק מתוכן השורה.
+/// דרך `line` / `line_content` שכבר מכוסות. `line_note` ו-`line_note_divine_name`
+/// (סכמה 7) מכוסות: גוף הערת השוליים היה חלק מתוכן השורה.
 const Set<String> kBooksTouchedTables = {
   'book',
   'line',
   'line_content',
   'line_note',
+  'line_note_divine_name',
   'tocEntry',
   'line_toc',
   'tocText',
@@ -189,7 +190,7 @@ class PatchApplyException implements Exception {
 /// בוחר את סדר ה-hash לפי גרסת הסכמה: 1 → [kHashTableOrderSchema1] (33),
 /// 2 → [kHashTableOrderSchema2] (34), 3 → [kHashTableOrderSchema3] (35),
 /// 4 → [kHashTableOrderSchema4], 5 → [kHashTableOrderSchema5] (37),
-/// 6 → [kHashTableOrderSchema6] (39), 7 → [kHashTableOrderSchema7] (43, הנוכחי).
+/// 6 → [kHashTableOrderSchema6] (39), 7 → [kHashTableOrderSchema7] (44, הנוכחי).
 /// כל ערך אחר → זריקה (fail loudly).
 List<String> hashTableOrderForSchemaVersion(int schemaVersion) {
   switch (schemaVersion) {
@@ -856,11 +857,13 @@ class PatchApplier {
           'SELECT DISTINCT t.bookId FROM patch.${op}_tocEntry p '
               'JOIN main.tocEntry t ON t.id = p.id',
           joins: const ['tocEntry']);
-      collect(
-          '${op}_line_note',
-          'SELECT DISTINCT l.bookId FROM patch.${op}_line_note p '
-              'JOIN main.line l ON l.id = p.lineId',
-          joins: const ['line']);
+      for (final t in const ['line_note', 'line_note_divine_name']) {
+        collect(
+            '${op}_$t',
+            'SELECT DISTINCT l.bookId FROM patch.${op}_$t p '
+                'JOIN main.line l ON l.id = p.lineId',
+            joins: const ['line']);
+      }
       collect(
           '${op}_line_toc',
           'SELECT DISTINCT l.bookId FROM patch.${op}_line_toc p '
