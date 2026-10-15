@@ -40,6 +40,15 @@ class _AssetServer {
 
   Future<void> close() => _server.close(force: true);
 
+  /// ממתין שבקשות מריצה קודמת שעוד בדרך יגיעו וייסגרו, לפני איפוס [requests].
+  Future<void> settle() async {
+    var seen = -1;
+    while (seen != requests.length || active > 0) {
+      seen = requests.length;
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    }
+  }
+
   Future<void> _handle(HttpRequest request) async {
     final response = request.response;
     final range = request.headers.value('range');
@@ -270,6 +279,7 @@ void main() {
 
     File(dest).deleteSync();
     File('$dest.resume').deleteSync();
+    await server.settle();
     server.requests.clear();
     // טווח 2 נקטע תמיד לפני הבית הראשון: נכשל אחרי 1+1 ניסיונות.
     server.cutAfter = (start, end, _) => start == size ~/ 2 ? 0 : null;
@@ -291,6 +301,7 @@ void main() {
     server.cutAfter = null;
     server.data = _data(size, 7);
     server.etag = '"v2"';
+    await server.settle();
     server.requests.clear();
     await download(downloader());
 
@@ -322,6 +333,7 @@ void main() {
     expect(keptTotal, greaterThan(0));
 
     server.cutAfter = null;
+    await server.settle();
     server.requests.clear();
     client.received = 0;
     // מופע חדש: רק מה שעל הדיסק עובר בין הריצות.
@@ -456,6 +468,7 @@ void main() {
 
     File(dest).deleteSync();
     File('$dest.resume').deleteSync();
+    await server.settle();
     server.requests.clear();
     server.mutate = (start, body) {
       if (start == size ~/ 2) body[10] ^= 0xFF;
@@ -503,6 +516,7 @@ void main() {
     File(dest).deleteSync();
     File('$dest.resume').deleteSync();
     server.data = _data(size);
+    await server.settle();
     server.requests.clear();
     await download(downloader(maxConnections: 1), sha: _sha(server.data));
     expect(File(dest).readAsBytesSync(), server.data);
