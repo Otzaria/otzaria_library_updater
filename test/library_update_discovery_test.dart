@@ -542,4 +542,93 @@ void main() {
       expect(result.latestFullDbAsset?.name, 'seforim.db.zst');
     });
   });
+  group('discover — מעבר סכמה 6→7', () {
+    // v31 בסכמה 7: DB מלא seforim-schema7.db.zst ודלתא רגילה 6→7 מ-v30.
+    List<Map<String, Object>> assets(String tag, List<String> names) => [
+          for (final n in names)
+            {'name': n, 'browser_download_url': 'https://x/$tag/$n', 'size': 9},
+        ];
+    final releasesJson = jsonEncode([
+      {
+        'tag_name': 'v31',
+        'prerelease': false,
+        'draft': false,
+        'assets': assets('v31', [
+          'seforim-schema7.db.zst',
+          'patch-v30-v31.db.zst',
+          'patch-v30-v31.db.zst.manifest.json',
+        ]),
+      },
+      {
+        'tag_name': 'v30',
+        'prerelease': false,
+        'draft': false,
+        'assets': assets('v30', ['seforim-schema6.db.zst']),
+      },
+    ]);
+    final manifestJson = jsonEncode({
+      'fromVersion': 30,
+      'toVersion': 31,
+      'fromSchemaVersion': 6,
+      'toSchemaVersion': 7,
+      'patchFormatVersion': 4,
+      'fromContentHash': 'h30',
+      'toContentHash': 'h31',
+      'patchFiles': [
+        {
+          'file': 'patch-v30-v31.db.zst',
+          'compression': 'zstd',
+          'sha256': 'c',
+          'size': 9,
+          'uncompressedSha256': 'u',
+          'uncompressedSize': 9,
+        }
+      ],
+    });
+
+    Future<LibraryUpdatePlan> discoverAndPlan(int supported) async {
+      final mock = MockClient((request) async {
+        final url = request.url.toString();
+        if (url.contains('/releases')) {
+          return http.Response(releasesJson, 200);
+        }
+        if (url.endsWith('patch-v30-v31.db.zst.manifest.json')) {
+          return http.Response(manifestJson, 200);
+        }
+        return http.Response('not found', 404);
+      });
+      final result = await LibraryUpdateDiscovery(
+        client: GithubLibraryReleaseClient(httpClient: mock),
+        supportedDbSchemaVersion: supported,
+      ).discover(allowPrerelease: false);
+      expect(result.latestVersion, 31);
+      expect(result.latestDbSchemaVersion, 7);
+      expect(result.edges.single.manifest.toSchemaVersion, 7);
+      return LibraryUpdatePlanner(supportedDbSchemaVersion: supported).plan(
+        localVersion: 30,
+        localSchemaVersion: 6,
+        hasLocalVersionMeta: true,
+        latestVersion: result.latestVersion,
+        latestDbSchemaVersion: result.latestDbSchemaVersion,
+        edges: result.edges,
+        latestFullDbAsset: result.latestFullDbAsset,
+        latestReleaseTag: result.latestReleaseTag,
+      );
+    }
+
+    test('לקוח סכמה 7: דלתא 6→7 ו-fallback מלא seforim-schema7.db.zst',
+        () async {
+      final plan = await discoverAndPlan(7);
+      expect(plan.kind, LibraryUpdatePlanKind.delta);
+      expect(plan.deltaSteps.single.manifest.fromSchemaVersion, 6);
+      expect(plan.fullDbAsset?.name, 'seforim-schema7.db.zst');
+    });
+
+    test('לקוח סכמה 6: חסום עם סיבת עדכון אפליקציה, בלי DB מלא ישן', () async {
+      final plan = await discoverAndPlan(6);
+      expect(plan.kind, LibraryUpdatePlanKind.blocked);
+      expect(plan.fullDbAsset, isNull);
+      expect(plan.reason, contains('נדרש עדכון אפליקציה'));
+    });
+  });
 }

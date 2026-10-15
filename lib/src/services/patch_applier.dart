@@ -13,11 +13,13 @@ import 'logical_content_hasher.dart';
 /// `line_ref` ו-`line_dh` (סכמה 4) מוחרגות במכוון: הן אינדקסים נגזרים
 /// (הפניה→שורה, דיבור-המתחיל→שורה) ולא תוכן שנכנס לאינדקס החיפוש, ושינוי
 /// בהן לבדן לא צריך לגרור רענון אינדקס לספר — שינוי תוכן אמיתי מגיע תמיד
-/// דרך `line` / `line_content` שכבר מכוסות.
+/// דרך `line` / `line_content` שכבר מכוסות. `line_note` (סכמה 7) מכוסה: גוף
+/// הערת השוליים היה חלק מתוכן השורה.
 const Set<String> kBooksTouchedTables = {
   'book',
   'line',
   'line_content',
+  'line_note',
   'tocEntry',
   'line_toc',
   'tocText',
@@ -116,11 +118,19 @@ class PatchApplyResult {
   final Map<String, int> verifyTableBytes;
 
   /// האם ה-patch שינה טבלאות שאינן מכוסות ב-[booksTouched] (מלבד schema_meta,
-  /// שמתעדכן בכל patch, ו-line_ref/line_dh, שאינן תוכן חיפוש — ראו
-  /// [kBooksTouchedTables]). כש-true, צרכן שהאינדקס שלו תלוי בטבלאות האלה
+  /// שמתעדכן בכל patch, ו-line_ref/line_dh וטבלאות התצוגה של סכמה 7,
+  /// שאינן תוכן חיפוש — ראו [kBooksTouchedTables]). כש-true, צרכן שהאינדקס שלו תלוי בטבלאות האלה
   /// צריך רענון מלא — אין דרך לגזור מהן מזהי ספרים מדויקים.
   bool get hasChangesOutsideBooksTouched {
-    const ignored = {'schema_meta', 'line_ref', 'line_dh'};
+    const ignored = {
+      'schema_meta',
+      'line_ref',
+      'line_dh',
+      'book_banner',
+      'book_protection',
+      'line_divine_name',
+      'line_note_divine_name',
+    };
     bool changed(MapEntry<String, int> e) =>
         e.value > 0 &&
         !ignored.contains(e.key) &&
@@ -856,6 +866,11 @@ class PatchApplier {
           'SELECT DISTINCT t.bookId FROM patch.${op}_tocEntry p '
               'JOIN main.tocEntry t ON t.id = p.id',
           joins: const ['tocEntry']);
+      collect(
+          '${op}_line_note',
+          'SELECT DISTINCT l.bookId FROM patch.${op}_line_note p '
+              'JOIN main.line l ON l.id = p.lineId',
+          joins: const ['line']);
       collect(
           '${op}_line_toc',
           'SELECT DISTINCT l.bookId FROM patch.${op}_line_toc p '

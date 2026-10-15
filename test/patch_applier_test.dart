@@ -1729,6 +1729,542 @@ void main() {
     });
   });
 
+  group('שדרוג סכמה 6→7 (line_note וטבלאות התצוגה)', () {
+    // אות-באות כמו בחוזה של SeforimLibrary — אלה שורות ה-migrations של 6→7.
+    const schema7Ddl = [
+      'CREATE TABLE IF NOT EXISTS book_banner (\n'
+          '    bookId INTEGER PRIMARY KEY NOT NULL REFERENCES book(id) '
+          'ON DELETE CASCADE,\n'
+          '    text TEXT NOT NULL\n'
+          ')',
+      'CREATE TABLE IF NOT EXISTS book_protection (\n'
+          '    bookId INTEGER PRIMARY KEY NOT NULL REFERENCES book(id) '
+          'ON DELETE CASCADE,\n'
+          '    level INTEGER NOT NULL CHECK (level >= 1)\n'
+          ')',
+      'CREATE TABLE IF NOT EXISTS line_divine_name (\n'
+          '    lineId INTEGER NOT NULL REFERENCES line(id) ON DELETE CASCADE,\n'
+          '    charStart INTEGER NOT NULL,\n'
+          '    charEnd INTEGER NOT NULL,\n'
+          '    kind INTEGER NOT NULL,\n'
+          '    source INTEGER NOT NULL,\n'
+          '    PRIMARY KEY (lineId, charStart)\n'
+          ') WITHOUT ROWID',
+      'CREATE TABLE IF NOT EXISTS line_note (\n'
+          '    lineId INTEGER NOT NULL REFERENCES line(id) ON DELETE CASCADE,\n'
+          '    noteIndex INTEGER NOT NULL,\n'
+          '    charPos INTEGER NOT NULL,\n'
+          '    marker TEXT,\n'
+          '    body TEXT NOT NULL,\n'
+          '    PRIMARY KEY (lineId, noteIndex)\n'
+          ') WITHOUT ROWID',
+      'CREATE TABLE IF NOT EXISTS line_note_divine_name (\n'
+          '    lineId INTEGER NOT NULL,\n'
+          '    noteIndex INTEGER NOT NULL,\n'
+          '    charStart INTEGER NOT NULL,\n'
+          '    charEnd INTEGER NOT NULL,\n'
+          '    kind INTEGER NOT NULL,\n'
+          '    source INTEGER NOT NULL,\n'
+          '    PRIMARY KEY (lineId, noteIndex, charStart),\n'
+          '    FOREIGN KEY (lineId, noteIndex) REFERENCES line_note(lineId, '
+          'noteIndex) ON DELETE CASCADE\n'
+          ') WITHOUT ROWID',
+    ];
+    const newTables = [
+      'book_banner',
+      'book_protection',
+      'line_divine_name',
+      'line_note',
+      'line_note_divine_name',
+    ];
+    const lineWithNotes = 'פסוק<sup class="footnote-marker">1</sup> וסוף';
+    const banners = [
+      [1, 'באדיבות המו"ל'],
+    ];
+    const protections = [
+      [2, 1],
+    ];
+    const divineNames = [
+      [10, 0, 4, 1, 1],
+    ];
+    // charPos: מיקום גלוי בשורה המופשטת — אחרי ה-sup המעוגן, או בסוף השורה.
+    const notes = [
+      [10, 0, 5, '1', 'גוף <i>ההערה</i>'],
+      [10, 1, 10, null, 'הערה בלי סימן'],
+      [30, 0, 0, '*', 'בספר השני'],
+    ];
+    const noteDivineNames = [
+      [10, 0, 4, 9, 1, 1],
+      [30, 0, 0, 4, 5, 2],
+    ];
+
+    Map<String, List<List<Object?>>> newRows() => {
+          'book_banner': banners,
+          'book_protection': protections,
+          'line_divine_name': divineNames,
+          'line_note': notes,
+          'line_note_divine_name': noteDivineNames,
+        };
+
+    void insertRows(sqlite3.Database db, String prefix,
+        Map<String, List<List<Object?>>> rows) {
+      rows.forEach((table, list) {
+        for (final r in list) {
+          final marks = List.filled(r.length, '?').join(',');
+          db.execute('INSERT INTO "$prefix$table" VALUES ($marks)', r);
+        }
+      });
+    }
+
+    String buildDb(String name,
+        {required int version,
+        required int schema,
+        List<int> lines = const [10, 20, 30],
+        List<int> books = const [1, 2],
+        String line10 = lineWithNotes,
+        Map<String, List<List<Object?>>> rows = const {}}) {
+      final path = '${tmp.path}/$name.db';
+      final db = sqlite3.sqlite3.open(path);
+      db.execute('CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT)');
+      db.execute("INSERT INTO schema_meta VALUES ('db_version','$version'),"
+          "('db_schema_version','$schema')");
+      db.execute('CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT)');
+      for (final id in books) {
+        db.execute('INSERT INTO book VALUES (?, ?)', [id, 'ספר $id']);
+      }
+      db.execute('CREATE TABLE line (id INTEGER PRIMARY KEY, '
+          'bookId INTEGER NOT NULL, lineIndex INTEGER NOT NULL)');
+      db.execute('CREATE TABLE line_content (id INTEGER PRIMARY KEY, '
+          'content TEXT NOT NULL, '
+          'FOREIGN KEY (id) REFERENCES line(id) ON DELETE CASCADE)');
+      for (final id in lines) {
+        db.execute('INSERT INTO line VALUES (?, ?, ?)',
+            [id, id == 30 ? 2 : 1, id ~/ 10]);
+        db.execute('INSERT INTO line_content VALUES (?, ?)',
+            [id, id == 10 ? line10 : 'שורה $id']);
+      }
+      if (schema >= 7) {
+        for (final ddl in schema7Ddl) {
+          db.execute(ddl);
+        }
+        insertRows(db, '', rows);
+      }
+      db.close();
+      return path;
+    }
+
+    String buildSchema6Base(String name) => buildDb(name,
+        version: 1,
+        schema: 6,
+        line10: 'פסוק<sup class="footnote-marker">1</sup>'
+            '<i class="footnote">גוף <i>ההערה</i></i> וסוף');
+
+    String buildExpected7(String name) =>
+        buildDb(name, version: 2, schema: 7, rows: newRows());
+
+    /// patch 6→7 בפורמט 4: ה-DDL כ-migrations, ואז upserts בלבד — הטבלאות
+    /// חדשות אצל הלקוח, ו-line_content מאבדת את גוף ההערה.
+    String buildPatch6to7(String name,
+        {Map<String, List<List<Object?>>>? rows}) {
+      final path = '${tmp.path}/$name.db';
+      final db = sqlite3.sqlite3.open(path);
+      db.execute('CREATE TABLE patch_meta (key TEXT PRIMARY KEY, value TEXT)');
+      db.execute("INSERT INTO patch_meta VALUES ('schema_version','4'),"
+          "('from_version','1'),('to_version','2')");
+      db.execute(
+          'CREATE TABLE migrations (version INTEGER PRIMARY KEY, sql TEXT)');
+      for (var i = 0; i < schema7Ddl.length; i++) {
+        db.execute(
+            'INSERT INTO migrations VALUES (?, ?)', [i + 1, schema7Ddl[i]]);
+      }
+      db.execute(
+          'CREATE TABLE upsert_schema_meta (key TEXT PRIMARY KEY, value TEXT)');
+      db.execute("INSERT INTO upsert_schema_meta VALUES ('db_version','2'),"
+          "('db_schema_version','7')");
+      db.execute('CREATE TABLE upsert_line_content '
+          '(id INTEGER PRIMARY KEY, content TEXT NOT NULL)');
+      db.execute(
+          'INSERT INTO upsert_line_content VALUES (10, ?)', [lineWithNotes]);
+      db.execute('CREATE TABLE upsert_book_banner (bookId INTEGER PRIMARY KEY, '
+          'text TEXT NOT NULL)');
+      db.execute('CREATE TABLE upsert_book_protection '
+          '(bookId INTEGER PRIMARY KEY, level INTEGER NOT NULL)');
+      db.execute('CREATE TABLE upsert_line_divine_name (lineId INTEGER, '
+          'charStart INTEGER, charEnd INTEGER, kind INTEGER, source INTEGER, '
+          'PRIMARY KEY (lineId, charStart))');
+      db.execute('CREATE TABLE upsert_line_note (lineId INTEGER, '
+          'noteIndex INTEGER, charPos INTEGER, marker TEXT, body TEXT, '
+          'PRIMARY KEY (lineId, noteIndex))');
+      db.execute('CREATE TABLE upsert_line_note_divine_name (lineId INTEGER, '
+          'noteIndex INTEGER, charStart INTEGER, charEnd INTEGER, '
+          'kind INTEGER, source INTEGER, '
+          'PRIMARY KEY (lineId, noteIndex, charStart))');
+      insertRows(db, 'upsert_', rows ?? newRows());
+      db.close();
+      return path;
+    }
+
+    Map<String, String> tableHashes(String dbPath, List<String> order) {
+      final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
+      try {
+        return _hasher.computeReport(db, tableOrder: order).tableHashes;
+      } finally {
+        db.close();
+      }
+    }
+
+    List<List<Object?>> rowsOf(String dbPath, String table) {
+      final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
+      try {
+        final pk = kPatchTablesInFkOrder
+            .firstWhere((t) => t.name == table)
+            .primaryKey
+            .map((c) => '"$c"')
+            .join(',');
+        return db
+            .select('SELECT * FROM "$table" ORDER BY $pk')
+            .map((r) => r.values)
+            .toList();
+      } finally {
+        db.close();
+      }
+    }
+
+    bool hasTable(String dbPath, String table) {
+      final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
+      try {
+        return db.select(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            [table]).isNotEmpty;
+      } finally {
+        db.close();
+      }
+    }
+
+    DeltaManifest manifest6to7(String base, String expected,
+            {bool perTable = false}) =>
+        _manifest(
+          from: 1,
+          to: 2,
+          fromSchema: 6,
+          toSchema: 7,
+          patchFormat: 4,
+          fromHash: _hashWithOrder(base, kHashTableOrderSchema6),
+          toHash: _hashWithOrder(expected, kHashTableOrderSchema7),
+          fromTables:
+              perTable ? tableHashes(base, kHashTableOrderSchema6) : null,
+          toTables:
+              perTable ? tableHashes(expected, kHashTableOrderSchema7) : null,
+        );
+
+    test('אימות מלא: migrations יוצרות את חמש הטבלאות וה-upserts ממלאים', () {
+      final base = buildSchema6Base('s7_full_base');
+      final expected = buildExpected7('s7_full_expected');
+      final patch = buildPatch6to7('s7_full_patch');
+      // אותו DB נותן hash אחר בסדר סכמה 7 — אסור לחשב את ה-from בסדר היעד.
+      expect(_hashWithOrder(base, kHashTableOrderSchema7),
+          isNot(_hashWithOrder(base, kHashTableOrderSchema6)));
+
+      final r = _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifest6to7(base, expected));
+
+      expect(r.migrations, 5);
+      expect(r.resultHash, _hashWithOrder(expected, kHashTableOrderSchema7));
+      expect(r.upserts, containsPair('line_content', 1));
+      expect(r.upserts, containsPair('book_banner', 1));
+      expect(r.upserts, containsPair('book_protection', 1));
+      expect(r.upserts, containsPair('line_divine_name', 1));
+      expect(r.upserts, containsPair('line_note', 3));
+      expect(r.upserts, containsPair('line_note_divine_name', 2));
+      // line_note ממופה לספרים דרך line; טבלאות שמות הקודש והמו"ל אינן תוכן חיפוש.
+      expect(r.booksTouched, {1, 2});
+      expect(r.hasChangesOutsideBooksTouched, isFalse);
+      for (final t in newTables) {
+        expect(rowsOf(base, t), rowsOf(expected, t), reason: t);
+      }
+      expect(tableHashes(base, kHashTableOrderSchema7),
+          tableHashes(expected, kHashTableOrderSchema7));
+    });
+
+    test('אימות חלקי: from בסדר 6, to בסדר 7, והטבלאות החדשות מאומתות', () {
+      final base = buildSchema6Base('s7_partial_base');
+      final expected = buildExpected7('s7_partial_expected');
+      final patch = buildPatch6to7('s7_partial_patch');
+      final manifest = manifest6to7(base, expected, perTable: true);
+
+      final r = _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: manifest,
+        enablePartialTableVerification: true,
+      );
+
+      expect(r.verifiedTables, ['line_content', ...newTables, 'schema_meta']);
+      expect(r.deferredTables, [
+        for (final t in kHashTableOrderSchema7)
+          if (!r.verifiedTables.contains(t)) t,
+      ]);
+      expect(
+        _applier.verifyTableHashes(
+          dbPath: base,
+          schemaVersion: 7,
+          expected: manifest.toTableContentHashes!,
+          tables: r.deferredTables,
+        ),
+        isEmpty,
+      );
+      expect(_hashWithOrder(base, kHashTableOrderSchema7), r.resultHash);
+    });
+
+    test('hash שגוי של line_note מגלגל לאחור גם את ה-migrations', () {
+      final base = buildSchema6Base('s7_bad_base');
+      final expected = buildExpected7('s7_bad_expected');
+      final patch = buildPatch6to7('s7_bad_patch', rows: {
+        ...newRows(),
+        'line_note': [
+          [10, 0, 5, '1', 'גוף אחר'],
+          [10, 1, 10, null, 'הערה בלי סימן'],
+          [30, 0, 0, '*', 'בספר השני'],
+        ],
+      });
+      final before = _hashWithOrder(base, kHashTableOrderSchema6);
+
+      expect(
+        () => _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifest6to7(base, expected, perTable: true),
+          enablePartialTableVerification: true,
+        ),
+        throwsA(isA<PatchApplyException>()
+            .having((e) => e.hashMismatchStage, 'stage',
+                PatchHashMismatchStage.toContentHash)
+            .having((e) => e.mismatchedTables, 'tables', ['line_note'])),
+      );
+      expect(_hashWithOrder(base, kHashTableOrderSchema6), before);
+      for (final t in newTables) {
+        expect(hasTable(base, t), isFalse, reason: t);
+      }
+    });
+
+    test('from-hash בסדר סכמה 7 על DB בסכמה 6 נדחה', () {
+      final base = buildSchema6Base('s7_wrongorder_base');
+      final expected = buildExpected7('s7_wrongorder_expected');
+      final patch = buildPatch6to7('s7_wrongorder_patch');
+      final m = manifest6to7(base, expected);
+
+      expect(
+        () => _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: _manifest(
+            from: 1,
+            to: 2,
+            fromSchema: 6,
+            toSchema: 7,
+            fromHash: _hashWithOrder(base, kHashTableOrderSchema7),
+            toHash: m.toContentHash,
+          ),
+        ),
+        throwsA(isA<PatchApplyException>().having((e) => e.hashMismatchStage,
+            'stage', PatchHashMismatchStage.fromContentHash)),
+      );
+    });
+
+    test('מחיקת שורה וספר בסכמה 7 מתגלגלת לכל הטבלאות החדשות', () {
+      final base =
+          buildDb('s7_cascade_base', version: 1, schema: 7, rows: newRows());
+      final expected = buildDb('s7_cascade_expected',
+          version: 2,
+          schema: 7,
+          lines: const [20],
+          books: const [1],
+          rows: {'book_banner': banners});
+      final patch = buildPatchDb(from: 1, to: 2, schemaVersion: 4);
+      final pdb = sqlite3.sqlite3.open(patch);
+      pdb.execute('CREATE TABLE delete_line (id INTEGER PRIMARY KEY)');
+      pdb.execute('INSERT INTO delete_line VALUES (10),(30)');
+      pdb.execute('CREATE TABLE delete_book (id INTEGER PRIMARY KEY)');
+      pdb.execute('INSERT INTO delete_book VALUES (2)');
+      pdb.close();
+
+      // אין delete_* לטבלאות החדשות: ה-CASCADE מוחק אותן, וה-FK נשאר נקי.
+      final r = _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: _manifest(
+          from: 1,
+          to: 2,
+          fromSchema: 7,
+          toSchema: 7,
+          fromHash: _hashWithOrder(base, kHashTableOrderSchema7),
+          toHash: _hashWithOrder(expected, kHashTableOrderSchema7),
+        ),
+      );
+
+      expect(r.deletes['line'], 2);
+      expect(r.deletes['book'], 1);
+      expect(rowsOf(base, 'line_note'), isEmpty);
+      expect(rowsOf(base, 'line_note_divine_name'), isEmpty);
+      expect(rowsOf(base, 'line_divine_name'), isEmpty);
+      expect(rowsOf(base, 'book_protection'), isEmpty);
+      expect(rowsOf(base, 'book_banner'), banners);
+    });
+
+    test('מחיקת הערה מתגלגלת לשמות הקודש שבגופה בלבד', () {
+      final base = buildDb('s7_notecascade_base',
+          version: 1, schema: 7, rows: newRows());
+      final expected =
+          buildDb('s7_notecascade_expected', version: 2, schema: 7, rows: {
+        ...newRows(),
+        'line_note': [notes[1], notes[2]],
+        'line_note_divine_name': [noteDivineNames[1]],
+      });
+      final patch = buildPatchDb(from: 1, to: 2, schemaVersion: 4);
+      final pdb = sqlite3.sqlite3.open(patch);
+      pdb.execute('CREATE TABLE delete_line_note (lineId INTEGER, '
+          'noteIndex INTEGER, PRIMARY KEY (lineId, noteIndex))');
+      pdb.execute('INSERT INTO delete_line_note VALUES (10, 0)');
+      pdb.close();
+
+      // אין delete_line_note_divine_name: ה-CASCADE מה-FK המורכב מוחק אותה.
+      final r = _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: _manifest(
+          from: 1,
+          to: 2,
+          fromSchema: 7,
+          toSchema: 7,
+          fromHash: _hashWithOrder(base, kHashTableOrderSchema7),
+          toHash: _hashWithOrder(expected, kHashTableOrderSchema7),
+        ),
+      );
+
+      expect(r.deletes['line_note'], 1);
+      expect(r.booksTouched, {1});
+      expect(rowsOf(base, 'line_note'), [notes[1], notes[2]]);
+      expect(rowsOf(base, 'line_note_divine_name'), [noteDivineNames[1]]);
+      expect(rowsOf(base, 'line_divine_name'), divineNames);
+    });
+
+    test('שינוי שמות קודש בגוף הערה לבדו אינו נוגע לספרים ולאינדקס', () {
+      final base =
+          buildDb('s7_ndn_only_base', version: 1, schema: 7, rows: newRows());
+      final changed = [
+        [10, 0, 4, 9, 1, 1],
+        [30, 0, 0, 4, 5, 3],
+      ];
+      final expected = buildDb('s7_ndn_only_expected',
+          version: 2,
+          schema: 7,
+          rows: {...newRows(), 'line_note_divine_name': changed});
+      final patch = buildPatchDb(from: 1, to: 2, schemaVersion: 4);
+      final pdb = sqlite3.sqlite3.open(patch);
+      pdb.execute('CREATE TABLE upsert_line_note_divine_name (lineId INTEGER, '
+          'noteIndex INTEGER, charStart INTEGER, charEnd INTEGER, '
+          'kind INTEGER, source INTEGER, '
+          'PRIMARY KEY (lineId, noteIndex, charStart))');
+      pdb.execute('INSERT INTO upsert_line_note_divine_name VALUES '
+          '(30, 0, 0, 4, 5, 3)');
+      pdb.close();
+
+      final r = _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: _manifest(
+          from: 1,
+          to: 2,
+          fromSchema: 7,
+          toSchema: 7,
+          fromHash: _hashWithOrder(base, kHashTableOrderSchema7),
+          toHash: _hashWithOrder(expected, kHashTableOrderSchema7),
+        ),
+      );
+
+      expect(r.upserts, containsPair('line_note_divine_name', 1));
+      expect(r.booksTouched, isEmpty);
+      expect(r.hasChangesOutsideBooksTouched, isFalse);
+      expect(rowsOf(base, 'line_note_divine_name'), changed);
+    });
+
+    // golden משותף עם SeforimLibrary: אותן שורות (בכל סדר הכנסה) חייבות לתת
+    // אותו hex בשני הצדדים — זה ה-hash לכל טבלה שב-toTableContentHashes.
+    test('golden: hash לכל אחת מטבלאות סכמה 7, מלאה וריקה', () {
+      final path = '${tmp.path}/s7_golden.db';
+      final db = sqlite3.sqlite3.open(path);
+      db.execute('CREATE TABLE book (id INTEGER PRIMARY KEY)');
+      db.execute('INSERT INTO book VALUES (1),(2)');
+      db.execute('CREATE TABLE line (id INTEGER PRIMARY KEY)');
+      db.execute('INSERT INTO line VALUES (1),(2),(3)');
+      for (final ddl in schema7Ddl) {
+        db.execute(ddl);
+      }
+      db.close();
+      expect(tableHashes(path, newTables), {
+        'book_banner':
+            '473b121ac837ac17a9627ed583981faec4074ec3217224c18bb0a6bb62752240',
+        'book_protection':
+            '260da62f074581043b5bf203c9790203a9ea052f9d1e14e27ecc780f66790a81',
+        'line_divine_name':
+            '278213e576ad7f0865c73036789d82ec801bb65e594d9eee0ec6e6e799325b85',
+        'line_note':
+            '027c225d40b02cfc2025d0c279668dcd341af7ab68c725b3b187fac0dbdce8a8',
+        'line_note_divine_name':
+            '4c7710872d55a8575723dac795a2de02e09085ec0643712cc4aa41014d5320aa',
+      });
+
+      final w = sqlite3.sqlite3.open(path);
+      insertRows(w, '', {
+        'book_banner': [
+          [
+            1,
+            'ספר זה באדיבות המו"ל\n'
+                '[לאתר המו"ל](https://example.com/books?id=1)',
+          ],
+          [2, 'שורה ראשונה\nשורה שנייה'],
+        ],
+        'book_protection': [
+          [1, 1],
+          [2, 2],
+        ],
+        'line_divine_name': [
+          [2, 20, 24, 3, 4],
+          [1, 0, 4, 1, 1],
+          [2, 3, 6, 7, 3],
+          [1, 12, 17, 5, 2],
+        ],
+        'line_note': [
+          [2, 0, 7, null, 'הערה בלי סימן'],
+          [1, 1, 12, '<b>ב</b>', 'גוף עם <i>נטוי</i> פנימי'],
+          [1, 0, 3, '1', 'הערה ראשונה'],
+          [3, 0, 0, '*', ''],
+        ],
+        'line_note_divine_name': [
+          [1, 1, 8, 12, 3, 4],
+          [1, 0, 0, 4, 1, 1],
+          [2, 0, 5, 9, 7, 3],
+          [1, 0, 6, 11, 5, 2],
+        ],
+      });
+      w.close();
+      expect(tableHashes(path, newTables), {
+        'book_banner':
+            '87026c32c4996eee6e5c75b65ce5e08be1a1a28e52864a57a696cbb6555a0c59',
+        'book_protection':
+            '015c3c2291e1ebac6c68a6f33c8c01b42af0ce46dc3840d7e0a12ae370ae1319',
+        'line_divine_name':
+            'e0b9cc2885495c4bf2ebdfe044b06948aa8cb0c859e777d45b880e59f3d4e799',
+        'line_note':
+            'faaf50adcffcf819341d2c49153a0d641f2de65efda01aa92a465f7617bd7fb0',
+        'line_note_divine_name':
+            '85daae62eaacd8c85f7c3ae1c572e37be89da49f9b73278a5fbfbf91dc4bd673',
+      });
+    });
+  });
+
   group('hashTableOrderForSchemaVersion', () {
     test('סכמה-1 → סדר 33 הישן (ללא book_base_text)', () {
       expect(hashTableOrderForSchemaVersion(1), same(kHashTableOrderSchema1));
@@ -1764,9 +2300,8 @@ void main() {
       expect(hashTableOrderForSchemaVersion(5), same(kHashTableOrderSchema5));
       expect(kHashTableOrderSchema5, same(kHashTableOrderSchema4));
     });
-    test('סכמה-6 → סדר 39 הנוכחי, line_content ו-zstd_dict אחרי line', () {
+    test('סכמה-6 → סדר 39 הקפוא, line_content ו-zstd_dict אחרי line', () {
       expect(hashTableOrderForSchemaVersion(6), same(kHashTableOrderSchema6));
-      expect(kHashTableOrder, same(kHashTableOrderSchema6));
       expect(kHashTableOrderSchema6.length, 39);
       expect(kHashTableOrderSchema6.indexOf('line_content'),
           kHashTableOrderSchema6.indexOf('line') + 1);
@@ -1778,10 +2313,40 @@ void main() {
             ..remove('zstd_dict'),
           kHashTableOrderSchema5);
     });
+    test('סכמה-7 → סדר 44 הנוכחי, חמש הטבלאות החדשות לפני schema_meta', () {
+      const added = [
+        'book_banner',
+        'book_protection',
+        'line_divine_name',
+        'line_note',
+        'line_note_divine_name',
+      ];
+      expect(hashTableOrderForSchemaVersion(7), same(kHashTableOrderSchema7));
+      expect(kHashTableOrder, same(kHashTableOrderSchema7));
+      expect(kHashTableOrderSchema7, [
+        ...kHashTableOrderSchema6.take(kHashTableOrderSchema6.length - 1),
+        ...added,
+        'schema_meta',
+      ]);
+      final fk = kPatchTablesInFkOrder.map((t) => t.name).toList();
+      expect(fk.sublist(fk.length - 6), [...added, 'schema_meta']);
+      expect(fk.toSet(), kHashTableOrderSchema7.toSet());
+      expect({
+        for (final t in kPatchTablesInFkOrder)
+          if (added.contains(t.name))
+            t.name: '${t.primaryKey.join(',')} ${t.updatable}'
+      }, {
+        'book_banner': 'bookId true',
+        'book_protection': 'bookId true',
+        'line_divine_name': 'lineId,charStart true',
+        'line_note': 'lineId,noteIndex true',
+        'line_note_divine_name': 'lineId,noteIndex,charStart true',
+      });
+    });
     test('גרסת סכמה לא מוכרת → זורק PatchApplyException', () {
       expect(() => hashTableOrderForSchemaVersion(0),
           throwsA(isA<PatchApplyException>()));
-      expect(() => hashTableOrderForSchemaVersion(7),
+      expect(() => hashTableOrderForSchemaVersion(8),
           throwsA(isA<PatchApplyException>()));
     });
   });
