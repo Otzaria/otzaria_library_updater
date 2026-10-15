@@ -143,13 +143,13 @@ void main() {
             isTrue);
       });
 
-      test('סכמת יעד שאין לה סדר hash (6→7) — לא נתמך', () {
-        expect(edge(27, 28, fromSchema: 6, toSchema: 7).hasSupportedSchema,
+      test('סכמת יעד שאין לה סדר hash (7→8) — לא נתמך', () {
+        expect(edge(27, 28, fromSchema: 7, toSchema: 8).hasSupportedSchema,
             isFalse);
       });
 
-      test('שני הקצות לא מוכרים (7→8) — לא נתמך', () {
-        expect(edge(28, 29, fromSchema: 7, toSchema: 8).hasSupportedSchema,
+      test('שני הקצות לא מוכרים (8→9) — לא נתמך', () {
+        expect(edge(28, 29, fromSchema: 8, toSchema: 9).hasSupportedSchema,
             isFalse);
       });
     });

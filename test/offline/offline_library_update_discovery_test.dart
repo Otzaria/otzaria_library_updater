@@ -549,7 +549,7 @@ void main() {
 
     test('הקשת שחוצה את הסכמה מסוננת, אך הגרסה נשארת ה-latest', () async {
       final result =
-          await buildDiscovery(toSchemaOf26: 7).discover(allowPrerelease: true);
+          await buildDiscovery(toSchemaOf26: 8).discover(allowPrerelease: true);
 
       // הגרסה נגזרת מכל הקשתות, גם מזו שאיננו יודעים להחיל: אחרת v26 היה
       // נראה כ"מעודכן" והמשתמש לא היה יודע שיש חדש בכלל.
@@ -558,8 +558,8 @@ void main() {
         result.edges.map((e) => '${e.fromVersion}-${e.toVersion}'),
         ['21-22'],
       );
-      expect(result.unsupportedSchemaVersions, {7});
-      expect(result.blockingSchemaVersion, 7);
+      expect(result.unsupportedSchemaVersions, {8});
+      expect(result.blockingSchemaVersion, 8);
       // וה-fallback היחיד שנשאר הוא המסד המלא של v21.
       expect(result.fullDbReleaseTag, 'v21');
       expect(result.latestFullDbVersion, 21);
@@ -638,10 +638,10 @@ void main() {
     test('קובץ patch חסר בסכמה שאינה נתמכת → קשת מטא-דאטה שנספרת ל-latest',
         () async {
       final result =
-          await manifestOnly(toSchema: 7).discover(allowPrerelease: true);
+          await manifestOnly(toSchema: 8).discover(allowPrerelease: true);
       expect(result.latestVersion, 26);
       expect(result.edges, isEmpty); // מסוננת מהתכנון
-      expect(result.blockingSchemaVersion, 7);
+      expect(result.blockingSchemaVersion, 8);
     });
   });
 
@@ -667,7 +667,7 @@ void main() {
         final url = request.url.toString();
         if (url.contains('/releases')) return http.Response(json, 200);
         return http.Response(
-          _manifestJson(27, 28, fromSchema: 6, toSchema: 7, fullRebase: true),
+          _manifestJson(27, 28, fromSchema: 7, toSchema: 8, fullRebase: true),
           200,
         );
       });
@@ -679,55 +679,55 @@ void main() {
     test('בלי patches — נספר ל-latest וחוסם בסכמה שלו', () async {
       final result = await buildDiscovery([
         {
-          'v28': ['seforim-schema7.db.zst']
+          'v28': ['seforim-schema8.db.zst']
         },
         {
-          'v27': ['seforim-schema6.db.zst']
+          'v27': ['seforim-schema7.db.zst']
         },
       ]).discover(allowPrerelease: true);
 
       expect(result.latestVersion, 28);
-      expect(result.unsupportedSchemaVersions, {7});
-      expect(result.blockingSchemaVersion, 7);
+      expect(result.unsupportedSchemaVersions, {8});
+      expect(result.blockingSchemaVersion, 8);
       expect(result.fullDbReleaseTag, 'v27');
     });
 
-    test('fullRebase לסכמה 7 עם מסד schema7 — נספר וחוסם', () async {
+    test('fullRebase לסכמה 8 עם מסד schema8 — נספר וחוסם', () async {
       final result = await buildDiscovery([
         {
           'v28': [
-            'seforim-schema7.db.zst',
+            'seforim-schema8.db.zst',
             'patch-v27-v28.db.zst.manifest.json',
           ]
         },
         {
-          'v27': ['seforim-schema6.db.zst']
+          'v27': ['seforim-schema7.db.zst']
         },
       ]).discover(allowPrerelease: true);
 
       expect(result.latestVersion, 28);
       expect(result.edges, isEmpty);
-      expect(result.blockingSchemaVersion, 7);
+      expect(result.blockingSchemaVersion, 8);
     });
 
-    test('fullRebase לסכמה 7 בלי מסד (כמו במראה) — חוסם', () async {
+    test('fullRebase לסכמה 8 בלי מסד (כמו במראה) — חוסם', () async {
       final result = await buildDiscovery([
         {
           'v28': ['patch-v27-v28.db.zst.manifest.json']
         },
         {
-          'v27': ['seforim-schema6.db.zst']
+          'v27': ['seforim-schema7.db.zst']
         },
       ]).discover(allowPrerelease: true);
 
       expect(result.latestVersion, 28);
-      expect(result.blockingSchemaVersion, 7);
+      expect(result.blockingSchemaVersion, 8);
     });
 
-    test('מסד schema6 לצד schema7 — אין חסימה', () async {
+    test('מסד schema7 לצד schema8 — אין חסימה', () async {
       final result = await buildDiscovery([
         {
-          'v28': ['seforim-schema7.db.zst', 'seforim-schema6.db.zst']
+          'v28': ['seforim-schema8.db.zst', 'seforim-schema7.db.zst']
         },
       ]).discover(allowPrerelease: true);
 
@@ -739,10 +739,10 @@ void main() {
     test('מסד לא נתמך ב-release ישן מה-latest אינו חוסם', () async {
       final result = await buildDiscovery([
         {
-          'v28': ['seforim-schema6.db.zst']
+          'v28': ['seforim-schema7.db.zst']
         },
         {
-          'v27': ['seforim-schema7.db.zst']
+          'v27': ['seforim-schema8.db.zst']
         },
       ]).discover(allowPrerelease: true);
 
@@ -824,19 +824,19 @@ void main() {
       'fullRebase': (
         releases: [
           releaseJson('v28', ['patch-v27-v28.db.zst.manifest.json']),
-          releaseJson('v27', ['seforim-schema6.db.zst']),
+          releaseJson('v27', ['seforim-schema7.db.zst']),
         ],
         manifests: {
           'patch-v27-v28.db.zst.manifest.json': _manifestJson(27, 28,
-              fromSchema: 6, toSchema: 7, fullRebase: true),
+              fromSchema: 7, toSchema: 8, fullRebase: true),
         },
         stable: 28,
         dev: 28,
       ),
       'unsupported schema': (
         releases: [
-          releaseJson('v28', ['seforim-schema7.db.zst']),
-          releaseJson('v27', ['seforim-schema6.db.zst']),
+          releaseJson('v28', ['seforim-schema8.db.zst']),
+          releaseJson('v27', ['seforim-schema7.db.zst']),
         ],
         manifests: const {},
         stable: 27,
@@ -852,7 +852,7 @@ void main() {
         ],
         manifests: {
           'patch-v22-v26.db.zst.manifest.json':
-              _manifestJson(22, 26, fromSchema: 2, toSchema: 7),
+              _manifestJson(22, 26, fromSchema: 2, toSchema: 8),
         },
         stable: 26,
         dev: 26,

@@ -9,9 +9,9 @@ void main() {
   final fkNames = kPatchTablesInFkOrder.map((t) => t.name).toList();
 
   group('kPatchTablesInFkOrder', () {
-    test('39 טבלאות, ללא כפילויות', () {
-      expect(kPatchTablesInFkOrder, hasLength(39));
-      expect(fkNames.toSet(), hasLength(39));
+    test('44 טבלאות, ללא כפילויות', () {
+      expect(kPatchTablesInFkOrder, hasLength(44));
+      expect(fkNames.toSet(), hasLength(44));
     });
 
     test('לכל טבלה יש מפתח ראשי לא ריק', () {
@@ -60,8 +60,8 @@ void main() {
   });
 
   group('kHashTableOrder', () {
-    test('39 טבלאות, אותה קבוצה כמו סדר ה-FK', () {
-      expect(kHashTableOrder, hasLength(39));
+    test('44 טבלאות, אותה קבוצה כמו סדר ה-FK', () {
+      expect(kHashTableOrder, hasLength(44));
       expect(kHashTableOrder.toSet(), fkNames.toSet());
     });
 
@@ -120,7 +120,10 @@ void main() {
     });
 
     test('כל סכמה ממופה לקבוע הקפוא שלה', () {
-      expect(kHashTableOrderBySchemaVersion.keys.toList(), [1, 2, 3, 4, 5, 6]);
+      expect(
+        kHashTableOrderBySchemaVersion.keys.toList(),
+        [1, 2, 3, 4, 5, 6, 7],
+      );
       expect(kHashTableOrderBySchemaVersion[1], same(kHashTableOrderSchema1));
       expect(kHashTableOrderBySchemaVersion[2], same(kHashTableOrderSchema2));
       expect(kHashTableOrderBySchemaVersion[3], same(kHashTableOrderSchema3));
@@ -128,15 +131,16 @@ void main() {
       // סכמה 5 שינתה עמודה בתוך `line_dh`, לא את סדר הטבלאות.
       expect(kHashTableOrderBySchemaVersion[5], same(kHashTableOrderSchema5));
       expect(kHashTableOrderBySchemaVersion[6], same(kHashTableOrderSchema6));
+      expect(kHashTableOrderBySchemaVersion[7], same(kHashTableOrderSchema7));
     });
 
-    test('isSupportedSchemaVersion נתמך ל-1 עד 6', () {
-      for (var schema = 1; schema <= 6; schema++) {
+    test('isSupportedSchemaVersion נתמך ל-1 עד 7', () {
+      for (var schema = 1; schema <= 7; schema++) {
         expect(isSupportedSchemaVersion(schema), isTrue, reason: '$schema');
       }
-      // 0 אינה סכמה, ו-7 היא סכמה עתידית שאין לנו סדר hash לה.
+      // 0 אינה סכמה, ו-8 היא סכמה עתידית שאין לנו סדר hash לה.
       expect(isSupportedSchemaVersion(0), isFalse);
-      expect(isSupportedSchemaVersion(7), isFalse);
+      expect(isSupportedSchemaVersion(8), isFalse);
     });
   });
 
@@ -145,7 +149,7 @@ void main() {
   group('פורמט ה-patch', () {
     test('הקבועים אינם נגזרים זה מזה', () {
       expect(kSupportedPatchFormatVersion, 4);
-      expect(kSupportedDbSchemaVersion, 6);
+      expect(kSupportedDbSchemaVersion, 7);
     });
 
     test('isSupportedPatchFormatVersion נתמך ל-1 עד 4', () {

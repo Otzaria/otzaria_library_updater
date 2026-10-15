@@ -92,17 +92,17 @@ void main() {
     });
 
     test('מסד בסכמה גבוהה מהנתמכת אינו נבחר גם כשאין אחר', () {
-      final release = parse([_asset('seforim-schema7.db.zst', 10)]);
+      final release = parse([_asset('seforim-schema8.db.zst', 10)]);
       expect(release.fullDbAssetFor(maxSchemaVersion: 6), isNull);
-      expect(release.unsupportedFullDbSchema, 7);
+      expect(release.unsupportedFullDbSchema, 8);
     });
 
-    test('מסד סכמה 7 מפוצל נספר כסכמה לא נתמכת', () {
+    test('מסד סכמה 8 מפוצל נספר כסכמה לא נתמכת', () {
       final release = parse([
-        _asset('seforim-schema7.db.zst.part-000', 100),
-        _asset('seforim-schema7.db.zst.manifest.json', 600),
+        _asset('seforim-schema8.db.zst.part-000', 100),
+        _asset('seforim-schema8.db.zst.manifest.json', 600),
       ]);
-      expect(release.unsupportedFullDbSchema, 7);
+      expect(release.unsupportedFullDbSchema, 8);
     });
 
     test('סמן בגודל 0 אינו מסד מלא, ובסכמה נתמכת אינו חוסם', () {

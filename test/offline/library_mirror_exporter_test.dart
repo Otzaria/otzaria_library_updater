@@ -665,7 +665,7 @@ void main() {
             'patch-v25-v26.db.zst.manifest.json',
           ]),
         ],
-        schemaByVersion: {26: 7},
+        schemaByVersion: {26: 8},
       );
       await built.exporter.export(destDir: destDir, onWarning: warnings.add);
 
@@ -690,7 +690,7 @@ void main() {
         contains(LibraryUpdaterMessages.current.exportSkippingUnappliablePatch(
           'v26',
           'patch-v25-v26.db.zst',
-          7,
+          8,
         )),
       );
     });
@@ -701,7 +701,7 @@ void main() {
           '(אישי: $personal)', () async {
         final warnings = <String>[];
         final built = buildExporter([
-          release('v26', assets: ['seforim-schema7.db.zst']),
+          release('v26', assets: ['seforim-schema8.db.zst']),
           release('v25', assets: [
             'seforim.db.zst',
             'patch-v24-v25.db.zst',
@@ -717,12 +717,12 @@ void main() {
           isTrue,
         );
 
-        expect(built.fetched, isNot(contains('seforim-schema7.db.zst')));
-        expect(mirroredAssetNames(destDir, 'v26'), ['seforim-schema7.db.zst']);
+        expect(built.fetched, isNot(contains('seforim-schema8.db.zst')));
+        expect(mirroredAssetNames(destDir, 'v26'), ['seforim-schema8.db.zst']);
         expect(
           warnings,
           contains(LibraryUpdaterMessages.current
-              .exportFullDbSchemaUnsupported('v26', 7)),
+              .exportFullDbSchemaUnsupported('v26', 8)),
         );
         final mirrored =
             await LocalMirrorLibraryReleaseClient(mirrorDir: destDir)
@@ -737,7 +737,7 @@ void main() {
           client: LocalMirrorLibraryReleaseClient(mirrorDir: destDir),
         ).discover(allowPrerelease: false);
         expect(discovery.latestVersion, 26);
-        expect(discovery.blockingSchemaVersion, 7);
+        expect(discovery.blockingSchemaVersion, 8);
         expect(
           discovery.latestFullDbAsset?.name,
           personal ? isNull : 'seforim.db.zst',
@@ -761,7 +761,7 @@ void main() {
           ]),
           release('v21', assets: ['seforim.db.zst']),
         ],
-        schemaByVersion: {26: 7},
+        schemaByVersion: {26: 8},
       );
       await second.exporter.export(destDir: destDir);
 
@@ -787,7 +787,7 @@ void main() {
             'patch-v25-v26.db.zst.manifest.json',
           ]),
         ],
-        schemaByVersion: {26: 7},
+        schemaByVersion: {26: 8},
       ).exporter.export(destDir: destDir);
 
       expect(stale.existsSync(), isFalse);
@@ -808,7 +808,7 @@ void main() {
             'patch-v25-v26.db.zst.manifest.json',
           ]),
         ],
-        schemaByVersion: {26: 7},
+        schemaByVersion: {26: 8},
       );
       await built.exporter.export(
         destDir: destDir,
@@ -1123,7 +1123,7 @@ void main() {
             'patch-v23-v27.db.zst': 5 << 20,
             'patch-v27-v28.db.zst': 64 << 10,
           },
-          schemaByVersion: unsupportedLatest ? {31: 7} : {},
+          schemaByVersion: unsupportedLatest ? {31: 8} : {},
           applyTime: rewriteScale,
         );
         await built.exporter.export(destDir: destDir);
