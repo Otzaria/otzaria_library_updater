@@ -1,8 +1,11 @@
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
-import 'package:crypto/crypto.dart';
 import 'package:seforim_library_updater/src/sqlite/sqlite3_api.dart' as sqlite3;
+
+import '../hashing/fast_sha256.dart';
+import '../hashing/fast_sha256_sink.dart';
 
 /// מחשב logical content hash על תוכן ה-DB, בדיוק כמו `LogicalContentHasher.kt`
 /// בצד הייצור (SeforimLibrary). ה-hash משמש לאימות שה-DB המקומי תואם בדיוק
@@ -15,7 +18,8 @@ import 'package:seforim_library_updater/src/sqlite/sqlite3_api.dart' as sqlite3;
 /// * אם הטבלה קיימת: `"cols:<c1,c2,...>"` (עמודות ממוינות אלפביתית) ואז בית 0x00.
 /// * השורות נקראות לפי `ORDER BY id` (אם יש עמודת id) או לפי כל העמודות.
 /// * לכל תא: בית-סוג ואז הנתונים, ואז מפריד יחידה 0x1F.
-///   null=0, blob=1+bytes, מספר=2+toString().utf8, טקסט=3+toString().utf8.
+///   null=0, blob=1+bytes, מספר=2+toString().utf8, טקסט=3+toString().utf8;
+///   REAL בפורמט `Double.toString` של Java ([javaDoubleToString]).
 /// * אחרי כל שורה: מפריד שורה 0xFF.
 ///
 /// זרם הבתים מוזרם ל-SHA-256 דרך [_BufferedByteSink] שמקבץ ~1MB לפני כל
@@ -31,6 +35,10 @@ class LogicalContentHasher {
   static const int _textTag = 0x03;
   static const int _unitSeparator = 0x1F;
   static const int _rowSeparator = 0xFF;
+
+  // בתי-הסוג נקראים כמסכה: 3 ביטים לעמודה, 20 עמודות (60 ביט) למסכה.
+  static const int _bitsPerTag = 3;
+  static const int _colsPerMask = 20;
 
   /// מחשב את ה-hash על [db] ומחזיר אותו כ-hex. ניתן להריץ על חיבור read-only
   /// (preflight) או על חיבור כתיב בתוך transaction (אימות אחרי apply).
@@ -71,69 +79,103 @@ class LogicalContentHasher {
       Set<String>? only,
       void Function(int bytesHashed)? onProgress}) {
     assert(includeTableHashes || only == null);
-    final wholeDigest = only == null ? _DigestSink() : null;
+    final wholeDigest = only == null ? Sha256DigestCollector() : null;
     final wholeSink =
-        wholeDigest == null ? null : sha256.startChunkedConversion(wholeDigest);
-    final out = _BufferedByteSink(wholeSink, onProgress: onProgress);
-    final tableHashes = <String, String>{};
-    final tableBytes = <String, int>{};
+        wholeDigest == null ? null : FastSha256.start(wholeDigest);
+    FastSha256Sink? tableSink;
+    // החוצץ הנייטיבי מחוץ לאיסוף האשפה: כל כשל SQLite באמצע חייב לשחרר אותו.
+    try {
+      final out = _BufferedByteSink(wholeSink, onProgress: onProgress);
+      final tableHashes = <String, String>{};
+      final tableBytes = <String, int>{};
 
-    for (final table in tableOrder) {
-      if (only != null && !only.contains(table)) continue;
-      final tableDigest = includeTableHashes ? _DigestSink() : null;
-      final tableSink = tableDigest == null
-          ? null
-          : sha256.startChunkedConversion(tableDigest);
-      if (tableSink != null) out.beginTable(tableSink);
+      for (final table in tableOrder) {
+        if (only != null && !only.contains(table)) continue;
+        final tableDigest = includeTableHashes ? Sha256DigestCollector() : null;
+        tableSink = tableDigest == null ? null : FastSha256.start(tableDigest);
+        if (tableSink != null) out.beginTable(tableSink);
 
-      out.addBytes(utf8.encode(' table:$table '));
-      final cols = _readColumnsCanonical(db, table);
-      if (cols != null) {
-        out.addBytes(utf8.encode('cols:${cols.join(',')}'));
-        out.addByte(_nullTag);
+        out.addBytes(utf8.encode(' table:$table '));
+        final cols = _readColumnsCanonical(db, table);
+        if (cols != null) {
+          out.addBytes(utf8.encode('cols:${cols.join(',')}'));
+          out.addByte(_nullTag);
 
-        // ל-text קוראים את ה-bytes הגולמיים (CAST AS BLOB) כדי לא לאבד BOM
-        // מוביל — ה-decoder של Dart מסיר U+FEFF, ולכן String רגיל היה משנה את
-        // ה-hash. typeof קובע את בית-הסוג; ה-CASE מחזיר blob רק ל-text.
-        final selectCols = cols
-            .map((c) => 'typeof("$c"),CASE WHEN typeof("$c")=\'text\' '
-                'THEN CAST("$c" AS BLOB) ELSE "$c" END')
-            .join(',');
-        final orderBy =
-            cols.contains('id') ? 'id' : cols.map((c) => '"$c"').join(',');
-        final stmt =
-            db.prepare('SELECT $selectCols FROM "$table" ORDER BY $orderBy');
-        try {
-          final cursor = stmt.selectCursor(const []);
-          while (cursor.moveNext()) {
-            final values = cursor.current.values;
-            for (var i = 0; i < values.length; i += 2) {
-              _encodeCell(out, values[i] as String, values[i + 1]);
+          final masks = _maskExpressions(cols);
+          final selectCols =
+              [...masks, ...cols.map(_valueExpression)].join(',');
+          final orderBy =
+              cols.contains('id') ? 'id' : cols.map((c) => '"$c"').join(',');
+          final stmt =
+              db.prepare('SELECT $selectCols FROM "$table" ORDER BY $orderBy');
+          try {
+            final maskCount = masks.length;
+            final colCount = cols.length;
+            final cursor = stmt.selectCursor(const []);
+            while (cursor.moveNext()) {
+              final values = cursor.current.values;
+              for (var i = 0; i < colCount; i++) {
+                final mask = values[i ~/ _colsPerMask] as int;
+                final tag = (mask >> ((i % _colsPerMask) * _bitsPerTag)) & 0x07;
+                _encodeCell(out, tag, values[maskCount + i]);
+              }
+              out.addByte(_rowSeparator);
             }
-            out.addByte(_rowSeparator);
+          } finally {
+            stmt.close();
           }
-        } finally {
-          stmt.close();
+        }
+
+        if (tableSink != null) {
+          tableBytes[table] = out.endTable();
+          tableSink.close();
+          tableSink = null;
+          tableHashes[table] = tableDigest!.value.toString();
         }
       }
 
-      if (tableSink != null) {
-        tableBytes[table] = out.endTable();
-        tableSink.close();
-        tableHashes[table] = tableDigest!.digest.toString();
-      }
+      out.flush();
+      // דיווח סופי מדויק — מאפשר ל-caller לשמור את סך-הבתים לריצה הבאה.
+      onProgress?.call(out.totalHashed);
+      wholeSink?.close();
+      return LogicalContentHashReport(
+        wholeHash: wholeDigest?.value.toString(),
+        tableHashes: tableHashes,
+        tableBytes: tableBytes,
+      );
+    } finally {
+      tableSink?.dispose();
+      wholeSink?.dispose();
     }
-
-    out.flush();
-    // דיווח סופי מדויק — מאפשר ל-caller לשמור את סך-הבתים האמיתי לריצה הבאה.
-    onProgress?.call(out.totalHashed);
-    wholeSink?.close();
-    return LogicalContentHashReport(
-      wholeHash: wholeDigest?.digest.toString(),
-      tableHashes: tableHashes,
-      tableBytes: tableBytes,
-    );
   }
+
+  /// ל-text קוראים את ה-bytes הגולמיים (CAST AS BLOB): ה-decoder של Dart מסיר
+  /// U+FEFF מוביל, ו-String רגיל היה משנה את ה-hash.
+  String _valueExpression(String c) =>
+      'CASE WHEN typeof("$c")=\'text\' THEN CAST("$c" AS BLOB) ELSE "$c" END';
+
+  /// בתי-הסוג של כל העמודות ארוזים למספרים שלמים — קריאת FFI אחת לשורה במקום
+  /// מחרוזת `typeof()` לכל תא. הערכים 0–3 הם בדיוק תגי הסוג של הזרם.
+  List<String> _maskExpressions(List<String> cols) {
+    final masks = <String>[];
+    for (var start = 0; start < cols.length; start += _colsPerMask) {
+      final end = math.min(start + _colsPerMask, cols.length);
+      final parts = <String>[];
+      for (var i = start; i < end; i++) {
+        parts.add(
+            '((${_tagExpression(cols[i])})<<${(i - start) * _bitsPerTag})');
+      }
+      masks.add(parts.join('|'));
+    }
+    return masks;
+  }
+
+  /// ה-ELSE מכסה 'integer' ו-'real'; ההבחנה ביניהם לפי סוג הערך בדארט.
+  String _tagExpression(String c) => 'CASE typeof("$c") '
+      'WHEN \'null\' THEN $_nullTag '
+      'WHEN \'blob\' THEN $_blobTag '
+      'WHEN \'text\' THEN $_textTag '
+      'ELSE $_numberTag END';
 
   /// קורא את שמות העמודות ממוינים אלפביתית, או null אם הטבלה אינה קיימת.
   List<String>? _readColumnsCanonical(sqlite3.Database db, String table) {
@@ -144,24 +186,57 @@ class LogicalContentHasher {
     return names;
   }
 
-  /// [type] הוא תוצאת `typeof()` ('null'/'integer'/'real'/'text'/'blob').
-  /// עבור 'text' ו-'blob', [value] הוא ה-bytes הגולמיים (Uint8List).
-  void _encodeCell(_BufferedByteSink out, String type, Object? value) {
-    switch (type) {
-      case 'null':
+  /// [tag] הוא בית-הסוג מהמסכה. עבור [_textTag] ו-[_blobTag], [value] הוא
+  /// ה-bytes הגולמיים (Uint8List).
+  void _encodeCell(_BufferedByteSink out, int tag, Object? value) {
+    switch (tag) {
+      case _nullTag:
         out.addByte(_nullTag);
-      case 'text':
+      case _textTag:
         out.addByte(_textTag);
         out.addBytes(value as Uint8List);
-      case 'blob':
+      case _blobTag:
         out.addByte(_blobTag);
         out.addBytes(value as Uint8List);
-      default: // 'integer' / 'real'
+      default:
         out.addByte(_numberTag);
-        out.addBytes(utf8.encode(value.toString()));
+        out.addBytes(utf8.encode(
+            value is double ? javaDoubleToString(value) : value.toString()));
     }
     out.addByte(_unitSeparator);
   }
+}
+
+/// `Double.toString` של Java — מה ש-`LogicalContentHasher.kt` כותב ל-REAL.
+/// Dart כותב `0.0001` ו-`10000000.0` היכן ש-Java כותבת `1.0E-4` ו-`1.0E7`.
+String javaDoubleToString(double value) {
+  if (!value.isFinite || value == 0) return value.toString();
+  final x = value.abs();
+  var sci = x.toStringAsExponential();
+  var digits = sci.substring(0, sci.indexOf('e')).replaceFirst('.', '');
+  if (digits.length == 1) {
+    final twoDigits = x.toStringAsExponential(1);
+    if (double.parse(twoDigits) == x) sci = twoDigits;
+  }
+  final e = sci.indexOf('e');
+  digits = sci.substring(0, e).replaceFirst('.', '');
+  while (digits.length > 1 && digits.endsWith('0')) {
+    digits = digits.substring(0, digits.length - 1);
+  }
+  final exp = int.parse(sci.substring(e + 1));
+  final String body;
+  if (exp >= 0 && exp < 7) {
+    final intLen = exp + 1;
+    body = digits.length > intLen
+        ? '${digits.substring(0, intLen)}.${digits.substring(intLen)}'
+        : '${digits.padRight(intLen, '0')}.0';
+  } else if (exp < 0 && exp >= -3) {
+    body = '0.${'0' * (-exp - 1)}$digits';
+  } else {
+    final frac = digits.length > 1 ? digits.substring(1) : '0';
+    body = '${digits[0]}.${frac}E$exp';
+  }
+  return value < 0 ? '-$body' : body;
 }
 
 /// תוצאת [LogicalContentHasher.computeReport] — hash כולל, hash לכל טבלה
@@ -261,15 +336,4 @@ class _BufferedByteSink {
     _lastReported = _totalHashed;
     onProgress!(_totalHashed);
   }
-}
-
-/// אוסף את ה-Digest הסופי מ-`startChunkedConversion`.
-class _DigestSink implements Sink<Digest> {
-  late Digest digest;
-
-  @override
-  void add(Digest data) => digest = data;
-
-  @override
-  void close() {}
 }

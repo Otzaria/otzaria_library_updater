@@ -2,12 +2,97 @@
 
 ## Unreleased
 
+- `downloadToFile`: כשהשרת מכבד `Range`, קובץ מרוחק של 64MB ומעלה
+  (`segmentThresholdBytes`) יורד ב-`maxConnections` (ברירת מחדל 4) טווחים
+  מקבילים, אחרי שהבקשה הראשונה מאשרת 206 עם הגודל הצפוי. שרת שעונה 200
+  (כך עונים כרגע נכסי GitHub ברשת נטפרי) ננטש לפני הגוף, וההורדה ממשיכה
+  בחיבור אחד. כל טווח ממשיך לבד אחרי קטיעה וגם אחרי הפעלה מחדש (`<dest>.segments`,
+  `<dest>.seg-N`, כבולים לטוקן, לכתובת, לגודל, ל-sha256 ול-ETag), והטווחים
+  מצורפים לפי הסדר ב-isolate. sha256 שגוי מקבל ניסיון נקי אחד.
+  `maxConnections: 1` מבטל. `PatchDownloader.deleteSegmentFiles` מנקה שאריות.
+  הורדה שנייה לאותו יעד נכשלת מיד (`<dest>.lock`) בלי לגעת בקבצים.
+- `LibraryMirrorExporter`: מקבל `maxConnections`/`segmentThresholdBytes`; סך
+  החיבורים בייצוא עד `maxTotalConnections` (8), מחולק שווה בין משבצות ה-scheduler.
+  בדיקת המקום הפנוי כוללת את הטווח הגדול ביותר של כל קובץ שיורד בטווחים.
+- סכמת DB 7: `book_banner`, `book_protection`, `line_divine_name`, `line_note`
+  (הערות השוליים של השורה: `lineId`, `noteIndex`, `charPos`, `marker`, `body`)
+  ו-`line_note_divine_name` (שמות הקודש בגוף ההערה, FK מורכב ל-`line_note`) הן
+  טבלאות חוזה רגילות. `kSupportedDbSchemaVersion` = 7; `kPatchTablesInFkOrder`
+  ו-`kHashTableOrderSchema7` (44 טבלאות) מוסיפים את חמשתן, בסדר הזה, מיד לפני
+  `schema_meta`; `hashTableOrderForSchemaVersion(7)` נתמך, והסדרים 1–6 קפואים.
+  `kDefaultConsumerDbSchemaVersion` נשאר 5 — צרכן שקורא סכמה 7 מצהיר על כך.
+- patch 6→7 הוא דלתא רגילה בפורמט 4: ה-`CREATE TABLE IF NOT EXISTS` של חמש
+  הטבלאות ב-`migrations` ואחריהן upserts. ה-hash לפני ההחלה בסדר סכמה 6 ואחריה
+  בסדר סכמה 7. מחיקת `line`/`book` מתגלגלת אליהן ב-`ON DELETE CASCADE`, ומחיקת
+  `line_note` מתגלגלת ל-`line_note_divine_name`.
+- `line_note` ממופה ל-`booksTouched` דרך `line`; שינוי בטבלאות התצוגה
+  (`book_banner`, `book_protection`, `line_divine_name`, `line_note_divine_name`)
+  לבדן אינו מסמן `hasChangesOutsideBooksTouched`.
+- `patch_tables_contract.json` בסכמה 7, בלי הסעיף `optionalTables`.
 - `downloadSplitToFile`: חיבור החלקים (קריאה, sha256 וכתיבה) רץ ב-isolate נפרד,
   אל קובץ זמני שעובר ל-`destPath` רק אחרי האימות. ה-API לא השתנה.
 - אימות sha256 של קובץ שכבר שלם (`downloadToFile`) או ארכיון שכבר חובר
   (`downloadSplitToFile`) רץ ב-isolate נפרד; ביטול עדיין נתפס באמצע החישוב.
 - ביטול נבדק גם עם חזרת ה-hash מה-isolate, כך שחישוב קצר שמסתיים בין
   דגימות הביטול אינו מדווח הצלחה ואינו מוחק את שרידי החלקים לפני resume.
+
+### Hash לוגי
+
+- **שינוי hash:** ערכי REAL נכתבים לזרם ה-hash בפורמט `Double.toString` של
+  Java (`1.0E-4`, `1.0E7`), כמו `LogicalContentHasher.kt`. עד עכשיו Dart כתב
+  `0.0001`/`10000000.0`, וה-hash לא תאם ליצרן בכל טבלה עם ערך כזה.
+  `javaDoubleToString` חדש.
+- `FastSha256` / `Sha256Stream`: SHA-256 דרך CNG ב-Windows ו-CommonCrypto
+  ב-macOS וב-iOS, עם בדיקה עצמית ונפילה ל-`package:crypto` (גם כשפתיחת חישוב
+  נכשלת). `close()` אחרי `dispose()` זורק `StateError`. נטען בייבוא מותנה —
+  בלי `dart:ffi` ב-web. בתי-הסוג של שורה נקראים כמסכה אחת; זרם הבתים זהה.
+
+### גילוי ותכנון
+
+- `parseVersionFromTag` מעוגן לתחילת ה-tag (`^v?(\d+)`): `lines-snapshot-sha256-…`
+  כבר אינו גרסה 256. `LibraryUpdateDiscovery.releaseVersionOf` ציבורית.
+- `LibraryRelease.fromJson` מתעלם מנכסים שעדיין עולים (`state` שאינו
+  `uploaded`), ו-`fullDbAssetFor` מתעלם מ-DB מלא בגודל 0.
+- `PatchEdge.hasSupportedSchema`/`hasSupportedPatchFormat`/`isApplicable`,
+  `isSupportedSchemaVersion`, `isSupportedPatchFormatVersion`,
+  `kHashTableOrderBySchemaVersion` והסדרים הקפואים מיוצאים.
+- `LibraryUpdatePlan`: `fullDownloadFallback`, `followUpDelta`,
+  `finalTargetVersion`, ו-`reason` גם בתוכנית delta.
+
+### מסלול המראה המקומית (offline)
+
+- `LibraryReleaseSource`, `LocalMirrorLibraryReleaseClient`,
+  `LibraryMirrorExporter`, `DownloadScheduler`/`ByteProgressAggregator`,
+  `DiskSpaceProbe`, `ApplyTimeEstimate`; `ReleaseAsset`/`LibraryRelease`
+  מקבלים `toMirrorJson`/`fromMirrorJson`.
+- `OfflineLibraryUpdateDiscovery`, `OfflineLibraryUpdatePlanner`,
+  `OfflineLibraryDbRecoveryService` — מדיניות המראה, לצד המחלקות המקוונות שלא
+  השתנו. הסכמה הנתמכת היא פרמטר חובה. `RecoveryAction.interrupted` הוא שם נוסף
+  ל-`blockedMissingBackup`.
+- `GithubLibraryReleaseClient` מממש `LibraryReleaseSource`, שולח User-Agent
+  (`userAgent`), ו-`timeout` ניתן לשינוי.
+
+### החלה והורדה
+
+- `PatchApplier.apply(verifyToHash:)`; `PatchApplyResult.resultHash` הוא עכשיו
+  `String?` (null כשהאימות כובה). התנגשות UNIQUE ב-upsert נזרקת כ-
+  `PatchApplyException`, ו-`sqlite_stat4` מתנקה כשה-patch מחליף את `sqlite_stat1`.
+- `PatchDownloader`: העתקה ממראה מקומית (נתיב במקום URL), `verifyExistingFile`,
+  `recordVerified`, `storedResumeToken`, ו-`onVerifyProgress`/`onExistingBytes`
+  ב-`downloadToFile`. קובץ הצד `.resume` מקבל שורה שלישית — סימון אימות
+  `sha256|גודל|זמן-שינוי` — ונכס שלם שסימונו תואם אינו מגובב שוב. נכס שלם
+  ופגום יורד מחדש במקום להיכשל; נכס שפורסם מחדש באותו תוכן נקשר לטוקן החדש.
+  `connectTimeout`/`stallTimeout` ניתנים לשינוי.
+- `LocalDbVersionReader`: מסד נעול או כתיבה שנקטעה נזרקים כ-
+  `LocalDbUnreadableException` (במקום "אין גרסה"); מסד פגום מחזיר
+  `hasVersionMeta=false`. `readInIsolate` ו-`busyTimeout` חדשים.
+
+### מלל
+
+- כל המלל עובר דרך `LibraryUpdaterMessages.current`, עם ברירת מחדל עברית
+  זהה למלל הקודם; צרכן מציב מימוש משלו. החבילה מעבירה אותו ל-isolates שלה.
+- `toString()` של `PatchApplyException` ו-`PatchDownloadException` הוא ההודעה
+  עצמה, בלי קידומת שם המחלקה.
 
 ## 0.8.1
 

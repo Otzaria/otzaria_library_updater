@@ -1,0 +1,398 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:seforim_library_updater/src/services/library_db_recovery_service.dart';
+import 'package:seforim_library_updater/src/services/offline_library_db_recovery_service.dart';
+import 'package:seforim_library_updater/src/services/local_db_version_reader.dart';
+import 'package:sqlite3/sqlite3.dart' as sqlite3;
+import 'package:test/test.dart';
+
+void main() {
+  const service = OfflineLibraryDbRecoveryService();
+  late Directory tmp;
+  late String dbPath;
+
+  setUp(() {
+    tmp = Directory.systemTemp.createTempSync('recovery_test');
+    dbPath = '${tmp.path}/seforim.db';
+    File(dbPath).writeAsStringSync('ORIGINAL');
+  });
+  tearDown(() => tmp.deleteSync(recursive: true));
+
+  test('beginApply כותב סימון בלבד — בלי העתקה של ה-DB', () async {
+    await service.beginApply(
+      dbPath: dbPath,
+      fromVersion: 1,
+      toVersion: 2,
+      timestamp: '2026-06-28T00:00:00Z',
+    );
+    expect(File(service.markerPathFor(dbPath)).existsSync(), isTrue);
+    expect(File(dbPath).readAsStringSync(), 'ORIGINAL');
+    // אף עותק נוסף של המסד לא נוצר — זו כל הנקודה. רק ה-DB והסימון.
+    expect(tmp.listSync().length, 2);
+  });
+
+  test('finishSuccess מנקה את הסימון', () async {
+    await service.beginApply(
+        dbPath: dbPath, fromVersion: 1, toVersion: 2, timestamp: 't');
+    service.finishSuccess(dbPath);
+    expect(File(service.markerPathFor(dbPath)).existsSync(), isFalse);
+    expect(File(dbPath).readAsStringSync(), 'ORIGINAL');
+  });
+
+  group('checkDbHealthAfterCrash', () {
+    test('מגלגל hot journal (קריסה באמצע apply) ומחזיר true', () {
+      final crashed = _makeHotJournalDb(tmp.path);
+      // רגרסיה: פתיחת readOnly על hot journal נכשלת ב-"readonly database".
+      // ה-handle נסגר במפורש: ב-Windows חיבור שנשאר פתוח חוסם את מחיקת
+      // תיקיית ה-temp ב-tearDown (וגם את פתיחת ה-RW שאחריו).
+      final probe =
+          sqlite3.sqlite3.open(crashed, mode: sqlite3.OpenMode.readOnly);
+      try {
+        expect(
+          () => probe.select('PRAGMA quick_check'),
+          throwsA(isA<sqlite3.SqliteException>()),
+        );
+      } finally {
+        probe.close();
+      }
+      // ה-RW של השירות מגלגל את ה-journal ומאמת תקינות.
+      expect(service.checkDbHealthAfterCrash(crashed), isTrue);
+      expect(File('$crashed-journal').existsSync(), isFalse);
+    });
+
+    test('DB פגום → false', () {
+      final broken = '${tmp.path}/broken.db';
+      File(broken).writeAsBytesSync(List.filled(4096, 0x7a));
+      expect(service.checkDbHealthAfterCrash(broken), isFalse);
+    });
+
+    test('נעילה זמנית זורקת LocalDbUnreadableException ולא נחשבת פגם', () {
+      final locked = '${tmp.path}/locked.db';
+      final writer = sqlite3.sqlite3.open(locked);
+      writer.execute('CREATE TABLE t (x)');
+      writer.execute('BEGIN EXCLUSIVE');
+      writer.execute('INSERT INTO t VALUES (1)');
+      try {
+        expect(
+          () => service.checkDbHealthAfterCrash(locked),
+          throwsA(isA<LocalDbUnreadableException>().having(
+            (e) => e.reason,
+            'reason',
+            LocalDbUnreadableReason.locked,
+          )),
+        );
+      } finally {
+        writer.execute('ROLLBACK');
+        writer.close();
+      }
+    });
+
+    test('journal חם במסד מוגן-כתיבה זורק readOnlyLocation ולא נחשב פגם', () {
+      final crashed = _makeHotJournalDb(tmp.path);
+      _setReadOnly(crashed, true);
+      try {
+        expect(
+          () => service.checkDbHealthAfterCrash(crashed),
+          throwsA(isA<LocalDbUnreadableException>()
+              .having((e) => e.reason, 'reason',
+                  LocalDbUnreadableReason.readOnlyLocation)
+              .having((e) => e.extendedResultCode, 'extendedResultCode', 776)),
+        );
+        expect(File('$crashed-journal').existsSync(), isTrue);
+      } finally {
+        _setReadOnly(crashed, false);
+      }
+      expect(service.checkDbHealthAfterCrash(crashed), isTrue);
+    });
+  });
+
+  group('recoverIfNeeded', () {
+    test('אין marker → none, ה-DB לא נגוע', () async {
+      final result = await service.recoverIfNeeded(dbPath);
+      expect(result.action, RecoveryAction.none);
+      expect(File(dbPath).readAsStringSync(), 'ORIGINAL');
+    });
+
+    test('marker → interrupted, והסימון נשאר לקורא', () async {
+      File(service.markerPathFor(dbPath)).writeAsStringSync('{}');
+      final result = await service.recoverIfNeeded(dbPath);
+      expect(result.action, RecoveryAction.interrupted);
+      expect(result.detail, isNotNull);
+      expect(File(service.markerPathFor(dbPath)).existsSync(), isTrue);
+      // אין שחזור: ה-DB נשאר בדיוק כפי שהיה, והקורא בודק תקינות בעצמו.
+      expect(File(dbPath).readAsStringSync(), 'ORIGINAL');
+    });
+
+    // מי שעדכן מגרסה שכן יצרה גיבוי — הקבצים האלה שווים ~1GB על הכונן.
+    test('שאריות הגיבוי מהמנגנון שהוסר נמחקות, בלי לשחזר מהן', () async {
+      File('$dbPath.backup').writeAsStringSync('OLD-BACKUP');
+      File('$dbPath.backup.tmp').writeAsStringSync('PARTIAL');
+      File('$dbPath.restore.tmp').writeAsStringSync('PARTIAL');
+
+      final result = await service.recoverIfNeeded(dbPath);
+      expect(result.action, RecoveryAction.none);
+      expect(File('$dbPath.backup').existsSync(), isFalse);
+      expect(File('$dbPath.backup.tmp').existsSync(), isFalse);
+      expect(File('$dbPath.restore.tmp').existsSync(), isFalse);
+      expect(File(dbPath).readAsStringSync(), 'ORIGINAL');
+    });
+
+    test('שאריות הורדה מלאה מפוצלת לטווחים נמחקות', () async {
+      final staging = '$dbPath.download.zst';
+      for (final suffix in ['', '.resume', '.segments', '.seg-1', '.seg-3']) {
+        File('$staging$suffix').writeAsStringSync('PARTIAL');
+      }
+
+      await service.recoverIfNeeded(dbPath);
+      expect(
+        tmp.listSync().map((f) => f.path.split(RegExp(r'[\\/]')).last),
+        isNot(contains(startsWith('seforim.db.download'))),
+      );
+      expect(File(dbPath).readAsStringSync(), 'ORIGINAL');
+    });
+
+    test('שאריות גיבוי נמחקות גם כשיש marker', () async {
+      File('$dbPath.backup').writeAsStringSync('OLD-BACKUP');
+      File(service.markerPathFor(dbPath)).writeAsStringSync('{}');
+
+      final result = await service.recoverIfNeeded(dbPath);
+      expect(result.action, RecoveryAction.interrupted);
+      expect(File('$dbPath.backup').existsSync(), isFalse);
+      expect(File(dbPath).readAsStringSync(), 'ORIGINAL');
+    });
+  });
+
+  group('שחזור `<db>.old`', () {
+    test('מסד חסר → הישן חוזר לשמו', () {
+      File(dbPath).deleteSync();
+      File('$dbPath.old').writeAsStringSync('RETIRED');
+
+      service.restoreRetiredDbIfOrphaned(dbPath);
+
+      expect(File(dbPath).readAsStringSync(), 'RETIRED');
+      expect(File('$dbPath.old').existsSync(), isFalse);
+    });
+
+    // אוצריא שנפתחה בין שני ה-rename יוצרת שם קובץ באורך 0 ונועלת אותו.
+    test('קובץ באורך 0 תפס את השם → הישן גובר עליו', () {
+      File(dbPath).writeAsStringSync('');
+      File('$dbPath.old').writeAsStringSync('RETIRED');
+
+      service.restoreRetiredDbIfOrphaned(dbPath);
+
+      expect(File(dbPath).readAsStringSync(), 'RETIRED');
+      expect(File('$dbPath.old').existsSync(), isFalse);
+    });
+
+    test('מסד קיים ולא ריק → לא נוגעים בשניהם', () {
+      File('$dbPath.old').writeAsStringSync('RETIRED');
+
+      service.restoreRetiredDbIfOrphaned(dbPath);
+
+      expect(File(dbPath).readAsStringSync(), 'ORIGINAL');
+      expect(File('$dbPath.old').readAsStringSync(), 'RETIRED');
+    });
+
+    test('`.old` ריק אינו משוחזר על מסד חסר', () {
+      File(dbPath).deleteSync();
+      File('$dbPath.old').writeAsStringSync('');
+
+      service.restoreRetiredDbIfOrphaned(dbPath);
+
+      expect(File(dbPath).existsSync(), isFalse);
+    });
+  });
+
+  group('`<db>.old` שנשאר אחרי החלפה שהושלמה', () {
+    void writeLibraryDb(String path) {
+      File(path).deleteSync();
+      final db = sqlite3.sqlite3.open(path);
+      db.execute('CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT)');
+      db.execute("INSERT INTO schema_meta VALUES ('db_version','7')");
+      db.close();
+    }
+
+    test('מסד ספרייה תקין ואין סימון → `.old` נמחק', () async {
+      writeLibraryDb(dbPath);
+      File('$dbPath.old').writeAsStringSync('RETIRED');
+
+      final result = await service.recoverIfNeeded(dbPath);
+
+      expect(result.action, RecoveryAction.none);
+      expect(File('$dbPath.old').existsSync(), isFalse);
+      expect(File(dbPath).existsSync(), isTrue);
+    });
+
+    test('יש סימון → `.old` נשאר עד שהתקינות תיבדק', () async {
+      writeLibraryDb(dbPath);
+      File('$dbPath.old').writeAsStringSync('RETIRED');
+      File(service.markerPathFor(dbPath)).writeAsStringSync('{}');
+
+      final result = await service.recoverIfNeeded(dbPath);
+
+      expect(result.action, RecoveryAction.interrupted);
+      expect(File('$dbPath.old').readAsStringSync(), 'RETIRED');
+    });
+
+    test('הקובץ במקום המסד אינו מסד ספרייה → `.old` נשאר', () async {
+      File('$dbPath.old').writeAsStringSync('RETIRED');
+
+      await service.recoverIfNeeded(dbPath);
+
+      expect(File('$dbPath.old').readAsStringSync(), 'RETIRED');
+      expect(File(dbPath).readAsStringSync(), 'ORIGINAL');
+    });
+  });
+
+  group('patch מחולץ שנשאר מהחלה שנקטעה', () {
+    test('קובצי ה-.db בתיקיית העבודה נמחקים וה-hint נשאר', () async {
+      final tmpDir = Directory(service.patchTmpDirFor(dbPath))
+        ..createSync(recursive: true);
+      final patch = File('${tmpDir.path}/patch_1-2.db')
+        ..writeAsStringSync('PATCH');
+      final hint = File('${tmpDir.path}/verify_total_bytes.txt')
+        ..writeAsStringSync('123');
+
+      await service.recoverIfNeeded(dbPath);
+
+      expect(patch.existsSync(), isFalse);
+      expect(hint.readAsStringSync(), '123');
+      expect(File(dbPath).readAsStringSync(), 'ORIGINAL');
+    });
+
+    test('אין תיקיית עבודה → אינו זורק', () async {
+      final result = await service.recoverIfNeeded(dbPath);
+      expect(result.action, RecoveryAction.none);
+    });
+  });
+
+  group('סימון ה-apply', () {
+    test('הסימון מכיל את הגרסאות ואת חותמת הזמן', () async {
+      await service.beginApply(
+        dbPath: dbPath,
+        fromVersion: 14,
+        toVersion: 15,
+        timestamp: '2026-06-28T00:00:00Z',
+      );
+      final marker =
+          jsonDecode(File(service.markerPathFor(dbPath)).readAsStringSync())
+              as Map<String, dynamic>;
+      expect(marker['fromVersion'], 14);
+      expect(marker['toVersion'], 15);
+      expect(marker['timestamp'], '2026-06-28T00:00:00Z');
+    });
+
+    test('beginApply מנקה שאריות גיבוי מריצה קודמת', () async {
+      File('$dbPath.backup').writeAsStringSync('OLD-BACKUP');
+      File(service.markerPathFor(dbPath)).writeAsStringSync('OLD-MARKER');
+
+      await service.beginApply(
+          dbPath: dbPath, fromVersion: 1, toVersion: 2, timestamp: 't');
+      expect(File('$dbPath.backup').existsSync(), isFalse);
+      expect(File(service.markerPathFor(dbPath)).readAsStringSync(),
+          contains('fromVersion'));
+    });
+
+    test('clearStaleArtifacts מוחק סימון ומשאיר את ה-DB', () async {
+      await service.beginApply(
+          dbPath: dbPath, fromVersion: 1, toVersion: 2, timestamp: 't');
+      service.clearStaleArtifacts(dbPath);
+      expect(File(service.markerPathFor(dbPath)).existsSync(), isFalse);
+      expect(File(dbPath).readAsStringSync(), 'ORIGINAL');
+    });
+
+    test('finishSuccess/clearStaleArtifacts אינם זורקים כשאין מה למחוק', () {
+      expect(() => service.finishSuccess(dbPath), returnsNormally);
+      expect(() => service.clearStaleArtifacts(dbPath), returnsNormally);
+    });
+  });
+
+  // סימון "המסד לא אומת ב-hash" — מה שמונע משרשרת שנקטעה להשאיר מסד
+  // לא-מאומת בשקט. ראו `LibraryUpdateApplier.applyDelta`.
+  group('סימון לא-מאומת', () {
+    test('אין סימון → null', () {
+      expect(service.unverifiedVersion(dbPath), isNull);
+    });
+
+    test('markUnverified/unverifiedVersion — הלוך וחזור', () {
+      service.markUnverified(dbPath, 17);
+      expect(
+          File(service.unverifiedMarkerPathFor(dbPath)).existsSync(), isTrue);
+      expect(service.unverifiedVersion(dbPath), 17);
+    });
+
+    test('clearUnverified מוחק', () {
+      service.markUnverified(dbPath, 17);
+      service.clearUnverified(dbPath);
+      expect(service.unverifiedVersion(dbPath), isNull);
+      expect(
+          File(service.unverifiedMarkerPathFor(dbPath)).existsSync(), isFalse);
+    });
+
+    test('סימון פגום → null, בלי לזרוק', () {
+      File(service.unverifiedMarkerPathFor(dbPath)).writeAsStringSync('{{{');
+      expect(service.unverifiedVersion(dbPath), isNull);
+    });
+
+    test('סימון בלי שדה version → null', () {
+      File(service.unverifiedMarkerPathFor(dbPath))
+          .writeAsStringSync(jsonEncode({'other': 1}));
+      expect(service.unverifiedVersion(dbPath), isNull);
+    });
+
+    test('שני הסימונים נפרדים — beginApply אינו נוגע בסימון הלא-מאומת',
+        () async {
+      service.markUnverified(dbPath, 17);
+      await service.beginApply(
+          dbPath: dbPath, fromVersion: 17, toVersion: 18, timestamp: 't');
+      expect(service.unverifiedVersion(dbPath), 17);
+      // ...ו-finishSuccess של ההחלה אינו מוחק אותו: רק אימות שהצליח מוחק.
+      service.finishSuccess(dbPath);
+      expect(service.unverifiedVersion(dbPath), 17);
+    });
+
+    test('clearUnverified אינו זורק כשאין מה למחוק', () {
+      expect(() => service.clearUnverified(dbPath), returnsNormally);
+    });
+  });
+}
+
+/// בונה DB עם hot journal אמיתי (מדמה קריסה באמצע transaction) ומחזיר את נתיבו.
+/// cache_size זעיר מכריח דפים מלוכלכים להישפך ל-DB תוך כדי ה-transaction, כך
+/// שהעתקת הזוג (db+journal) לפני ה-COMMIT לוכדת מצב שדורש גלגול.
+String _makeHotJournalDb(String dir) {
+  final src = '$dir/live.db';
+  var c = sqlite3.sqlite3.open(src);
+  c.execute('PRAGMA journal_mode=DELETE');
+  c.execute('CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)');
+  c.execute('BEGIN');
+  final ins = c.prepare('INSERT INTO t VALUES (?,?)');
+  for (var i = 0; i < 20000; i++) {
+    ins.execute([i, 'A']);
+  }
+  ins.close();
+  c.execute('COMMIT');
+  c.close();
+
+  c = sqlite3.sqlite3.open(src);
+  c.execute('PRAGMA journal_mode=DELETE');
+  c.execute('PRAGMA cache_size=10');
+  c.execute('BEGIN IMMEDIATE');
+  c.execute("UPDATE t SET v='B'");
+
+  final crashed = '$dir/crashed.db';
+  File(src).copySync(crashed);
+  File('$src-journal').copySync('$crashed-journal');
+
+  c.execute('ROLLBACK');
+  c.close();
+  return crashed;
+}
+
+void _setReadOnly(String path, bool readOnly) {
+  final result = Platform.isWindows
+      ? Process.runSync('attrib', [readOnly ? '+R' : '-R', path])
+      : Process.runSync('chmod', [readOnly ? '444' : '644', path]);
+  expect(result.exitCode, 0, reason: '${result.stdout}${result.stderr}');
+}

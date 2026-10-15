@@ -11,6 +11,8 @@ environment:
 dependencies:
   equatable: ^3.0.0
   crypto: ^3.0.7
+  ffi: ^2.1.0
+  meta: ^1.15.0
   path: ^1.9.1
   http: ^1.6.0
   sqlite3: ^3.3.3

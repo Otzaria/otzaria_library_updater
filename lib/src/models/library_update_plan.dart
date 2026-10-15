@@ -2,6 +2,7 @@ import 'package:equatable/equatable.dart';
 
 import 'delta_manifest.dart';
 import 'library_release.dart';
+import 'patch_table_spec.dart';
 
 /// קשת בגרף העדכונים: patch בודד מ-[fromVersion] ל-[toVersion], עם ה-manifest
 /// שלו וה-URLs להורדת קבצי ה-patch.
@@ -29,6 +30,28 @@ class PatchEdge extends Equatable {
   /// גודל קבצי ה-patch אחרי פריסה — מדד לעלות ההחלה, לא להורדה.
   int get uncompressedSize =>
       manifest.patchFiles.fold<int>(0, (sum, f) => sum + f.uncompressedSize);
+
+  /// האם שני קצות ה-patch בסכמות DB שיש להן סדר hash.
+  bool get hasSupportedSchema =>
+      isSupportedSchemaVersion(manifest.fromSchemaVersion) &&
+      isSupportedSchemaVersion(manifest.toSchemaVersion);
+
+  /// האם פורמט ה-`patch.db` שהמניפסט מצהיר עליו ניתן להחלה. מניפסט בלי
+  /// השדה נבדק ב-preflight של `PatchApplier`.
+  bool get hasSupportedPatchFormat {
+    final format = manifest.patchFormatVersion;
+    return format == null || isSupportedPatchFormatVersion(format);
+  }
+
+  /// האם סוג הדחיסה של קבצי ה-patch מוכר.
+  bool get hasSupportedCompression => manifest.hasSupportedCompression;
+
+  /// האם אפשר להחיל את הקשת: לא מחסום, וכל שלושת צירי היכולת נתמכים.
+  bool get isApplicable =>
+      !manifest.fullRebase &&
+      hasSupportedSchema &&
+      hasSupportedPatchFormat &&
+      hasSupportedCompression;
 
   @override
   List<Object?> get props => [manifest, patchFileUrls, manifestUrl];
@@ -76,6 +99,13 @@ class LibraryUpdatePlan extends Equatable {
   /// ובכל תוכנית שאינה דלתא. הבחירה נשארת של המשתמש — ראו [isHeavyDelta].
   final String? heavyDeltaReason;
 
+  /// תוכנית ההורדה המלאה שמאחורי מסלול דלתא — ההתאוששות כש-patch אינו מתאים
+  /// למסד שעל המחשב. null כשאין DB מלא זמין.
+  final LibraryUpdatePlan? fullDownloadFallback;
+
+  /// שרשרת ה-patches שרצה מיד אחרי הורדה מלאה שנוחתת על גרסה ישנה מ-latest.
+  final LibraryUpdatePlan? followUpDelta;
+
   const LibraryUpdatePlan._({
     required this.kind,
     required this.localVersion,
@@ -85,6 +115,8 @@ class LibraryUpdatePlan extends Equatable {
     this.fullDbReleaseTag,
     this.reason,
     this.heavyDeltaReason,
+    this.fullDownloadFallback,
+    this.followUpDelta,
   });
 
   /// האם זו תוכנית דלתא שהחלתה צפויה להיות ארוכה במיוחד.
@@ -110,6 +142,8 @@ class LibraryUpdatePlan extends Equatable {
     ReleaseAsset? fullDbAsset,
     String? fullDbReleaseTag,
     String? heavyDeltaReason,
+    String? reason,
+    LibraryUpdatePlan? fullDownloadFallback,
   }) =>
       LibraryUpdatePlan._(
         kind: LibraryUpdatePlanKind.delta,
@@ -118,7 +152,9 @@ class LibraryUpdatePlan extends Equatable {
         deltaSteps: List.unmodifiable(steps),
         fullDbAsset: fullDbAsset,
         fullDbReleaseTag: fullDbReleaseTag,
+        reason: reason,
         heavyDeltaReason: heavyDeltaReason,
+        fullDownloadFallback: fullDownloadFallback,
       );
 
   /// מסלול הורדה מלאה.
@@ -128,6 +164,7 @@ class LibraryUpdatePlan extends Equatable {
     required ReleaseAsset asset,
     required String releaseTag,
     String? reason,
+    LibraryUpdatePlan? followUpDelta,
   }) =>
       LibraryUpdatePlan._(
         kind: LibraryUpdatePlanKind.fullDownload,
@@ -136,6 +173,7 @@ class LibraryUpdatePlan extends Equatable {
         fullDbAsset: asset,
         fullDbReleaseTag: releaseTag,
         reason: reason,
+        followUpDelta: followUpDelta,
       );
 
   /// מצב חסום — דורש פעולה ידנית.
@@ -166,13 +204,17 @@ class LibraryUpdatePlan extends Equatable {
     );
   }
 
+  /// הגרסה שהמסד יגיע אליה בסוף התוכנית, כולל [followUpDelta].
+  int? get finalTargetVersion => followUpDelta?.targetVersion ?? targetVersion;
+
   /// גודל ההורדה הכולל בבייטים (דחוס) — לתצוגה למשתמש.
   int get totalDownloadSize {
     switch (kind) {
       case LibraryUpdatePlanKind.delta:
         return deltaSteps.fold<int>(0, (sum, e) => sum + e.compressedSize);
       case LibraryUpdatePlanKind.fullDownload:
-        return fullDbAsset?.size ?? 0;
+        return (fullDbAsset?.size ?? 0) +
+            (followUpDelta?.totalDownloadSize ?? 0);
       case LibraryUpdatePlanKind.none:
       case LibraryUpdatePlanKind.blocked:
         return 0;
@@ -193,5 +235,7 @@ class LibraryUpdatePlan extends Equatable {
         fullDbReleaseTag,
         reason,
         heavyDeltaReason,
+        fullDownloadFallback,
+        followUpDelta,
       ];
 }

@@ -66,6 +66,30 @@ class ReleaseAsset extends Equatable {
     );
   }
 
+  /// שם ה-DB המלא בסכמה 5 ומטה.
+  static const String fullDbArchiveName = _legacyFullDbArchiveName;
+
+  /// פורמט המראה המקומית: מפתחות פשוטים ו-[downloadUrl] יחסי לתיקייה.
+  Map<String, dynamic> toMirrorJson() => {
+        'name': name,
+        'downloadUrl': downloadUrl,
+        'size': size,
+        if (id != null) 'id': id,
+        if (updatedAt != null) 'updatedAt': updatedAt,
+        if (digest != null) 'digest': digest,
+      };
+
+  factory ReleaseAsset.fromMirrorJson(Map<String, dynamic> json) {
+    return ReleaseAsset(
+      name: (json['name'] as String?) ?? '',
+      downloadUrl: (json['downloadUrl'] as String?) ?? '',
+      size: (json['size'] as num?)?.toInt() ?? 0,
+      id: (json['id'] as num?)?.toInt(),
+      updatedAt: json['updatedAt'] as String?,
+      digest: json['digest'] as String?,
+    );
+  }
+
   /// `true` אם זהו manifest של patch דלתאי
   /// (`patch-vX-vY.db.zst.manifest.json`).
   bool get isDeltaManifest =>
@@ -77,7 +101,7 @@ class ReleaseAsset extends Equatable {
   /// `true` אם זהו מניפסט פיצול של DB מלא (`<שם DB מלא>.manifest.json`),
   /// שעוד לא פוענח ל-[split].
   bool get isSplitFullDbManifest {
-    final archive = _splitArchiveName;
+    final archive = splitArchiveName;
     return archive != null && _isFullDbName(archive);
   }
 
@@ -87,11 +111,22 @@ class ReleaseAsset extends Equatable {
 
   /// כמו [fullDbSchemaVersion], אבל גם למניפסט פיצול — לפי שם הארכיון שלו.
   int? get advertisedFullDbSchemaVersion =>
-      _schemaOfFullDbName(_splitArchiveName ?? name);
+      _schemaOfFullDbName(splitArchiveName ?? name);
 
-  String? get _splitArchiveName => name.endsWith(kSplitManifestSuffix)
+  /// שם הארכיון שמניפסט פיצול מתאר, או null כשאין זה מניפסט פיצול.
+  String? get splitArchiveName => name.endsWith(kSplitManifestSuffix)
       ? name.substring(0, name.length - kSplitManifestSuffix.length)
       : null;
+
+  /// האם [name] הוא שם של DB מלא דחוס (`seforim.db.zst` או
+  /// `seforim-schema<N>.db.zst`).
+  static bool isFullDbName(String name) => _isFullDbName(name);
+
+  /// סכמת ה-DB המלא לפי השם: `seforim.db.zst` נחשב 5; שם אחר ⇒ null.
+  static int? fullDbSchemaOfName(String name) =>
+      name == _legacyFullDbArchiveName
+          ? _legacyFullDbSchemaCeiling
+          : _schemaOfFullDbName(name);
 
   static bool _isFullDbName(String name) =>
       name == _legacyFullDbArchiveName || _schemaOfFullDbName(name) != null;
@@ -125,6 +160,10 @@ class LibraryRelease extends Equatable {
     required this.assets,
   });
 
+  /// ה-`state` של נכס שהעלאתו הושלמה. GitHub מפרסם נכסים ברשימה עוד לפני
+  /// שעלו (`starting`/`uploading`, בדרך כלל בגודל 0), ונכס כזה מסונן.
+  static const String uploadedAssetState = 'uploaded';
+
   factory LibraryRelease.fromJson(Map<String, dynamic> json) {
     final assetsRaw = json['assets'];
     return LibraryRelease(
@@ -134,7 +173,40 @@ class LibraryRelease extends Equatable {
       publishedAt: DateTime.tryParse((json['published_at'] as String?) ?? ''),
       assets: assetsRaw is List
           ? assetsRaw
-              .map((e) => ReleaseAsset.fromJson(e as Map<String, dynamic>))
+              .whereType<Map<String, dynamic>>()
+              .where(_isUploaded)
+              .map(ReleaseAsset.fromJson)
+              .toList(growable: false)
+          : const [],
+    );
+  }
+
+  // שדה חסר = API ישן או מראה מקומית; לא פוסלים על היעדרו.
+  static bool _isUploaded(Map<String, dynamic> e) {
+    final state = e['state'];
+    return state == null || state == uploadedAssetState;
+  }
+
+  /// פורמט המראה המקומית — ראו [ReleaseAsset.toMirrorJson].
+  Map<String, dynamic> toMirrorJson() => {
+        'tag': tag,
+        'isPrerelease': isPrerelease,
+        'isDraft': isDraft,
+        if (publishedAt != null) 'publishedAt': publishedAt!.toIso8601String(),
+        'assets': assets.map((a) => a.toMirrorJson()).toList(),
+      };
+
+  factory LibraryRelease.fromMirrorJson(Map<String, dynamic> json) {
+    final assetsRaw = json['assets'];
+    return LibraryRelease(
+      tag: (json['tag'] as String?) ?? '',
+      isPrerelease: (json['isPrerelease'] as bool?) ?? false,
+      isDraft: (json['isDraft'] as bool?) ?? false,
+      publishedAt: DateTime.tryParse((json['publishedAt'] as String?) ?? ''),
+      assets: assetsRaw is List
+          ? assetsRaw
+              .whereType<Map<String, dynamic>>()
+              .map(ReleaseAsset.fromMirrorJson)
               .toList(growable: false)
           : const [],
     );
@@ -157,6 +229,7 @@ class LibraryRelease extends Equatable {
     for (final asset in assets) {
       final single = asset.isFullDbArchive;
       if (!single && !asset.isSplitFullDbManifest) continue;
+      if (asset.size <= 0) continue;
       final schema =
           asset.advertisedFullDbSchemaVersion ?? _legacyFullDbSchemaCeiling;
       if (schema > maxSchemaVersion) continue;
@@ -167,6 +240,25 @@ class LibraryRelease extends Equatable {
     }
     return best;
   }
+
+  /// הסכמה הגבוהה של DB מלא שה-release מפרסם מעל [maxSchemaVersion], כשאין
+  /// לו DB מלא שאפשר לקרוא; אחרת null.
+  int? unsupportedFullDbSchemaFor({required int maxSchemaVersion}) {
+    if (fullDbAssetFor(maxSchemaVersion: maxSchemaVersion) != null) return null;
+    int? highest;
+    for (final asset in assets) {
+      if (!asset.isFullDbArchive && !asset.isSplitFullDbManifest) continue;
+      final schema =
+          asset.advertisedFullDbSchemaVersion ?? _legacyFullDbSchemaCeiling;
+      if (schema <= maxSchemaVersion) continue;
+      if (highest == null || schema > highest) highest = schema;
+    }
+    return highest;
+  }
+
+  /// [unsupportedFullDbSchemaFor] מול [kSupportedDbSchemaVersion].
+  int? get unsupportedFullDbSchema =>
+      unsupportedFullDbSchemaFor(maxSchemaVersion: kSupportedDbSchemaVersion);
 
   /// כתובות החלקים וגדליהם ב-release זה, לפענוח מניפסט פיצול.
   ({Map<String, String> urls, Map<String, int> sizes}) get assetIndex => (

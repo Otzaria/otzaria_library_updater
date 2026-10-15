@@ -1,4 +1,7 @@
+import 'dart:convert';
 import 'dart:io';
+
+import 'package:crypto/crypto.dart';
 
 import 'package:test/test.dart';
 import 'package:seforim_library_updater/src/models/patch_table_spec.dart';
@@ -73,8 +76,12 @@ void main() {
       db.execute("INSERT INTO source VALUES (1,'aleph'),(2,'bet'),(3,'gimel')");
       expect(
         _hasher.compute(db, tableOrder: kHashTableOrder),
-        // 39 טבלאות ב-kHashTableOrder (סכמה 6) — כל שם נכתב כ-
+        // 44 טבלאות ב-kHashTableOrder (סכמה 7) — כל שם נכתב כ-
         // marker גם כשהטבלה נעדרת, לכן ה-golden מתעדכן עם סנכרון הרשימה.
+        '96422e6c37fe6dd3c9720a8862ab6f5c31c5d7b1ea16f55d0c311defd7941615',
+      );
+      expect(
+        _hasher.compute(db, tableOrder: kHashTableOrderSchema6),
         '64b1814ecabdb19afbdccb938fc22a4828a591bff8a253fbd4a01a2563753199',
       );
       // הסדר הקפוא של סכמה-3 חייב להמשיך לשחזר את ה-golden ההיסטורי —
@@ -98,6 +105,30 @@ void main() {
           isNot(_hasher.compute(without, tableOrder: kHashTableOrder)));
       withBom.close();
       without.close();
+    });
+  });
+
+  // REAL נכתב לזרם כ-`Double.toString` של Java, כמו ב-LogicalContentHasher.kt.
+  group('javaDoubleToString', () {
+    test('ה-hash של עמודת REAL משתמש בפורמט של Java', () {
+      final db = sqlite3.sqlite3.openInMemory();
+      db.execute('CREATE TABLE source (id INTEGER PRIMARY KEY, w REAL)');
+      db.execute('INSERT INTO source VALUES (1, 0.0001)');
+      final stream = <int>[
+        ...utf8.encode(' table:source '),
+        ...utf8.encode('cols:id,w'),
+        0x00,
+        0x02,
+        ...utf8.encode('1'),
+        0x1F,
+        0x02,
+        ...utf8.encode('1.0E-4'),
+        0x1F,
+        0xFF,
+      ];
+      expect(_hasher.compute(db, tableOrder: const ['source']),
+          sha256.convert(stream).toString());
+      db.close();
     });
   });
 

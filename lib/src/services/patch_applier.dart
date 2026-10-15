@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:seforim_library_updater/src/sqlite/sqlite3_api.dart' as sqlite3;
 
+import '../messages/library_updater_messages.dart';
 import '../models/delta_manifest.dart';
 import '../models/patch_table_spec.dart';
 import 'logical_content_hasher.dart';
@@ -12,11 +13,13 @@ import 'logical_content_hasher.dart';
 /// `line_ref` ו-`line_dh` (סכמה 4) מוחרגות במכוון: הן אינדקסים נגזרים
 /// (הפניה→שורה, דיבור-המתחיל→שורה) ולא תוכן שנכנס לאינדקס החיפוש, ושינוי
 /// בהן לבדן לא צריך לגרור רענון אינדקס לספר — שינוי תוכן אמיתי מגיע תמיד
-/// דרך `line` / `line_content` שכבר מכוסות.
+/// דרך `line` / `line_content` שכבר מכוסות. `line_note` (סכמה 7) מכוסה: גוף
+/// הערת השוליים היה חלק מתוכן השורה.
 const Set<String> kBooksTouchedTables = {
   'book',
   'line',
   'line_content',
+  'line_note',
   'tocEntry',
   'line_toc',
   'tocText',
@@ -40,6 +43,9 @@ const int kDefaultHashCacheSizeKib = 64 * 1024;
 
 /// שם הטבלה ב-patch שנושאת את `sqlite_stat1` של ה-DB היעד.
 const String kPatchStat1SnapshotTable = 'stat1_snapshot';
+
+/// `SQLITE_CONSTRAINT` — קוד התוצאה הבסיסי של כל הפרת אילוץ.
+const int _sqliteConstraint = 19;
 
 /// URI של SQLite לפתיחת [path] לקריאה בלבד. `file:////host/share` שומר על
 /// נתיב UNC; רק `%`, `?` ו-`#` מקודדים, והיתר עובר כ-UTF-8 כפי שהוא.
@@ -87,8 +93,8 @@ class PatchApplyResult {
   final Map<String, int> deletes;
 
   /// ה-hash הכולל של ה-DB אחרי ה-apply. באימות חלקי לא חושב בפועל — זה
-  /// `toContentHash` שבמניפסט.
-  final String resultHash;
+  /// `toContentHash` שבמניפסט; null כש-`verifyToHash` היה כבוי.
+  final String? resultHash;
 
   /// מזהי הספרים שתוכן האינדקס שלהם הושפע מה-patch — שינויים בטבלאות
   /// [kBooksTouchedTables] בלבד (book/line/TOC כולל tocText ו-alt-TOC,
@@ -112,11 +118,19 @@ class PatchApplyResult {
   final Map<String, int> verifyTableBytes;
 
   /// האם ה-patch שינה טבלאות שאינן מכוסות ב-[booksTouched] (מלבד schema_meta,
-  /// שמתעדכן בכל patch, ו-line_ref/line_dh, שאינן תוכן חיפוש — ראו
-  /// [kBooksTouchedTables]). כש-true, צרכן שהאינדקס שלו תלוי בטבלאות האלה
+  /// שמתעדכן בכל patch, ו-line_ref/line_dh וטבלאות התצוגה של סכמה 7,
+  /// שאינן תוכן חיפוש — ראו [kBooksTouchedTables]). כש-true, צרכן שהאינדקס שלו תלוי בטבלאות האלה
   /// צריך רענון מלא — אין דרך לגזור מהן מזהי ספרים מדויקים.
   bool get hasChangesOutsideBooksTouched {
-    const ignored = {'schema_meta', 'line_ref', 'line_dh'};
+    const ignored = {
+      'schema_meta',
+      'line_ref',
+      'line_dh',
+      'book_banner',
+      'book_protection',
+      'line_divine_name',
+      'line_note_divine_name',
+    };
     bool changed(MapEntry<String, int> e) =>
         e.value > 0 &&
         !ignored.contains(e.key) &&
@@ -174,33 +188,20 @@ class PatchApplyException implements Exception {
     this.cause,
   }) : isContentMismatch = isContentMismatch || hashMismatchStage != null;
   @override
-  String toString() => 'PatchApplyException: $message';
+  String toString() => message;
 }
 
-/// בוחר את סדר ה-hash לפי גרסת הסכמה: 1 → [kHashTableOrderSchema1] (33),
-/// 2 → [kHashTableOrderSchema2] (34), 3 → [kHashTableOrderSchema3] (35),
-/// 4 → [kHashTableOrderSchema4], 5 → [kHashTableOrderSchema5] (37),
-/// 6 → [kHashTableOrderSchema6] (39, הנוכחי).
-/// כל ערך אחר → זריקה (fail loudly).
+/// בוחר את סדר ה-hash לפי גרסת הסכמה, מתוך [kHashTableOrderBySchemaVersion].
+/// סכמה שאין לה סדר → זריקה (fail loudly).
 List<String> hashTableOrderForSchemaVersion(int schemaVersion) {
-  switch (schemaVersion) {
-    case 1:
-      return kHashTableOrderSchema1;
-    case 2:
-      return kHashTableOrderSchema2;
-    case 3:
-      return kHashTableOrderSchema3;
-    case 4:
-      return kHashTableOrderSchema4;
-    case 5:
-      return kHashTableOrderSchema5;
-    case 6:
-      return kHashTableOrderSchema6;
-    default:
-      throw PatchApplyException(
-        'גרסת סכמה $schemaVersion אינה נתמכת לבחירת סדר hash',
-      );
+  final order = kHashTableOrderBySchemaVersion[schemaVersion];
+  if (order == null) {
+    throw PatchApplyException(
+      LibraryUpdaterMessages.current
+          .unsupportedSchemaForHashOrder(schemaVersion),
+    );
   }
+  return order;
 }
 
 /// מחיל patch DB דלתאי על `seforim.db` בצורה אטומית, ומשכפל את
@@ -246,6 +247,8 @@ class PatchApplier {
   /// [verifyFromHash] — אם פעיל, מחשב את ה-hash המקומי לפני apply ומשווה ל-
   /// `fromContentHash` (יקר אך מזהה DB ששונה ידנית/corruption).
   /// [checkForeignKeys] — אם פעיל, מוודא ש-`foreign_key_check` לא גדל.
+  /// [verifyToHash] — כיבויו מדלג על אימות התוצאה ומתאים רק לקורא שמאמת בעצמו
+  /// בסוף שרשרת patches; אז `resultHash` הוא null.
   /// [onApplyProgress] — מדווח `(rowsDone, rowsTotal)` לאורך שלבי ה-upserts
   /// וה-deletes. `rowsTotal` הוא סך שורות טבלאות ה-patch שיעובדו בפועל,
   /// ונמדד פעם אחת לפני ה-transaction. הקריאה הראשונה היא `(0, rowsTotal)`
@@ -263,6 +266,7 @@ class PatchApplier {
     required DeltaManifest manifest,
     bool verifyFromHash = true,
     bool checkForeignKeys = true,
+    bool verifyToHash = true,
     void Function(String stage)? onStage,
     void Function(int hashedBytes, int totalBytes)? onVerifyProgress,
     void Function(int rowsDone, int rowsTotal)? onApplyProgress,
@@ -276,9 +280,8 @@ class PatchApplier {
         hashTableOrderForSchemaVersion(manifest.fromSchemaVersion);
     final toOrder = hashTableOrderForSchemaVersion(manifest.toSchemaVersion);
 
-    // עם hint (סך-הבתים מריצה קודמת) ה-total מדויק; בלעדיו נופלים לגודל
-    // הקובץ — הערכת-יתר (אינדקסים ודפים לא נכנסים ל-hash), שנמדדת מחדש לפני
-    // כל אימות כי ה-patch משנה את הגודל. בשני המסלולים זו הערכה למד בלבד.
+    // סך הבתים למד: ה-hint מריצה קודמת, או גודל הקובץ (הערכת-יתר) שנמדד
+    // מחדש לפני כל אימות.
     var totalBytes = 0;
     int refreshTotal() =>
         totalBytes = verifyTotalBytesHint ?? File(dbPath).lengthSync();
@@ -302,16 +305,15 @@ class PatchApplier {
       final localVersion = _readSchemaMetaInt(db, 'db_version', schema: 'main');
       final localSchema =
           _readSchemaMetaInt(db, 'db_schema_version', schema: 'main');
+      final messages = LibraryUpdaterMessages.current;
       if (localVersion != manifest.fromVersion) {
         throw PatchApplyException(
-          'גרסת ה-DB המקומי ($localVersion) אינה תואמת ל-patch '
-          '(${manifest.fromVersion})',
+          messages.localVersionMismatch(localVersion, manifest.fromVersion),
         );
       }
       if (localSchema != null && localSchema != manifest.fromSchemaVersion) {
         throw PatchApplyException(
-          'סכמת ה-DB המקומי ($localSchema) אינה תואמת ל-patch '
-          '(${manifest.fromSchemaVersion})',
+          messages.localSchemaMismatch(localSchema, manifest.fromSchemaVersion),
         );
       }
 
@@ -329,8 +331,7 @@ class PatchApplier {
         _setCacheSize(db, cacheSizeKib);
         if (localHash != manifest.fromContentHash) {
           throw PatchApplyException(
-            'ה-DB המקומי שונה מהצפוי — hash לא תואם ל-fromContentHash. '
-            'נדרשת הורדה מלאה.',
+            messages.contentHashMismatchNeedsFullDownload,
             hashMismatchStage: PatchHashMismatchStage.fromContentHash,
           );
         }
@@ -372,68 +373,69 @@ class PatchApplier {
         final postFk = _countFkViolations(db);
         if (postFk > preFk) {
           throw PatchApplyException(
-            'מספר הפרות מפתח זר גדל ($preFk→$postFk) — ה-patch אינו תקין',
+            messages.foreignKeyViolationsGrew(preFk, postFk),
           );
         }
       }
 
-      onStage?.call('verifyToHash');
-      // מקטין רק דפים נקיים; הדפים המלוכלכים של ה-transaction נשארים.
-      _setCacheSize(db, hashCacheSizeKib);
-      // ה-DB *אחרי* apply הוא בסכמת היעד — הסדר נבחר לפי toSchemaVersion.
-      final toTables = enablePartialTableVerification
-          ? _tablesToVerify(db, manifest, fromOrder, toOrder)
-          : null;
-      final String resultHash;
+      String? resultHash;
       var verifiedTables = const <String>[];
       var deferredTables = const <String>[];
       var verifyTableBytes = const <String, int>{};
-      if (toTables == null) {
-        if (verifyProgress != null) refreshTotal();
-        resultHash = hasher.compute(
-          db,
-          tableOrder: toOrder,
-          onProgress: verifyProgress,
-        );
-        if (resultHash != manifest.toContentHash) {
-          throw PatchApplyException(
-            'ה-hash אחרי apply ($resultHash) אינו תואם ל-toContentHash '
-            '(${manifest.toContentHash})',
-            hashMismatchStage: PatchHashMismatchStage.toContentHash,
+      if (verifyToHash) {
+        onStage?.call('verifyToHash');
+        // מקטין רק דפים נקיים; הדפים המלוכלכים של ה-transaction נשארים.
+        _setCacheSize(db, hashCacheSizeKib);
+        // ה-DB *אחרי* apply הוא בסכמת היעד — הסדר נבחר לפי toSchemaVersion.
+        final toTables = enablePartialTableVerification
+            ? _tablesToVerify(db, manifest, fromOrder, toOrder)
+            : null;
+        if (toTables == null) {
+          if (verifyProgress != null) refreshTotal();
+          final actual = hasher.compute(
+            db,
+            tableOrder: toOrder,
+            onProgress: verifyProgress,
           );
-        }
-      } else {
-        final expected = manifest.toTableContentHashes!;
-        if (verifyProgress != null) {
-          totalBytes = _hintedTotal(verifyTableBytesHint, toTables);
-          if (totalBytes == 0) refreshTotal();
-        }
-        final report = hasher.computeReport(
-          db,
-          tableOrder: toOrder,
-          only: toTables.toSet(),
-          onProgress: verifyProgress,
-        );
-        final mismatched = [
-          for (final t in toTables)
-            if (report.tableHashes[t] != expected[t]) t,
-        ];
-        if (mismatched.isNotEmpty) {
-          throw PatchApplyException(
-            'ה-hash אחרי apply אינו תואם ל-toTableContentHashes בטבלאות: '
-            '${mismatched.join(', ')}',
-            hashMismatchStage: PatchHashMismatchStage.toContentHash,
-            mismatchedTables: mismatched,
+          if (actual != manifest.toContentHash) {
+            throw PatchApplyException(
+              messages.resultHashMismatch(actual, manifest.toContentHash),
+              hashMismatchStage: PatchHashMismatchStage.toContentHash,
+            );
+          }
+          resultHash = actual;
+        } else {
+          final expected = manifest.toTableContentHashes!;
+          if (verifyProgress != null) {
+            totalBytes = _hintedTotal(verifyTableBytesHint, toTables);
+            if (totalBytes == 0) refreshTotal();
+          }
+          final report = hasher.computeReport(
+            db,
+            tableOrder: toOrder,
+            only: toTables.toSet(),
+            onProgress: verifyProgress,
           );
+          final mismatched = [
+            for (final t in toTables)
+              if (report.tableHashes[t] != expected[t]) t,
+          ];
+          if (mismatched.isNotEmpty) {
+            throw PatchApplyException(
+              messages.tableHashMismatch(mismatched.join(', ')),
+              hashMismatchStage: PatchHashMismatchStage.toContentHash,
+              mismatchedTables: mismatched,
+            );
+          }
+          verifiedTables = toTables;
+          deferredTables = [
+            for (final t in toOrder)
+              if (!report.tableHashes.containsKey(t)) t,
+          ];
+          verifyTableBytes = report.tableBytes;
+          // אומת לפי טבלאות; ה-hash הכולל הצפוי הוא זה שבמניפסט.
+          resultHash = manifest.toContentHash;
         }
-        verifiedTables = toTables;
-        deferredTables = [
-          for (final t in toOrder)
-            if (!report.tableHashes.containsKey(t)) t,
-        ];
-        verifyTableBytes = report.tableBytes;
-        // אומת לפי טבלאות; ה-hash הכולל הצפוי הוא זה שבמניפסט.
-        resultHash = manifest.toContentHash;
       }
 
       onStage?.call('commit');
@@ -554,7 +556,7 @@ class PatchApplier {
     } on sqlite3.SqliteException catch (e) {
       if (_isAttached(db, 'patch')) db.execute('DETACH DATABASE patch');
       throw PatchApplyException(
-        'לא ניתן לפתוח את קובץ ה-patch ($patchPath): ${e.message}',
+        LibraryUpdaterMessages.current.patchOpenFailed(patchPath, e.message),
         cause: e,
       );
     }
@@ -564,34 +566,36 @@ class PatchApplier {
       'SELECT 1 FROM pragma_database_list WHERE name = ?', [name]).isNotEmpty;
 
   void _assertPatchCompatible(sqlite3.Database db, DeltaManifest manifest) {
+    // `patch_meta.schema_version` הוא גרסת **פורמט** ה-patch, לא סכמת ה-DB.
     final schemaVersion = _readPatchMetaInt(db, 'schema_version');
+    final messages = LibraryUpdaterMessages.current;
     if (schemaVersion == null) {
-      throw const PatchApplyException('patch_meta.schema_version חסר ב-patch');
+      throw PatchApplyException(messages.patchMetaSchemaVersionMissing);
     }
     if (schemaVersion < 1 || schemaVersion > supportedPatchFormatVersion) {
       throw PatchApplyException(
-        'גרסת פורמט ה-patch ($schemaVersion) מחוץ לטווח הנתמך '
-        '(1–$supportedPatchFormatVersion) — נדרש עדכון תוכנה או patch תקין',
+        messages.patchFormatTooNew(schemaVersion, supportedPatchFormatVersion),
       );
     }
     final declaredFormat = manifest.patchFormatVersion;
     if (manifest.toSchemaVersion >= 4 && declaredFormat == null) {
-      throw const PatchApplyException(
-        'patchFormatVersion חסר במניפסט של schema 4 ומעלה',
-      );
+      throw PatchApplyException(messages.manifestMissingPatchFormatVersion);
     }
     if (declaredFormat != null && schemaVersion != declaredFormat) {
       throw PatchApplyException(
-        'גרסת פורמט ה-patch ($schemaVersion) אינה תואמת למניפסט '
-        '($declaredFormat)',
+        messages.patchFormatMismatch(schemaVersion, declaredFormat),
       );
     }
     final from = _readPatchMetaInt(db, 'from_version');
     final to = _readPatchMetaInt(db, 'to_version');
     if (from != manifest.fromVersion || to != manifest.toVersion) {
       throw PatchApplyException(
-        'גרסאות ה-patch ($from→$to) אינן תואמות ל-manifest '
-        '(${manifest.fromVersion}→${manifest.toVersion})',
+        messages.patchVersionRangeMismatch(
+          from,
+          to,
+          manifest.fromVersion,
+          manifest.toVersion,
+        ),
       );
     }
   }
@@ -639,15 +643,26 @@ class PatchApplier {
 
       final head = 'INSERT INTO "${table.name}" ($colsCsv) '
           'SELECT $colsCsv FROM patch."$patchTable"';
-      counts[table.name] = _runChunked(
-        db,
-        plan: progress.plans[patchTable],
-        progress: progress,
-        // תנאי ה-rowid ממלא גם את תפקיד `WHERE true` — בלעדיו ה-parser
-        // משייך את ON CONFLICT ל-SELECT ולא ל-INSERT.
-        chunkSql: (range) => '$head WHERE $range $conflictClause',
-        wholeSql: '$head WHERE true $conflictClause',
-      );
+      try {
+        counts[table.name] = _runChunked(
+          db,
+          plan: progress.plans[patchTable],
+          progress: progress,
+          // תנאי ה-rowid ממלא גם את תפקיד `WHERE true` — בלעדיו ה-parser
+          // משייך את ON CONFLICT ל-SELECT ולא ל-INSERT.
+          chunkSql: (range) => '$head WHERE $range $conflictClause',
+          wholeSql: '$head WHERE true $conflictClause',
+        );
+      } on sqlite3.SqliteException catch (e) {
+        // ה-ON CONFLICT מכוון ל-PK בלבד; ערך UNIQUE שעבר בין id-ים מתפוצץ כאן,
+        // כי ה-upserts רצים לפני ה-deletes — ה-patch אינו מתאים למסד הזה.
+        if (e.resultCode != _sqliteConstraint) rethrow;
+        throw PatchApplyException(
+          LibraryUpdaterMessages.current
+              .patchUniqueConflictNeedsFullDownload(table.name, e.message),
+          cause: e,
+        );
+      }
     }
     return counts;
   }
@@ -798,10 +813,16 @@ class PatchApplier {
   void _applyStat1Snapshot(sqlite3.Database db) {
     if (!_hasTable(db, 'patch', kPatchStat1SnapshotTable)) return;
     // יוצר את sqlite_stat1 כשחסרה; CREATE TABLE על שם sqlite_* אסור.
-    db.execute('ANALYZE main.sqlite_schema');
+    if (!_hasTable(db, 'main', 'sqlite_stat1')) {
+      db.execute('ANALYZE main.sqlite_schema');
+    }
     db.execute('DELETE FROM main.sqlite_stat1');
     db.execute('INSERT INTO main.sqlite_stat1 (tbl, idx, stat) '
         'SELECT tbl, idx, stat FROM patch."$kPatchStat1SnapshotTable"');
+    // stat4 ישנה הייתה סותרת את stat1 שהוחלפה.
+    if (_hasTable(db, 'main', 'sqlite_stat4')) {
+      db.execute('DELETE FROM main.sqlite_stat4');
+    }
   }
 
   /// אוסף את מזהי הספרים שתוכן האינדקס שלהם (כותרת/טקסט/הפניות TOC/מטא-דאטה)
@@ -845,6 +866,11 @@ class PatchApplier {
           'SELECT DISTINCT t.bookId FROM patch.${op}_tocEntry p '
               'JOIN main.tocEntry t ON t.id = p.id',
           joins: const ['tocEntry']);
+      collect(
+          '${op}_line_note',
+          'SELECT DISTINCT l.bookId FROM patch.${op}_line_note p '
+              'JOIN main.line l ON l.id = p.lineId',
+          joins: const ['line']);
       collect(
           '${op}_line_toc',
           'SELECT DISTINCT l.bookId FROM patch.${op}_line_toc p '

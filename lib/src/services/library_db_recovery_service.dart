@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:seforim_library_updater/src/sqlite/sqlite3_api.dart' as sqlite3;
 
+import '../messages/library_updater_messages.dart';
+
 /// הפעולה שבוצעה (או נדרשת) בעת בדיקת התאוששות בעליית האפליקציה.
 enum RecoveryAction {
   /// אין עדכון שנקטע — שום דבר לא נדרש.
@@ -13,7 +15,11 @@ enum RecoveryAction {
 
   /// נמצא סימון עדכון שנקטע אך ללא גיבוי. במסלול דלתא זה תקין (ה-apply אטומי,
   /// אין גיבוי לשחזר) — הקורא צריך לוודא תקינות (quick_check) ולנקות את הסימון.
-  blockedMissingBackup,
+  blockedMissingBackup;
+
+  /// שם נוסף ל-[blockedMissingBackup] — מה ש-[OfflineLibraryDbRecoveryService],
+  /// שאינו מגבה כלל, מחזיר על כל סימון שנמצא.
+  static const RecoveryAction interrupted = blockedMissingBackup;
 }
 
 class RecoveryResult {
@@ -63,17 +69,17 @@ class LibraryDbRecoveryService {
     }
 
     if (!backup.existsSync()) {
-      return const RecoveryResult(
+      return RecoveryResult(
         RecoveryAction.blockedMissingBackup,
-        'נמצא סימון עדכון שלא הושלם ללא גיבוי — יש לוודא תקינות ה-DB',
+        LibraryUpdaterMessages.current.interruptedUpdateWithoutBackup,
       );
     }
 
     _restore(backup.path, dbPath);
     _deleteQuietly(marker.path);
-    return const RecoveryResult(
+    return RecoveryResult(
       RecoveryAction.restored,
-      'עדכון שנקטע זוהה — ה-DB שוחזר מהגיבוי',
+      LibraryUpdaterMessages.current.interruptedUpdateRestored,
     );
   }
 
