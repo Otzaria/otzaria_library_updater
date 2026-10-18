@@ -245,6 +245,24 @@ void main() {
         .where((n) => n != 'seforim.db.zst' && n != 'seforim.db.zst.resume')
         .toList();
 
+    void expectOnlyPersistentPartLocks() {
+      // Lock sidecars retain their inode so another owner cannot bypass a lock.
+      // Payloads, resume sidecars, temporary files and stale parts must be gone.
+      expect(
+        leftovers(),
+        unorderedEquals([
+          for (var i = 0; i < _parts.length; i++)
+            'seforim.db.zst.part-${i.toString().padLeft(3, '0')}.lock',
+        ]),
+      );
+      for (var i = 0; i < _parts.length; i++) {
+        final lockPath = '${PatchDownloader.splitPartPath(dest, i)}.lock';
+        expect(FileSystemEntity.typeSync(lockPath, followLinks: false),
+            FileSystemEntityType.file);
+        expect(File(lockPath).lengthSync(), 0);
+      }
+    }
+
     test('מוריד, מחבר ומאמת; החלקים נמחקים וההתקדמות מצטברת', () async {
       final captured = <http.BaseRequest>[];
       final progress = <int>[];
@@ -261,7 +279,7 @@ void main() {
       expect(captured, hasLength(3));
       expect(progress.last, 50);
       expect(progress, orderedEquals([...progress]..sort()));
-      expect(leftovers(), isEmpty);
+      expectOnlyPersistentPartLocks();
     });
 
     test('המשך אחרי חלק שנקטע: Range לחלק השני בלבד, הראשון לא יורד שוב',
@@ -376,7 +394,7 @@ void main() {
               contentLength: sizes[i]),
       }).downloadSplitToFile(split: split, destPath: dest, resumeToken: 'v31');
       expect(File(dest).readAsBytesSync(), big);
-      expect(leftovers(), isEmpty);
+      expectOnlyPersistentPartLocks();
     });
 
     /// מריץ הורדה מלאה ומפעיל את [beforeJoin] כשהחלק האחרון כמעט נכתב — אחרי
@@ -523,7 +541,7 @@ void main() {
           .writeAsStringSync('old');
       await server([]).downloadSplitToFile(
           split: _split(), destPath: dest, resumeToken: 'v31');
-      expect(leftovers(), isEmpty);
+      expectOnlyPersistentPartLocks();
     });
 
     test('downloadReleaseAssetToFile: נכס יחיד מאומת לפי ה-digest', () async {
