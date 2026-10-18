@@ -804,18 +804,21 @@ class LibraryMirrorExporter {
         final name = p.basename(entity.path);
         final keep = keepByDir[name];
         if (entity is Directory) {
-          if (keep == null) {
-            await entity.delete(recursive: true);
-            continue;
-          }
           await for (final file in entity.list(followLinks: false)) {
-            if (!keep.contains(p.basename(file.path))) {
-              await file.delete(recursive: true);
+            if (keep == null || !keep.contains(p.basename(file.path))) {
+              await _deletePreservingLocks(file);
             }
+          }
+          if (keep == null) {
+            // Non-recursive removal is safe if a concurrent download created
+            // a new sidecar after the listing; the directory then stays put.
+            try {
+              await entity.delete();
+            } catch (_) {}
           }
         } else {
           // קובץ ישר תחת assets/ — לא נוצר על ידי הייצוא הזה.
-          await entity.delete();
+          await _deletePreservingLocks(entity);
         }
       } catch (_) {
         // מקום מבוזבז בלבד; לא סיבה להכשיל את ההורדה.
@@ -1472,8 +1475,25 @@ class LibraryMirrorExporter {
   Future<void> _deleteDirQuietly(String path) async {
     try {
       final dir = Directory(path);
-      if (dir.existsSync()) await dir.delete(recursive: true);
+      if (dir.existsSync()) await _deletePreservingLocks(dir);
     } catch (_) {}
+  }
+
+  /// Locks keep their inode even after their asset leaves the manifest. This
+  /// includes locks for split parts and locks inside obsolete tag directories.
+  Future<void> _deletePreservingLocks(FileSystemEntity entity) async {
+    if (entity.path.endsWith('.lock')) return;
+    if (entity is Directory) {
+      await for (final child in entity.list(followLinks: false)) {
+        await _deletePreservingLocks(child);
+      }
+      // Never recursively unlink a lock created after the directory listing.
+      try {
+        await entity.delete();
+      } catch (_) {}
+    } else {
+      await entity.delete();
+    }
   }
 
   void _deleteQuietly(String path) {

@@ -20,6 +20,7 @@ import 'package:seforim_library_updater/src/services/offline_library_update_plan
 import 'package:seforim_library_updater/src/services/local_mirror_library_release_client.dart';
 import 'package:seforim_library_updater/src/services/patch_downloader.dart';
 import 'package:test/test.dart';
+import 'package:sqlite3/sqlite3.dart' as sqlite3;
 
 typedef ReleaseSpec = ({
   String tag,
@@ -1627,6 +1628,44 @@ void main() {
       expect(orphan.existsSync(), isFalse);
       expect(assetOnDisk(destDir, 'v3', 'seforim.db.zst'), isTrue);
       expect(assetOnDisk(destDir, 'v3', 'patch-v2-v3.db.zst'), isTrue);
+    });
+
+    test('pruning retains lock inodes even for obsolete and nested assets',
+        () async {
+      final paths = [
+        p.join(destDir, 'assets', 'v1', 'removed.zst.lock'),
+        p.join(destDir, 'assets', 'v1', 'parts', 'part-000.lock'),
+        p.join(destDir, 'assets', 'v3', 'removed.zst.lock'),
+        p.join(destDir, 'assets', 'root.lock'),
+      ];
+      for (final path in paths) {
+        File(path)
+          ..createSync(recursive: true)
+          ..writeAsBytesSync(const []);
+      }
+      final owner = sqlite3.sqlite3.open(paths.first);
+      owner.execute('BEGIN EXCLUSIVE');
+      addTearDown(owner.close);
+      final obsolete = File(p.join(destDir, 'assets', 'v1', 'removed.zst'))
+        ..writeAsStringSync('obsolete asset');
+      final built = buildExporter([
+        release('v3', assets: ['seforim.db.zst']),
+      ]);
+      await built.exporter.export(destDir: destDir);
+      expect(obsolete.existsSync(), isFalse);
+      for (final path in paths) {
+        expect(File(path).existsSync(), isTrue, reason: path);
+        expect(File(path).lengthSync(), 0);
+      }
+      // Deleting/recreating a lock would let this connection acquire a new
+      // inode despite the owner still holding the old one.
+      final contender = sqlite3.sqlite3.open(paths.first);
+      try {
+        expect(() => contender.execute('BEGIN EXCLUSIVE'),
+            throwsA(isA<sqlite3.SqliteException>()));
+      } finally {
+        contender.close();
+      }
     });
 
     test('manifest פגום אינו מפיל את הייצוא — הנכס עדיין נשמר', () async {

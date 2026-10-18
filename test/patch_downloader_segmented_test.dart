@@ -487,7 +487,10 @@ void main() {
         throwsA(isA<PatchDownloadException>()));
     await first;
     expect(File(dest).readAsBytesSync(), server.data);
-    expect(File('$dest.lock').existsSync(), isFalse);
+    // The zero-byte lock sidecar persists so a subsequent owner cannot hold a
+    // different inode from another process that already opened this one.
+    expect(File('$dest.lock').existsSync(), isTrue);
+    expect(File('$dest.lock').lengthSync(), 0);
 
     // אחרי שהראשונה סיימה, אותו יעד פנוי שוב ונשאר שלם.
     await download(downloader(), sha: _sha(server.data));

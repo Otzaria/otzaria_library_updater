@@ -257,6 +257,19 @@ void main() {
 
     String assembledPath() => p.join(destDir, 'assets', 'v5', _archive);
 
+    void expectOnlyPersistentPartLocks() {
+      final files =
+          Directory(LibraryMirrorExporter.splitPartsDir(assembledPath()))
+              .listSync(recursive: true);
+      expect(
+          files.map((f) => p.basename(f.path)),
+          unorderedEquals(
+              ['$_archive.part-000.lock', '$_archive.part-001.lock']));
+      for (final file in files) {
+        expect((file as File).lengthSync(), 0);
+      }
+    }
+
     test('מוריד את החלקים, מרכיב קובץ אחד, והמראה רואה נכס רגיל', () async {
       final stages = <String>[];
       final (:exporter, :fetched) = build();
@@ -264,10 +277,7 @@ void main() {
           await exporter.export(destDir: destDir, onStage: stages.add), isTrue);
 
       expect(File(assembledPath()).readAsBytesSync(), whole);
-      expect(
-          Directory(LibraryMirrorExporter.splitPartsDir(assembledPath()))
-              .existsSync(),
-          isFalse);
+      expectOnlyPersistentPartLocks();
       expect(
           fetched, containsAll(['$_archive.part-000', '$_archive.part-001']));
       expect(stages.any((s) => s.contains('מרכיב')), isTrue);
@@ -375,10 +385,7 @@ void main() {
           containsAll(['$_archive.part-000', '$_archive.part-001']));
       expect(first.fetched, contains('v4:$_archive'));
       expect(File(assembledPath()).existsSync(), isFalse);
-      expect(
-          Directory(LibraryMirrorExporter.splitPartsDir(assembledPath()))
-              .existsSync(),
-          isFalse);
+      expectOnlyPersistentPartLocks();
       expect(
         warnings,
         contains(LibraryUpdaterMessages.current

@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
+import 'package:seforim_library_updater/src/sqlite/sqlite3_api.dart' as sqlite3;
 
 import '../hashing/fast_sha256.dart';
 import '../hashing/fast_sha256_sink.dart';
@@ -193,6 +194,7 @@ class PatchDownloader {
   ///
   /// הורדה שנייה לאותו [destPath] בזמן שהראשונה רצה נכשלת מיד ב-
   /// [PatchDownloadException], בלי לגעת בקבצים (`<destPath>.lock`).
+  /// קובץ הנעילה הריק נשאר גם אחרי ההורדה; אין למחוק או להחליף אותו בניקוי.
   Future<void> downloadToFile({
     required String url,
     required String destPath,
@@ -1673,35 +1675,30 @@ void _joinParts(List<String> partPaths, String destPath, int expectedSize,
   }
 }
 
-/// נעילה בלעדית של יעד הורדה: קבוצה בתהליך (נעילת קובץ ב-POSIX אינה חוסמת
-/// את אותו תהליך) ונעילת `<dest>.lock` בין תהליכים.
+/// SQLite coordinates its file locks across connections in the same process,
+/// including separate isolates, as well as across processes. A raw POSIX file
+/// lock and an isolate-local set cannot provide both guarantees.
+///
+/// The sidecar stays on disk after release: unlinking a released lock file can
+/// leave another owner holding the old inode while a new owner locks a new one.
 class _DestinationLock {
-  _DestinationLock._(this._key, this._file, this._path);
+  _DestinationLock._(this._db);
 
-  static final Set<String> _held = {};
-
-  final String _key;
-  final RandomAccessFile _file;
-  final String _path;
+  final sqlite3.Database _db;
 
   static _DestinationLock acquire(String destPath) {
     final path = '$destPath.lock';
-    final key = p.canonicalize(destPath);
     final messages = LibraryUpdaterMessages.current;
-    if (!_held.add(key)) {
-      throw PatchDownloadException(messages.writeResumeSidecarFailed(
-          path, 'already being downloaded in this process'));
-    }
-    RandomAccessFile? file;
+    sqlite3.Database? db;
     try {
-      file = File(path).openSync(mode: FileMode.append);
-      file.lockSync(FileLock.exclusive);
-      return _DestinationLock._(key, file, path);
+      db = sqlite3.sqlite3.open(path);
+      db.execute('PRAGMA busy_timeout = 0');
+      db.execute('BEGIN EXCLUSIVE');
+      return _DestinationLock._(db);
     } catch (error) {
       try {
-        file?.closeSync();
+        db?.close();
       } catch (_) {}
-      _held.remove(key);
       throw PatchDownloadException(
           messages.writeResumeSidecarFailed(path, '$error'));
     }
@@ -1709,13 +1706,8 @@ class _DestinationLock {
 
   void release() {
     try {
-      _file.unlockSync();
+      _db.close();
     } catch (_) {}
-    try {
-      _file.closeSync();
-    } catch (_) {}
-    _deleteFileQuietly(_path);
-    _held.remove(_key);
   }
 }
 
