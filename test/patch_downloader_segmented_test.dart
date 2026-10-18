@@ -49,7 +49,30 @@ class _AssetServer {
     }
   }
 
+  // הלקוח סוגר בכוונה חיבורים מקבילים אחרי ניתוק/If-Range שלא תאם.
+  // שגיאת הכתיבה נמסרת גם ב-done, מעבר ל-flush שממתינים לו ישירות.
+  Future<void> _allowDisconnect(Future<dynamic> completion) async {
+    try {
+      await completion;
+    } on SocketException {
+      // ניתוק צפוי של לקוח הבדיקה.
+    } on HttpException {
+      // החיבור יכול להיסגר גם לפני שהתגובה נכתבה.
+    }
+  }
+
   Future<void> _handle(HttpRequest request) async {
+    unawaited(_allowDisconnect(request.response.done));
+    try {
+      await _respond(request);
+    } on SocketException {
+      // הלקוח אינו חייב לקרוא גוף שננטש בעת ביטול טווחים אחרים.
+    } on HttpException {
+      // הלקוח יכול לנטוש גם לפני detachSocket/close.
+    }
+  }
+
+  Future<void> _respond(HttpRequest request) async {
     final response = request.response;
     final range = request.headers.value('range');
     final ifRange = request.headers.value('if-range');
@@ -80,9 +103,13 @@ class _AssetServer {
     final cut = cutAfter?.call(start, end, requests.length - 1);
     if (cut != null) {
       final socket = await response.detachSocket();
-      socket.add(body.sublist(0, cut));
-      await socket.flush();
-      socket.destroy();
+      unawaited(_allowDisconnect(socket.done));
+      try {
+        socket.add(body.sublist(0, cut));
+        await socket.flush();
+      } finally {
+        socket.destroy();
+      }
       return;
     }
     active++;
@@ -97,7 +124,6 @@ class _AssetServer {
         if (chunkDelay > Duration.zero) await Future<void>.delayed(chunkDelay);
       }
       await response.close();
-    } catch (_) {
     } finally {
       active--;
     }
@@ -350,13 +376,13 @@ void main() {
   });
 
   /// מצב של כל הטווחים שלמים, כש-[assembled] מהם כבר ב-dest ואחריהם זנב
-  /// של צירוף שנקטע לפני שנרשם.
+  /// של צירוף שנקטע לפני שנרשם (אם נשאר עוד טווח לצרף).
   void writeCompleteSegments(int assembled) {
     final quarter = size ~/ 4;
     final bounds = [0, quarter, 2 * quarter, 3 * quarter, size];
     File(dest).writeAsBytesSync([
       ...server.data.sublist(0, bounds[assembled]),
-      ...List.filled(1000, 0xEE),
+      if (assembled < 4) ...List.filled(1000, 0xEE),
     ]);
     for (var i = assembled; i < 4; i++) {
       File('$dest.seg-$i')
@@ -375,8 +401,9 @@ void main() {
     }));
   }
 
-  for (final assembled in [1, 2]) {
-    test('קריסה באמצע הצירוף (assembled: $assembled): הזנב נחתך, בלי הורדה',
+  for (final assembled in [1, 2, 3, 4]) {
+    test(
+        'חידוש checkpoint בצירוף (assembled: $assembled): קובץ תקין, בלי הורדה',
         () async {
       writeCompleteSegments(assembled);
       await download(downloader(), sha: _sha(server.data));
@@ -387,10 +414,11 @@ void main() {
     });
   }
 
-  test('ביטול באמצע הצירוף נתפס ושומר את הטווחים שטרם צורפו', () async {
+  test('ביטול בהתקדמות הצירוף משאיר מצב שניתן לחידוש בלי הורדה', () async {
     server.data = _data(64 << 20);
     final sha = _sha(server.data);
     var cancel = false;
+    final verified = <int>[];
     await expectLater(
       downloader().downloadToFile(
         url: server.url,
@@ -398,14 +426,37 @@ void main() {
         expectedSize: server.data.length,
         expectedSha256: sha,
         resumeToken: 'asset-1',
-        onVerifyProgress: (_, __) => cancel = true,
+        onVerifyProgress: (done, total) {
+          expect(total, server.data.length);
+          verified.add(done);
+          cancel = true;
+        },
         isCancelled: () => cancel,
       ),
       throwsA(isA<PatchDownloadCancelled>()),
     );
     final state = jsonDecode(File('$dest.segments').readAsStringSync()) as Map;
-    expect(state['assembled'], lessThan(4));
-    expect(File('$dest.seg-3').existsSync(), isTrue);
+    expect(verified, isNotEmpty);
+    expect(verified.first, inExclusiveRange(0, server.data.length));
+    // העובד יכול לסיים לפני דגימת הביטול הבאה. כל checkpoint חוקי חייב
+    // לשמור את הקידומת המחויבת ואת כל הטווחים שטרם צורפו, בלי אובדן בתים.
+    final assembled = state['assembled'] as int;
+    final bounds = (state['bounds'] as List).cast<int>();
+    expect(assembled, inInclusiveRange(1, 4));
+    final prefix = File(dest).readAsBytesSync();
+    expect(prefix.length, greaterThanOrEqualTo(bounds[assembled]));
+    expect(prefix.sublist(0, bounds[assembled]),
+        server.data.sublist(0, bounds[assembled]));
+    for (var i = 1; i < 4; i++) {
+      final segment = File('$dest.seg-$i');
+      if (i < assembled) {
+        expect(segment.existsSync(), isFalse);
+      } else {
+        expect(segment.readAsBytesSync(),
+            server.data.sublist(bounds[i], bounds[i + 1]));
+      }
+    }
+    expect(File('$dest.resume').readAsStringSync(), 'asset-1\n"v1"');
 
     client.received = 0;
     await download(downloader(), sha: sha);
