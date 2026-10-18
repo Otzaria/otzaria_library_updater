@@ -515,6 +515,46 @@ void main() {
     });
   });
 
+  group('מעבר סכמה 6→7 (דלתא רגילה)', () {
+    const schema7Full = ReleaseAsset(
+      name: 'seforim-schema7.db.zst',
+      downloadUrl: 'https://x/v31/seforim-schema7.db.zst',
+      size: 900000000,
+    );
+    final edge = _edge(30, 31, fromSchema: 6, toSchema: 7, patchFormat: 4);
+
+    LibraryUpdatePlan planV31(int supported, {ReleaseAsset? full}) =>
+        LibraryUpdatePlanner(supportedDbSchemaVersion: supported).plan(
+          localVersion: 30,
+          localSchemaVersion: 6,
+          hasLocalVersionMeta: true,
+          latestVersion: 31,
+          latestDbSchemaVersion: 7,
+          edges: [edge],
+          latestFullDbAsset: full,
+          latestReleaseTag: full == null ? null : 'v31',
+        );
+
+    test('לקוח סכמה 7 לוקח את ה-edge 6→7 כדלתא', () {
+      expect(kSupportedDbSchemaVersion, 7);
+      final p = planV31(7, full: schema7Full);
+      expect(p.kind, LibraryUpdatePlanKind.delta);
+      expect(p.deltaSteps.single, same(edge));
+      expect(p.fullDbAsset, schema7Full);
+    });
+
+    test('לקוח סכמה 6 דוחה את ה-edge 6→7 — נדרש עדכון אפליקציה', () {
+      for (final full in [null, schema7Full]) {
+        final p = planV31(6, full: full);
+        expect(p.kind, LibraryUpdatePlanKind.blocked);
+        expect(p.deltaSteps, isEmpty);
+        expect(p.fullDbAsset, isNull);
+        expect(p.reason, contains('סכמת DB 7'));
+        expect(p.reason, contains('נדרש עדכון אפליקציה'));
+      }
+    });
+  });
+
   group('מחסום סכמה 6 (fullRebase)', () {
     const planner = LibraryUpdatePlanner(
         supportedDbSchemaVersion: kSupportedDbSchemaVersion);

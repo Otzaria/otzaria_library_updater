@@ -53,6 +53,11 @@ void main() {
         same(kHashTableOrderSchema6));
   });
 
+  test('DB בסכמה 7 מקבל את סדר סכמה 7', () {
+    expect(hashTableOrderForDbFile(writeDb(schemaVersion: '7')),
+        same(kHashTableOrderSchema7));
+  });
+
   test('DB בלי db_schema_version נכשל במקום לנחש סדר', () {
     expect(() => hashTableOrderForDbFile(writeDb()), throwsStateError);
   });

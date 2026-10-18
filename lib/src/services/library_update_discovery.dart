@@ -53,9 +53,10 @@ class LibraryUpdateDiscovery {
         .toList(growable: false);
   }
 
-  /// מחלץ מספר גרסה מ-tag כמו `v3` או `3`. מחזיר null אם אין מספר.
+  /// מחלץ מספר גרסה מ-tag כמו `v20-20260807110905`, `v3` או `3`. מעוגן
+  /// לתחילת ה-tag: ב-`lines-snapshot-sha256-<hex>` הספרות הראשונות הן `256`.
   static int? parseVersionFromTag(String tag) {
-    final match = RegExp(r'(\d+)').firstMatch(tag);
+    final match = RegExp(r'^v?(\d+)').firstMatch(tag);
     if (match == null) return null;
     return int.tryParse(match.group(1)!);
   }
@@ -98,7 +99,7 @@ class LibraryUpdateDiscovery {
       if (advertisedFulls.isEmpty && !hasVersionedManifest) {
         continue;
       }
-      final version = _releaseVersion(release);
+      final version = releaseVersionOf(release);
       // Release visibility must not depend on consumer capabilities or on a
       // successful manifest download. Unsupported releases still require action.
       if (version > latestVersion) {
@@ -137,9 +138,8 @@ class LibraryUpdateDiscovery {
       }
     }
 
-    // DB מלא ישן יותר אינו fallback חוקי ל-latest: הצרכן מאמת את הגרסה
-    // שחולצה מול plan.targetVersion, ולכן צירוף asset ישן היה גורם להורדה
-    // גדולה שמובטח שתיכשל באימות. במקרה כזה משאירים את ה-fallback חסר.
+    // DB מלא ישן אינו fallback ל-latest: הגרסה שחולצה נבדקת מול targetVersion,
+    // והורדה כזו הייתה נכשלת באימות.
     final fullMatchesLatest =
         latestFull != null && bestFullVersion == latestVersion;
 
@@ -179,7 +179,7 @@ class LibraryUpdateDiscovery {
   }
 
   /// גרסת ה-release לפי שמות ה-manifest assets, או לפי ה-tag כ-fallback.
-  int _releaseVersion(LibraryRelease release) {
+  static int releaseVersionOf(LibraryRelease release) {
     var version = 0;
     for (final asset in release.deltaManifestAssets) {
       final match = _manifestVersionPattern.firstMatch(asset.name);

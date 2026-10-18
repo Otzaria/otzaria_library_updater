@@ -1,0 +1,543 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:crypto/crypto.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:seforim_library_updater/src/messages/library_updater_messages.dart';
+import 'package:path/path.dart' as p;
+import 'package:seforim_library_updater/src/models/library_release.dart';
+import 'package:seforim_library_updater/src/services/disk_space_probe.dart';
+import 'package:seforim_library_updater/src/services/github_library_release_client.dart';
+import 'package:seforim_library_updater/src/services/library_mirror_exporter.dart';
+import 'package:seforim_library_updater/src/services/local_mirror_library_release_client.dart';
+import 'package:seforim_library_updater/src/models/patch_table_spec.dart';
+import 'package:test/test.dart';
+
+/// ה-DB המלא יפורסם בעתיד מפוצל (`seforim.db.zst.part-NNN` + מניפסט), בפורמט
+/// ש-SeforimLibrary כבר משתמש בו לאינדקס. המחשב הלא-מקוון חייב לקבל קובץ אחד.
+const _archive = 'seforim.db.zst';
+const _manifestName = '$_archive.manifest.json';
+
+String _hex(List<int> bytes) => sha256.convert(bytes).toString();
+
+Map<String, dynamic> _asset(String name, int size,
+        {String? digest, String tag = 'v5'}) =>
+    {
+      'name': name,
+      'browser_download_url': 'https://x/$tag/$name',
+      'size': size,
+      'id': name.hashCode.abs(),
+      'state': 'uploaded',
+      if (digest != null) 'digest': digest,
+    };
+
+void main() {
+  group('LibraryRelease — DB מלא מפוצל (מודל SplitAsset)', () {
+    LibraryRelease parse(List<Map<String, dynamic>> assets) =>
+        LibraryRelease.fromJson({
+          'tag_name': 'v5',
+          'prerelease': false,
+          'draft': false,
+          'assets': assets,
+        });
+
+    test('מניפסט הפיצול הוא ה-DB המלא עד שיפוענח', () {
+      final release = parse([
+        _asset('$_archive.part-001', 40),
+        _asset('$_archive.part-000', 100),
+        _asset(_manifestName, 600),
+      ]);
+      final full = release.fullDbAsset!;
+      expect(full.name, _manifestName);
+      expect(full.isSplitFullDbManifest, isTrue);
+      expect(full.splitArchiveName, _archive);
+    });
+
+    test('נכס שלם קודם למניפסט הפיצול', () {
+      final release = parse([
+        _asset(_archive, 10),
+        _asset('$_archive.part-000', 100),
+        _asset(_manifestName, 600),
+      ]);
+      expect(release.fullDbAsset!.name, _archive);
+    });
+
+    test('מניפסט שעדיין עולה — אין DB מלא', () {
+      final release = parse([
+        _asset('$_archive.part-000', 100),
+        {..._asset(_manifestName, 0), 'state': 'uploading'},
+      ]);
+      expect(release.fullDbAsset, isNull);
+    });
+
+    test('האינדקס המפוצל של הספרייה אינו נחשב DB', () {
+      final release = parse([
+        _asset('otzaria-library-index.tar.zst.part-000', 100),
+        _asset('otzaria-library-index.tar.zst.manifest.json', 600),
+      ]);
+      expect(release.fullDbAsset, isNull);
+    });
+
+    test('בחירת מסד: הסכמה הנתמכת הגבוהה גוברת, וסכמה גבוהה מהנתמכת לא', () {
+      final release = parse([
+        _asset('seforim-schema7.db.zst', 10),
+        _asset(_archive, 10),
+      ]);
+      expect(release.fullDbAssetFor(maxSchemaVersion: 7)!.name,
+          'seforim-schema7.db.zst');
+      expect(release.fullDbAssetFor(maxSchemaVersion: 6)!.name, _archive);
+    });
+
+    test('מסד בסכמה גבוהה מהנתמכת אינו נבחר גם כשאין אחר', () {
+      final release = parse([_asset('seforim-schema8.db.zst', 10)]);
+      expect(release.fullDbAssetFor(maxSchemaVersion: 6), isNull);
+      expect(release.unsupportedFullDbSchema, 8);
+    });
+
+    test('מסד סכמה 8 מפוצל נספר כסכמה לא נתמכת', () {
+      final release = parse([
+        _asset('seforim-schema8.db.zst.part-000', 100),
+        _asset('seforim-schema8.db.zst.manifest.json', 600),
+      ]);
+      expect(release.unsupportedFullDbSchema, 8);
+    });
+
+    test('סמן בגודל 0 אינו מסד מלא, ובסכמה נתמכת אינו חוסם', () {
+      const marker = LibraryRelease(
+        tag: 'v26',
+        isPrerelease: false,
+        isDraft: false,
+        publishedAt: null,
+        assets: [
+          ReleaseAsset(
+            name: 'seforim-schema6.db.zst',
+            downloadUrl: 'assets/v26/seforim-schema6.db.zst',
+            size: 0,
+          ),
+        ],
+      );
+      expect(marker.fullDbAssetFor(maxSchemaVersion: 6), isNull);
+      expect(marker.fullDbAssetFor(maxSchemaVersion: 7), isNull);
+      expect(marker.unsupportedFullDbSchema, isNull);
+    });
+  });
+
+  group('LibraryMirrorExporter — הרכבת DB מפוצל', () {
+    late Directory tmp;
+    late String destDir;
+
+    setUp(() {
+      tmp = Directory.systemTemp.createTempSync('split_full_db');
+      destDir = p.join(tmp.path, 'mirror');
+    });
+    tearDown(() {
+      LibraryUpdaterMessages.current = const HebrewLibraryUpdaterMessages();
+      if (tmp.existsSync()) tmp.deleteSync(recursive: true);
+    });
+
+    final part0 = Uint8List(3000)..fillRange(0, 3000, 1);
+    final part1 = Uint8List(1200)..fillRange(0, 1200, 2);
+    final whole = Uint8List.fromList([...part0, ...part1]);
+
+    Map<String, dynamic> manifestJson({String? wholeSha, int? part1Size}) => {
+          'schemaVersion': 1,
+          'archive': _archive,
+          'size': part0.length + (part1Size ?? part1.length),
+          'sha256': wholeSha ?? _hex(whole),
+          'partSizeLimit': 3000,
+          'githubAssetLimit': 2147483648,
+          'parts': [
+            {
+              'name': '$_archive.part-000',
+              'size': part0.length,
+              'sha256': _hex(part0),
+            },
+            {
+              'name': '$_archive.part-001',
+              'size': part1Size ?? part1.length,
+              'sha256': _hex(part1),
+            },
+          ],
+        };
+
+    /// שרת מדומה: release אחד (v5) שכל תוכנו הוא DB מלא מפוצל.
+    ({LibraryMirrorExporter exporter, List<String> fetched}) build({
+      Map<String, dynamic>? manifest,
+      Uint8List? servedPart1,
+      Set<String> failOnce = const {},
+      Future<void> Function(String name)? beforeAsset,
+      bool withBrokenOldRelease = false,
+      int? Function(String path)? freeBytesFor,
+      Uint8List? olderFullDb,
+    }) {
+      final manifestBytes = Uint8List.fromList(
+          utf8.encode(jsonEncode(manifest ?? manifestJson())));
+      final bodies = <String, Uint8List>{
+        '$_archive.part-000': part0,
+        '$_archive.part-001': servedPart1 ?? part1,
+        _manifestName: manifestBytes,
+      };
+      final releases = [
+        {
+          'tag_name': 'v5',
+          'prerelease': false,
+          'draft': false,
+          'published_at': '2026-09-01T00:00:00Z',
+          'assets': [
+            for (final e in bodies.entries)
+              _asset(e.key, e.value.length, digest: 'sha256:${_hex(e.value)}'),
+          ],
+        },
+        if (olderFullDb != null)
+          {
+            'tag_name': 'v4',
+            'prerelease': false,
+            'draft': false,
+            'published_at': '2026-08-01T00:00:00Z',
+            'assets': [
+              _asset(_archive, olderFullDb.length,
+                  digest: 'sha256:${_hex(olderFullDb)}', tag: 'v4'),
+            ],
+          },
+        // release ישן ומפוצל שהמניפסט שלו אינו נגיש — מחוץ לחלון ההיסטוריה.
+        if (withBrokenOldRelease)
+          {
+            'tag_name': 'v1',
+            'prerelease': false,
+            'draft': false,
+            'published_at': '2026-01-01T00:00:00Z',
+            'assets': [
+              for (final e in bodies.entries)
+                _asset(e.key, e.value.length, tag: 'v1'),
+            ],
+          },
+      ];
+      final fetched = <String>[];
+      final failed = <String>{};
+      final mock = MockClient.streaming((request, _) async {
+        final url = request.url.toString();
+        if (url.contains('api.github.com')) {
+          final body = utf8.encode(jsonEncode(
+              request.url.queryParameters['page'] == '1' ? releases : []));
+          return http.StreamedResponse(Stream.value(body), 200);
+        }
+        final name = url.split('/').last;
+        if (url.contains('/v1/')) {
+          fetched.add('v1:$name');
+          return http.StreamedResponse(const Stream<List<int>>.empty(), 500);
+        }
+        if (url.contains('/v4/')) {
+          fetched.add('v4:$name');
+          return http.StreamedResponse(Stream.value(olderFullDb!), 200,
+              contentLength: olderFullDb.length);
+        }
+        fetched.add(name);
+        if (failOnce.contains(name) && failed.add(name)) {
+          return http.StreamedResponse(const Stream<List<int>>.empty(), 500);
+        }
+        if (beforeAsset != null) await beforeAsset(name);
+        final body = bodies[name]!;
+        return http.StreamedResponse(Stream.value(body), 200,
+            contentLength: body.length);
+      });
+      return (
+        exporter: LibraryMirrorExporter(
+          supportedDbSchemaVersion: kSupportedDbSchemaVersion,
+          client: GithubLibraryReleaseClient(httpClient: mock),
+          httpClient: mock,
+          historyDepth: withBrokenOldRelease ? 1 : 10,
+          freeBytesFor: freeBytesFor,
+        ),
+        fetched: fetched,
+      );
+    }
+
+    String assembledPath() => p.join(destDir, 'assets', 'v5', _archive);
+
+    void expectOnlyPersistentPartLocks() {
+      final files =
+          Directory(LibraryMirrorExporter.splitPartsDir(assembledPath()))
+              .listSync(recursive: true);
+      expect(
+          files.map((f) => p.basename(f.path)),
+          unorderedEquals(
+              ['$_archive.part-000.lock', '$_archive.part-001.lock']));
+      for (final file in files) {
+        expect((file as File).lengthSync(), 0);
+      }
+    }
+
+    test('מוריד את החלקים, מרכיב קובץ אחד, והמראה רואה נכס רגיל', () async {
+      final stages = <String>[];
+      final (:exporter, :fetched) = build();
+      expect(
+          await exporter.export(destDir: destDir, onStage: stages.add), isTrue);
+
+      expect(File(assembledPath()).readAsBytesSync(), whole);
+      expectOnlyPersistentPartLocks();
+      expect(
+          fetched, containsAll(['$_archive.part-000', '$_archive.part-001']));
+      expect(stages.any((s) => s.contains('מרכיב')), isTrue);
+
+      final mirrored = await LocalMirrorLibraryReleaseClient(mirrorDir: destDir)
+          .fetchReleases();
+      final full = mirrored.single.fullDbAsset!;
+      expect(full.split, isNull);
+      expect(full.size, whole.length);
+      expect(full.digest, 'sha256:${_hex(whole)}');
+      expect(File(full.downloadUrl).existsSync(), isTrue);
+      // רק הנכס המורכב נכתב — לא החלקים ולא המניפסט שלהם.
+      expect(mirrored.single.assets.map((a) => a.name), [_archive]);
+      exporter.dispose();
+    });
+
+    test('בדיקת המקום סופרת גם את החלקים וגם את הקובץ המורכב', () async {
+      final needed = 2 * whole.length;
+      final short = build(
+        freeBytesFor: (_) => needed + DiskSpaceProbe.defaultHeadroomBytes - 1,
+      );
+      await expectLater(
+        short.exporter.export(destDir: destDir),
+        throwsA(isA<StateError>()),
+      );
+      expect(short.fetched, isNot(contains('$_archive.part-000')));
+      short.exporter.dispose();
+
+      final enough = build(
+        freeBytesFor: (_) => needed + DiskSpaceProbe.defaultHeadroomBytes,
+      );
+      expect(await enough.exporter.export(destDir: destDir), isTrue);
+      expect(File(assembledPath()).readAsBytesSync(), whole);
+      enough.exporter.dispose();
+    });
+
+    test('החלקים יורדים במקביל', () async {
+      // part-000 ממתין עד שבקשת part-001 מגיעה; בהורדה סדרתית זה נתקע.
+      final second = Completer<void>();
+      final (:exporter, fetched: _) = build(beforeAsset: (name) async {
+        if (name == '$_archive.part-001') second.complete();
+        if (name == '$_archive.part-000') {
+          await second.future.timeout(const Duration(seconds: 5));
+        }
+      });
+      await exporter.export(destDir: destDir);
+      expect(File(assembledPath()).lengthSync(), whole.length);
+      exporter.dispose();
+    });
+
+    test('ריצה חוזרת אינה מורידה את החלקים שוב', () async {
+      final first = build();
+      await first.exporter.export(destDir: destDir);
+      first.exporter.dispose();
+
+      final again = build();
+      await again.exporter.export(destDir: destDir);
+      expect(again.fetched.where((n) => n.contains('.part-')), isEmpty);
+      expect(File(assembledPath()).readAsBytesSync(), whole);
+      again.exporter.dispose();
+    });
+
+    test('חלק שנכשל — החלק השלם נשמר וממשיכים ממנו', () async {
+      final run = build(failOnce: {'$_archive.part-001'});
+      await expectLater(
+          run.exporter.export(destDir: destDir), throwsA(anything));
+      expect(File(assembledPath()).existsSync(), isFalse);
+      expect(
+          File(p.join(LibraryMirrorExporter.splitPartsDir(assembledPath()),
+                  '$_archive.part-000'))
+              .existsSync(),
+          isTrue);
+
+      run.fetched.clear();
+      await run.exporter.export(destDir: destDir);
+      expect(run.fetched, isNot(contains('$_archive.part-000')));
+      expect(File(assembledPath()).readAsBytesSync(), whole);
+      run.exporter.dispose();
+    });
+
+    test('חלק שתוכנו אינו תואם למניפסט — נכשל ולא נכתבת מראה', () async {
+      final bad = Uint8List(part1.length)..fillRange(0, part1.length, 9);
+      final (:exporter, fetched: _) = build(servedPart1: bad);
+      await expectLater(exporter.export(destDir: destDir), throwsA(anything));
+      expect(File(assembledPath()).existsSync(), isFalse);
+      expect(
+          File(p.join(
+                  destDir, LocalMirrorLibraryReleaseClient.manifestFileName))
+              .existsSync(),
+          isFalse);
+      exporter.dispose();
+    });
+
+    test('sha256 של המורכב שגוי — המסד נפסל, המראה נכתבת בלעדיו ולא יורד שוב',
+        () async {
+      final older = Uint8List(700)..fillRange(0, 700, 5);
+      final badManifest = manifestJson(wholeSha: 'f' * 64);
+      final first = build(manifest: badManifest, olderFullDb: older);
+      final warnings = <String>[];
+      expect(
+        await first.exporter.export(destDir: destDir, onWarning: warnings.add),
+        isTrue,
+      );
+      expect(first.fetched,
+          containsAll(['$_archive.part-000', '$_archive.part-001']));
+      expect(first.fetched, contains('v4:$_archive'));
+      expect(File(assembledPath()).existsSync(), isFalse);
+      expectOnlyPersistentPartLocks();
+      expect(
+        warnings,
+        contains(LibraryUpdaterMessages.current
+            .exportSplitFullDbSkipped('v5', 'sha256 ${'f' * 64}')),
+      );
+      final mirrored = await LocalMirrorLibraryReleaseClient(mirrorDir: destDir)
+          .fetchReleases();
+      final full = mirrored.single.fullDbAsset!;
+      expect(mirrored.single.tag, 'v4');
+      expect(File(full.downloadUrl).readAsBytesSync(), older);
+      first.exporter.dispose();
+
+      final again = build(manifest: badManifest, olderFullDb: older);
+      expect(await again.exporter.export(destDir: destDir), isTrue);
+      expect(again.fetched.where((n) => n.contains('.part-')), isEmpty);
+      expect(again.fetched, isNot(contains('v4:$_archive')));
+      again.exporter.dispose();
+
+      final fixed = build(olderFullDb: older);
+      expect(await fixed.exporter.export(destDir: destDir), isTrue);
+      expect(fixed.fetched,
+          containsAll(['$_archive.part-000', '$_archive.part-001']));
+      expect(File(assembledPath()).readAsBytesSync(), whole);
+      fixed.exporter.dispose();
+    });
+
+    test('a cancel that keeps only the rejection record does not refetch parts',
+        () async {
+      final older = Uint8List(700)..fillRange(0, 700, 5);
+      final badManifest = manifestJson(wholeSha: 'f' * 64);
+      final first = build(manifest: badManifest, olderFullDb: older);
+      expect(await first.exporter.export(destDir: destDir), isTrue);
+      first.exporter.dispose();
+
+      for (final entity in Directory(destDir).listSync()) {
+        if (p.basename(entity.path) ==
+            LibraryMirrorExporter.rejectedSplitsFileName) {
+          continue;
+        }
+        entity.deleteSync(recursive: true);
+      }
+
+      final again = build(manifest: badManifest, olderFullDb: older);
+      expect(await again.exporter.export(destDir: destDir), isTrue);
+      expect(again.fetched.where((n) => n.contains('.part-')), isEmpty);
+      expect(again.fetched, contains('v4:$_archive'));
+      again.exporter.dispose();
+    });
+
+    test('an unreadable rejection record does not block the export', () async {
+      Directory(destDir).createSync(recursive: true);
+      File(p.join(destDir, LibraryMirrorExporter.rejectedSplitsFileName))
+          .writeAsBytesSync([0xff, 0xfe, 0xc3, 0x28]);
+      final (:exporter, :fetched) = build();
+      expect(await exporter.export(destDir: destDir), isTrue);
+      expect(
+          fetched, containsAll(['$_archive.part-000', '$_archive.part-001']));
+      expect(File(assembledPath()).readAsBytesSync(), whole);
+      exporter.dispose();
+    });
+
+    test('חלק שהשתבש על הכונן אחרי האימות — אינו נפסל, ורק הוא יורד שוב',
+        () async {
+      var assembling = false;
+      final first = build();
+      await expectLater(
+        first.exporter.export(
+          destDir: destDir,
+          onStage: (s) {
+            if (s.contains('מרכיב')) assembling = true;
+          },
+          isCancelled: () => assembling,
+        ),
+        throwsA(isA<StateError>()),
+      );
+      first.exporter.dispose();
+
+      final partsDir = LibraryMirrorExporter.splitPartsDir(assembledPath());
+      final damaged = File(p.join(partsDir, '$_archive.part-000'));
+      final modified = damaged.lastModifiedSync();
+      damaged.writeAsBytesSync(Uint8List(part0.length)..fillRange(0, 3000, 9));
+      damaged.setLastModifiedSync(modified);
+
+      final second = build();
+      await expectLater(
+        second.exporter.export(destDir: destDir),
+        throwsA(isA<StateError>().having(
+            (e) => e.message,
+            'message',
+            LibraryUpdaterMessages.current
+                .exportSplitPartCorrupted(_archive, '$_archive.part-000'))),
+      );
+      expect(second.fetched.where((n) => n.contains('.part-')), isEmpty);
+      expect(File(p.join(destDir, 'rejected-split-archives.json')).existsSync(),
+          isFalse);
+      expect(damaged.existsSync(), isFalse);
+      expect(File(p.join(partsDir, '$_archive.part-001')).existsSync(), isTrue);
+      expect(File(assembledPath()).existsSync(), isFalse);
+      second.exporter.dispose();
+
+      final third = build();
+      expect(await third.exporter.export(destDir: destDir), isTrue);
+      expect(third.fetched.where((n) => n.contains('.part-')),
+          ['$_archive.part-000']);
+      expect(File(assembledPath()).readAsBytesSync(), whole);
+      third.exporter.dispose();
+    });
+
+    test('release ישן ושבור מחוץ לחלון אינו נשלף ואינו חוסם', () async {
+      final (:exporter, :fetched) = build(withBrokenOldRelease: true);
+      expect(await exporter.export(destDir: destDir), isTrue);
+      expect(fetched.where((n) => n.startsWith('v1:')), isEmpty);
+      expect(File(assembledPath()).readAsBytesSync(), whole);
+      exporter.dispose();
+    });
+
+    test('מניפסט שאינו תואם לחלקים — המסד נחשב חסר, באזהרה ובלי הורדה',
+        () async {
+      final manifest = manifestJson(part1Size: part1.length + 1);
+      final (:exporter, :fetched) = build(manifest: manifest);
+      final warnings = <String>[];
+      // בלי מסד מלא אין ב-release הזה תוכן, ולכן "אין releases".
+      await expectLater(
+        exporter.export(destDir: destDir, onWarning: warnings.add),
+        throwsA(isA<StateError>().having((e) => e.message, 'message',
+            LibraryUpdaterMessages.current.exportNoReleases)),
+      );
+      expect(warnings.single, contains('v5'));
+      expect(fetched.where((n) => n.contains('.part-')), isEmpty);
+      exporter.dispose();
+    });
+
+    test('ביטול באמצע ההרכבה — אין קובץ חצוי, והריצה הבאה משלימה', () async {
+      var assembling = false;
+      final run = build();
+      await expectLater(
+        run.exporter.export(
+          destDir: destDir,
+          onStage: (s) {
+            if (s.contains('מרכיב')) assembling = true;
+          },
+          isCancelled: () => assembling,
+        ),
+        throwsA(isA<StateError>()),
+      );
+      expect(File(assembledPath()).existsSync(), isFalse);
+
+      run.fetched.clear();
+      await run.exporter.export(destDir: destDir);
+      expect(run.fetched.where((n) => n.contains('.part-')), isEmpty);
+      expect(File(assembledPath()).readAsBytesSync(), whole);
+      run.exporter.dispose();
+    });
+  });
+}

@@ -1,5 +1,7 @@
 import 'package:equatable/equatable.dart';
 
+import '../messages/library_updater_messages.dart';
+
 /// מתאר קובץ patch בודד בתוך manifest, כולל פרטי הדחיסה וה-hashes
 /// לאימות הקובץ הדחוס והמחולץ.
 class PatchFileEntry extends Equatable {
@@ -30,7 +32,7 @@ class PatchFileEntry extends Equatable {
     required this.uncompressedSize,
   });
 
-  /// סוגי הדחיסה הנתמכים. patch בעל דחיסה אחרת ייכשל ב-parse.
+  /// סוגי הדחיסה הנתמכים. patch בעל דחיסה אחרת נכשל ב-parse.
   static const Set<String> supportedCompressions = {'zstd'};
 
   /// בונה [PatchFileEntry] מ-JSON. זורק [FormatException] אם חסר שדה חובה
@@ -38,10 +40,12 @@ class PatchFileEntry extends Equatable {
   factory PatchFileEntry.fromJson(Map<String, dynamic> json) {
     final compression = _requireString(json, 'compression');
     if (!supportedCompressions.contains(compression)) {
-      throw FormatException('דחיסה לא נתמכת ב-patch: $compression');
+      throw FormatException(
+        LibraryUpdaterMessages.current.unsupportedPatchCompression(compression),
+      );
     }
     return PatchFileEntry(
-      file: _requireString(json, 'file'),
+      file: _requireFileName(json, 'file'),
       compression: compression,
       sha256: _requireString(json, 'sha256'),
       size: _requireInt(json, 'size'),
@@ -115,16 +119,21 @@ class DeltaManifest extends Equatable {
   /// שדות לא מוכרים מתעלמים מהם בשקט (תאימות קדימה).
   factory DeltaManifest.fromJson(Map<String, dynamic> json) {
     final patchFilesRaw = json['patchFiles'];
-    if (patchFilesRaw is! List || patchFilesRaw.isEmpty) {
-      throw const FormatException('שדה חובה חסר או ריק ב-manifest: patchFiles');
+    if (patchFilesRaw is! List ||
+        patchFilesRaw.isEmpty ||
+        patchFilesRaw.any((e) => e is! Map<String, dynamic>)) {
+      throw FormatException(
+        LibraryUpdaterMessages.current.manifestMissingPatchFiles,
+      );
     }
     final booksTouchedRaw = json['booksTouched'];
+    final catalogBlobName = json['catalogBlobName'];
     final fromSchemaVersion = _requireInt(json, 'fromSchemaVersion');
     final toSchemaVersion = _requireInt(json, 'toSchemaVersion');
     final patchFormatVersion = _optionalInt(json, 'patchFormatVersion');
     if (toSchemaVersion >= 4 && patchFormatVersion == null) {
-      throw const FormatException(
-        'שדה חובה חסר במניפסט של schema 4+: patchFormatVersion',
+      throw FormatException(
+        LibraryUpdaterMessages.current.manifestMissingPatchFormatVersion,
       );
     }
     // שתי המפות מגיעות כזוג; אחת בלבד היא מניפסט לא עקבי, ואז נופלים לאימות
@@ -146,15 +155,20 @@ class DeltaManifest extends Equatable {
       fromTableContentHashes: fromTables,
       toTableContentHashes: toTables,
       patchFiles: patchFilesRaw
-          .map((e) => PatchFileEntry.fromJson(e as Map<String, dynamic>))
+          .cast<Map<String, dynamic>>()
+          .map(PatchFileEntry.fromJson)
           .toList(growable: false),
       fullRebase: _optionalBool(json, 'fullRebase') ?? false,
       booksTouched: booksTouchedRaw is List
-          ? booksTouchedRaw.map((e) => (e as num).toInt()).toList()
+          ? booksTouchedRaw.whereType<num>().map((e) => e.toInt()).toList()
           : const [],
-      catalogBlobName: json['catalogBlobName'] as String?,
+      catalogBlobName: catalogBlobName is String ? catalogBlobName : null,
     );
   }
+
+  /// האם כל קבצי ה-patch בדחיסה שאנו יודעים לחלץ.
+  bool get hasSupportedCompression => patchFiles.every(
+      (f) => PatchFileEntry.supportedCompressions.contains(f.compression));
 
   /// סכום הגדלים הדחוסים של כל קבצי ה-patch (לתצוגת גודל הורדה).
   int get totalCompressedSize =>
@@ -181,7 +195,23 @@ class DeltaManifest extends Equatable {
 String _requireString(Map<String, dynamic> json, String key) {
   final value = json[key];
   if (value is! String || value.isEmpty) {
-    throw FormatException('שדה חובה חסר או לא תקין ב-manifest: $key');
+    throw FormatException(
+      LibraryUpdaterMessages.current.manifestMissingField(key),
+    );
+  }
+  return value;
+}
+
+/// שם קובץ פשוט בלבד — נתיב היה מחלץ את ה-patch מחוץ לתיקיית היעד.
+String _requireFileName(Map<String, dynamic> json, String key) {
+  final value = _requireString(json, key);
+  if (value.contains('/') ||
+      value.contains(r'\') ||
+      value == '.' ||
+      value == '..') {
+    throw FormatException(
+      LibraryUpdaterMessages.current.manifestMissingField(key),
+    );
   }
   return value;
 }
@@ -189,7 +219,9 @@ String _requireString(Map<String, dynamic> json, String key) {
 int _requireInt(Map<String, dynamic> json, String key) {
   final value = json[key];
   if (value is! num) {
-    throw FormatException('שדה חובה חסר או לא תקין ב-manifest: $key');
+    throw FormatException(
+      LibraryUpdaterMessages.current.manifestMissingField(key),
+    );
   }
   return value.toInt();
 }
@@ -200,12 +232,16 @@ Map<String, String>? _optionalStringMap(Map<String, dynamic> json, String key) {
   if (!json.containsKey(key) || json[key] == null) return null;
   final value = json[key];
   if (value is! Map) {
-    throw FormatException('שדה אופציונלי לא תקין במניפסט: $key');
+    throw FormatException(
+      LibraryUpdaterMessages.current.manifestInvalidOptionalField(key),
+    );
   }
   final result = <String, String>{};
   value.forEach((k, v) {
     if (k is! String || k.isEmpty || v is! String || v.isEmpty) {
-      throw FormatException('ערך לא תקין במפת ה-hash במניפסט: $key');
+      throw FormatException(
+        LibraryUpdaterMessages.current.manifestInvalidHashMap(key),
+      );
     }
     result[k] = v;
   });
@@ -216,7 +252,9 @@ bool? _optionalBool(Map<String, dynamic> json, String key) {
   if (!json.containsKey(key) || json[key] == null) return null;
   final value = json[key];
   if (value is! bool) {
-    throw FormatException('שדה אופציונלי לא תקין במניפסט: $key');
+    throw FormatException(
+      LibraryUpdaterMessages.current.manifestInvalidOptionalField(key),
+    );
   }
   return value;
 }
@@ -225,7 +263,9 @@ int? _optionalInt(Map<String, dynamic> json, String key) {
   if (!json.containsKey(key) || json[key] == null) return null;
   final value = json[key];
   if (value is! num) {
-    throw FormatException('שדה אופציונלי לא תקין במניפסט: $key');
+    throw FormatException(
+      LibraryUpdaterMessages.current.manifestInvalidOptionalField(key),
+    );
   }
   return value.toInt();
 }

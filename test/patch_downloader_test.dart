@@ -9,6 +9,12 @@ import 'package:http/testing.dart';
 import 'package:seforim_library_updater/src/models/delta_manifest.dart';
 import 'package:seforim_library_updater/src/services/patch_downloader.dart';
 
+/// הטוקן וה-ETag שבקובץ הצד; שורה שלישית, אם יש, היא סימון האימות.
+(String, String?) sidecarIdentity(String dest) {
+  final lines = File('$dest.resume').readAsStringSync().split('\n');
+  return (lines[0], lines.length > 1 && lines[1].isNotEmpty ? lines[1] : null);
+}
+
 void main() {
   late Directory tmp;
   setUp(() => tmp = Directory.systemTemp.createTempSync('downloader_test'));
@@ -439,36 +445,48 @@ void main() {
       }
       final bigHash = sha256.convert(big).toString();
 
-      // השעון מתחיל ב-onProgress, שנקרא ממש לפני חישוב ה-hash.
-      Future<void> run(Duration delay, String dest) {
-        Stopwatch? watch;
-        return downloaderThatCaptures([], handler: (_) async {
-          throw StateError('קובץ שלם אינו אמור לשלוח בקשה');
-        }).downloadToFile(
-          url: 'https://x/seforim.db.zst',
-          destPath: dest,
-          expectedSize: big.length,
-          expectedSha256: bigHash,
-          resumeToken: 'v-1',
-          onProgress: (_, __) => watch ??= Stopwatch()..start(),
-          isCancelled: () => watch != null && watch!.elapsed >= delay,
-        );
-      }
-
-      for (final (label, delay) in [
-        ('לפני החישוב', Duration.zero),
-        ('באמצע החישוב', const Duration(milliseconds: 150)),
-      ]) {
+      for (final cancelOnVerification in [false, true]) {
+        final label =
+            cancelOnVerification ? 'אחרי התקדמות הגיבוב' : 'לפני החישוב';
         test('$label → PatchDownloadCancelled, הקובץ השלם נשמר', () async {
           final dest = '${tmp.path}/seforim.db.zst';
           File(dest).writeAsBytesSync(big);
           File('$dest.resume').writeAsStringSync('v-1\n"e1"');
+          var cancel = false;
+          final verified = <int>[];
+          final downloader = downloaderThatCaptures([], handler: (_) async {
+            throw StateError('קובץ שלם אינו אמור לשלוח בקשה');
+          });
           await expectLater(
-            run(delay, dest),
+            downloader.downloadToFile(
+              url: 'https://x/seforim.db.zst',
+              destPath: dest,
+              expectedSize: big.length,
+              expectedSha256: bigHash,
+              resumeToken: 'v-1',
+              onProgress: (_, __) {
+                if (!cancelOnVerification) cancel = true;
+              },
+              onVerifyProgress: (done, total) {
+                expect(total, big.length);
+                verified.add(done);
+                if (cancelOnVerification) cancel = true;
+              },
+              isCancelled: () => cancel,
+            ),
             throwsA(isA<PatchDownloadCancelled>()),
           );
-          expect(File(dest).lengthSync(), big.length);
-          expect(File('$dest.resume').existsSync(), isTrue);
+          if (cancelOnVerification) {
+            // הביטול מסונכרן להתקדמות אמיתית, גם כשהגיבוב הנייטיבי מסיים
+            // לפני דגימת הביטול הבאה. אין תלות במהירות המעבד או הדיסק.
+            expect(verified, isNotEmpty);
+            expect(verified.first, inExclusiveRange(0, big.length));
+          } else {
+            expect(verified, isEmpty);
+          }
+          expect(File(dest).readAsBytesSync(), big);
+          // ביטול אינו רשאי לסמן את הקובץ כמאומת, גם אם העובד כבר סיים.
+          expect(File('$dest.resume').readAsStringSync(), 'v-1\n"e1"');
         });
       }
     });
@@ -923,7 +941,7 @@ void main() {
         expect(captured.single.headers.containsKey('Range'), isFalse);
         expect(File(dest).readAsBytesSync(), full);
         // קובץ הצד שורד הורדה מוצלחת (חי ומת עם הקובץ) עם הטוקן החדש.
-        expect(File('$dest.resume').readAsStringSync(), 'v-new');
+        expect(sidecarIdentity(dest), ('v-new', null));
       });
 
       test(
@@ -1178,7 +1196,7 @@ void main() {
         expect(captured.single.headers['Range'], 'bytes=15-');
         expect(File(dest).readAsBytesSync(), full);
         // קובץ הצד שורד הורדה מוצלחת (חי ומת עם הקובץ) עם הטוקן וה-validator.
-        expect(File('$dest.resume').readAsStringSync(), 'v-1\n"e1"');
+        expect(sidecarIdentity(dest), ('v-1', '"e1"'));
       });
 
       test('חלקי בלי קובץ צד → נמחק ומתחילים מאפס', () async {
@@ -1316,7 +1334,7 @@ void main() {
         // ההורדה הראשונה: בקשה אחת, קובץ שלם וקובץ צד שורד.
         expect(captured, hasLength(1));
         expect(File(dest).readAsBytesSync(), full);
-        expect(File('$dest.resume').readAsStringSync(), 'v-1');
+        expect(sidecarIdentity(dest), ('v-1', null));
 
         // כניסה חוזרת מיידית — אותו טוקן, הקובץ כבר שלם.
         await downloader.downloadToFile(
@@ -2046,7 +2064,7 @@ void main() {
         );
 
         // ETag חלש אינו שמיש עם If-Range — קובץ הצד מכיל רק טוקן, בלי validator.
-        expect(File('$dest.resume').readAsStringSync(), 'v-1');
+        expect(sidecarIdentity(dest), ('v-1', null));
       });
 
       test('ETag חלש שכבר קיים ב-sidecar אינו נשלח ב-If-Range', () async {
@@ -2150,7 +2168,7 @@ void main() {
         );
 
         // הריצה הבאה יכולה לשלוח If-Range עם ה-ETag שנשמר.
-        expect(File('$dest.resume').readAsStringSync(), 'v-1\n"srv"');
+        expect(sidecarIdentity(dest), ('v-1', '"srv"'));
       });
     });
 

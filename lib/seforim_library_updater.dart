@@ -1,13 +1,16 @@
 /// לקוח Dart לצריכת הפצות הדלתא של `Otzaria/SeforimLibrary`.
 ///
-/// מייצא את ה-API הציבורי בלבד: מודלים של פורמט ההפצה, גילוי ותכנון מסלול,
-/// הורדה ואימות, חישוב hash לוגי, והחלת patch אטומית.
+/// מייצא את ה-API הציבורי בלבד: מודלים של פורמט ההפצה, גילוי ותכנון מסלול
+/// (מקוון, ומסלול המראה המקומית ב-`Offline*`), הורדה ואימות, חישוב hash
+/// לוגי, והחלת patch אטומית. המלל להצגה — [LibraryUpdaterMessages].
 ///
 /// **פעולות חוסמות:** `LogicalContentHasher.compute` ו-`PatchApplier.apply`
-/// סינכרוניות וכבדות (ה-hash עד עשרות שניות על DB מלא). אל תריץ אותן על ה-UI
-/// isolate — עטוף ב-`Isolate.run`.
+/// סינכרוניות וכבדות — עטוף ב-`Isolate.run`.
 library;
 
+export 'src/hashing/fast_sha256.dart' show Sha256Stream;
+export 'src/messages/library_updater_messages.dart'
+    show LibraryUpdaterMessages, HebrewLibraryUpdaterMessages;
 export 'src/models/delta_manifest.dart' show DeltaManifest, PatchFileEntry;
 export 'src/models/library_release.dart'
     show LibraryRelease, ReleaseAsset, fullDbArchiveNameForSchema;
@@ -20,20 +23,49 @@ export 'src/models/patch_table_spec.dart'
         PatchTableSpec,
         kPatchTablesInFkOrder,
         kHashTableOrder,
+        // הסדרים הקפואים — לגיבוב DB בסכמה היסטורית.
+        kHashTableOrderSchema1,
+        kHashTableOrderSchema2,
+        kHashTableOrderSchema3,
+        kHashTableOrderSchema4,
+        kHashTableOrderSchema5,
+        kHashTableOrderSchema6,
+        kHashTableOrderBySchemaVersion,
         kDefaultConsumerDbSchemaVersion,
-        kSupportedDbSchemaVersion;
+        kSupportedDbSchemaVersion,
+        kSupportedPatchFormatVersion,
+        isSupportedSchemaVersion,
+        isSupportedPatchFormatVersion;
+export 'src/services/apply_time_estimate.dart' show ApplyTimeEstimate;
+export 'src/services/disk_space_probe.dart' show DiskSpaceProbe;
+export 'src/services/download_scheduler.dart'
+    show DownloadScheduler, ByteProgressAggregator, ByteProgressSlot;
 export 'src/services/github_library_release_client.dart'
     show GithubLibraryReleaseClient;
 export 'src/services/library_db_recovery_service.dart'
     show LibraryDbRecoveryService, RecoveryResult, RecoveryAction;
+export 'src/services/library_mirror_exporter.dart' show LibraryMirrorExporter;
+export 'src/services/library_release_source.dart' show LibraryReleaseSource;
 export 'src/services/library_update_discovery.dart'
     show LibraryUpdateDiscovery, LibraryDiscoveryResult;
 export 'src/services/library_update_planner.dart'
     show LibraryUpdatePlanner, kDefaultMaxDeltaUncompressedRatio;
 export 'src/services/local_db_version_reader.dart'
-    show LocalDbVersionReader, LocalDbVersion;
+    show
+        LocalDbVersionReader,
+        LocalDbVersion,
+        LocalDbUnreadableException,
+        LocalDbUnreadableReason;
+export 'src/services/local_mirror_library_release_client.dart'
+    show LocalMirrorLibraryReleaseClient, LocalMirrorException;
 export 'src/services/logical_content_hasher.dart'
     show LogicalContentHasher, LogicalContentHashReport;
+export 'src/services/offline_library_db_recovery_service.dart'
+    show OfflineLibraryDbRecoveryService;
+export 'src/services/offline_library_update_discovery.dart'
+    show OfflineLibraryUpdateDiscovery, OfflineLibraryDiscoveryResult;
+export 'src/services/offline_library_update_planner.dart'
+    show OfflineLibraryUpdatePlanner;
 export 'src/services/patch_applier.dart'
     show
         PatchApplier,
