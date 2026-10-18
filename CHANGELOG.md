@@ -29,6 +29,11 @@
   (`book_banner`, `book_protection`, `line_divine_name`, `line_note_divine_name`)
   לבדן אינו מסמן `hasChangesOutsideBooksTouched`.
 - `patch_tables_contract.json` בסכמה 7, בלי הסעיף `optionalTables`.
+- סכמת DB 7: `book.contentHash INTEGER NOT NULL DEFAULT 0` — טביעה אטומה של 64 ביט
+  לטקסט השורות ולהערות של הספר (0 = לא ידוע). patch 6→7 מוסיף אותה ב-`ALTER TABLE
+  … ADD COLUMN` שב-`migrations` ומעדכן את כל הספרים, ולכן `booksTouched` שלו כולל
+  את כולם; ב-7→7 ספר נכנס ל-`booksTouched` כשהערך שלו השתנה. אין שינוי בקוד:
+  העמודות של ה-upserts ושל ה-hash נקראות מה-DB.
 - `downloadSplitToFile`: חיבור החלקים (קריאה, sha256 וכתיבה) רץ ב-isolate נפרד,
   אל קובץ זמני שעובר ל-`destPath` רק אחרי האימות. ה-API לא השתנה.
 - אימות sha256 של קובץ שכבר שלם (`downloadToFile`) או ארכיון שכבר חובר

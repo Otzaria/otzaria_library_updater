@@ -1770,6 +1770,9 @@ void main() {
           'noteIndex) ON DELETE CASCADE\n'
           ') WITHOUT ROWID',
     ];
+    // כפי שה-producer של SeforimLibrary מוסיף עמודה לטבלה קיימת.
+    const bookContentHashDdl = 'ALTER TABLE "book" ADD COLUMN "contentHash" '
+        'INTEGER NOT NULL DEFAULT 0';
     const newTables = [
       'book_banner',
       'book_protection',
@@ -1822,7 +1825,8 @@ void main() {
         List<int> lines = const [10, 20, 30],
         List<int> books = const [1, 2],
         String line10 = lineWithNotes,
-        Map<String, List<List<Object?>>> rows = const {}}) {
+        Map<String, List<List<Object?>>> rows = const {},
+        Map<int, int>? contentHashes}) {
       final path = '${tmp.path}/$name.db';
       final db = sqlite3.sqlite3.open(path);
       db.execute('CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT)');
@@ -1849,6 +1853,11 @@ void main() {
         }
         insertRows(db, '', rows);
       }
+      if (contentHashes != null) {
+        db.execute(bookContentHashDdl);
+        contentHashes.forEach((id, hash) => db.execute(
+            'UPDATE book SET contentHash = ? WHERE id = ?', [hash, id]));
+      }
       db.close();
       return path;
     }
@@ -1865,7 +1874,7 @@ void main() {
     /// patch 6→7 בפורמט 4: ה-DDL כ-migrations, ואז upserts בלבד — הטבלאות
     /// חדשות אצל הלקוח, ו-line_content מאבדת את גוף ההערה.
     String buildPatch6to7(String name,
-        {Map<String, List<List<Object?>>>? rows}) {
+        {Map<String, List<List<Object?>>>? rows, Map<int, int>? bookHashes}) {
       final path = '${tmp.path}/$name.db';
       final db = sqlite3.sqlite3.open(path);
       db.execute('CREATE TABLE patch_meta (key TEXT PRIMARY KEY, value TEXT)');
@@ -1876,6 +1885,14 @@ void main() {
       for (var i = 0; i < schema7Ddl.length; i++) {
         db.execute(
             'INSERT INTO migrations VALUES (?, ?)', [i + 1, schema7Ddl[i]]);
+      }
+      if (bookHashes != null) {
+        db.execute('INSERT INTO migrations VALUES (?, ?)',
+            [schema7Ddl.length + 1, bookContentHashDdl]);
+        db.execute('CREATE TABLE upsert_book (id INTEGER PRIMARY KEY, '
+            'title TEXT, contentHash INTEGER NOT NULL)');
+        bookHashes.forEach((id, hash) => db.execute(
+            'INSERT INTO upsert_book VALUES (?, ?, ?)', [id, 'ספר $id', hash]));
       }
       db.execute(
           'CREATE TABLE upsert_schema_meta (key TEXT PRIMARY KEY, value TEXT)');
@@ -1986,6 +2003,69 @@ void main() {
       }
       expect(tableHashes(base, kHashTableOrderSchema7),
           tableHashes(expected, kHashTableOrderSchema7));
+    });
+
+    test('book.contentHash נוספת ב-ADD COLUMN ומגיעה לכל ספר', () {
+      // ערכי int64 בקצוות: שלילי, ומעל 2^53.
+      const hashes = {1: -3371204337321344343, 2: 9007199254740993};
+      final base = buildSchema6Base('s7_bookhash_base');
+      final expected = buildDb('s7_bookhash_expected',
+          version: 2, schema: 7, rows: newRows(), contentHashes: hashes);
+      final patch = buildPatch6to7('s7_bookhash_patch', bookHashes: hashes);
+
+      final r = _applier.apply(
+          dbPath: base,
+          patchPath: patch,
+          manifest: manifest6to7(base, expected, perTable: true),
+          enablePartialTableVerification: true);
+
+      expect(r.migrations, 6);
+      expect(r.upserts, containsPair('book', 2));
+      expect(r.booksTouched, {1, 2});
+      expect(r.hasChangesOutsideBooksTouched, isFalse);
+      expect(r.verifiedTables, contains('book'));
+      expect(rowsOf(base, 'book'), [
+        [1, 'ספר 1', -3371204337321344343],
+        [2, 'ספר 2', 9007199254740993],
+      ]);
+      expect(_hashWithOrder(base, kHashTableOrderSchema7),
+          _hashWithOrder(expected, kHashTableOrderSchema7));
+    });
+
+    test('שינוי contentHash בלבד מסמן רק את הספר שלו', () {
+      final base = buildDb('s7_hashonly_base',
+          version: 1,
+          schema: 7,
+          rows: newRows(),
+          contentHashes: const {1: 11, 2: 22});
+      final expected = buildDb('s7_hashonly_expected',
+          version: 2,
+          schema: 7,
+          rows: newRows(),
+          contentHashes: const {1: 11, 2: 5});
+      final patch = buildPatchDb(from: 1, to: 2, schemaVersion: 4);
+      final pdb = sqlite3.sqlite3.open(patch);
+      pdb.execute('CREATE TABLE upsert_book (id INTEGER PRIMARY KEY, '
+          'title TEXT, contentHash INTEGER NOT NULL)');
+      pdb.execute("INSERT INTO upsert_book VALUES (2, 'ספר 2', 5)");
+      pdb.close();
+
+      final r = _applier.apply(
+        dbPath: base,
+        patchPath: patch,
+        manifest: _manifest(
+          from: 1,
+          to: 2,
+          fromSchema: 7,
+          toSchema: 7,
+          fromHash: _hashWithOrder(base, kHashTableOrderSchema7),
+          toHash: _hashWithOrder(expected, kHashTableOrderSchema7),
+        ),
+      );
+
+      expect(r.booksTouched, {2});
+      expect(r.hasChangesOutsideBooksTouched, isFalse);
+      expect(rowsOf(base, 'book'), rowsOf(expected, 'book'));
     });
 
     test('אימות חלקי: from בסדר 6, to בסדר 7, והטבלאות החדשות מאומתות', () {
@@ -2261,6 +2341,21 @@ void main() {
             'faaf50adcffcf819341d2c49153a0d641f2de65efda01aa92a465f7617bd7fb0',
         'line_note_divine_name':
             '85daae62eaacd8c85f7c3ae1c572e37be89da49f9b73278a5fbfbf91dc4bd673',
+      });
+    });
+
+    test('golden חוצה-ריפו: book.contentHash בקצוות int64', () {
+      final path = '${tmp.path}/s7_book_golden.db';
+      final db = sqlite3.sqlite3.open(path);
+      db.execute('CREATE TABLE book (id INTEGER PRIMARY KEY NOT NULL, '
+          'contentHash INTEGER NOT NULL DEFAULT 0)');
+      db.execute('INSERT INTO book VALUES (1, -3371204337321344343), (2, 0), '
+          '(3, 9223372036854775807), (4, -9223372036854775808)');
+      db.close();
+      // אותו ערך ב-SchemaSevenPatchTest של SeforimLibrary.
+      expect(tableHashes(path, const ['book']), {
+        'book':
+            'eb5db532be575315bed061263dc4fce8edf21bc4edf27556f8aa689a3c29eb43',
       });
     });
   });
