@@ -1747,9 +1747,7 @@ void main() {
       'CREATE TABLE IF NOT EXISTS line_divine_name (\n'
           '    lineId INTEGER NOT NULL REFERENCES line(id) ON DELETE CASCADE,\n'
           '    charStart INTEGER NOT NULL,\n'
-          '    charEnd INTEGER NOT NULL,\n'
-          '    kind INTEGER NOT NULL,\n'
-          '    source INTEGER NOT NULL,\n'
+          '    span INTEGER NOT NULL,\n'
           '    PRIMARY KEY (lineId, charStart)\n'
           ') WITHOUT ROWID',
       'CREATE TABLE IF NOT EXISTS line_note (\n'
@@ -1764,9 +1762,7 @@ void main() {
           '    lineId INTEGER NOT NULL,\n'
           '    noteIndex INTEGER NOT NULL,\n'
           '    charStart INTEGER NOT NULL,\n'
-          '    charEnd INTEGER NOT NULL,\n'
-          '    kind INTEGER NOT NULL,\n'
-          '    source INTEGER NOT NULL,\n'
+          '    span INTEGER NOT NULL,\n'
           '    PRIMARY KEY (lineId, noteIndex, charStart),\n'
           '    FOREIGN KEY (lineId, noteIndex) REFERENCES line_note(lineId, '
           'noteIndex) ON DELETE CASCADE\n'
@@ -1789,8 +1785,9 @@ void main() {
     const protections = [
       [2, 1],
     ];
+    // span = אורך << 7 | מקור << 4 | סוג.
     const divineNames = [
-      [10, 0, 4, 1, 1],
+      [10, 0, 529],
     ];
     // charPos: מיקום גלוי בשורה המופשטת — אחרי ה-sup המעוגן, או בסוף השורה.
     const notes = [
@@ -1799,8 +1796,8 @@ void main() {
       [30, 0, 0, 1, 'בספר השני'],
     ];
     const noteDivineNames = [
-      [10, 0, 4, 9, 1, 1],
-      [30, 0, 0, 4, 5, 2],
+      [10, 0, 4, 657],
+      [30, 0, 0, 549],
     ];
 
     Map<String, List<List<Object?>>> newRows() => {
@@ -1909,14 +1906,13 @@ void main() {
       db.execute('CREATE TABLE upsert_book_protection '
           '(bookId INTEGER PRIMARY KEY, level INTEGER NOT NULL)');
       db.execute('CREATE TABLE upsert_line_divine_name (lineId INTEGER, '
-          'charStart INTEGER, charEnd INTEGER, kind INTEGER, source INTEGER, '
+          'charStart INTEGER, span INTEGER, '
           'PRIMARY KEY (lineId, charStart))');
       db.execute('CREATE TABLE upsert_line_note (lineId INTEGER, '
           'noteIndex INTEGER, charPos INTEGER, hasMarker INTEGER, body TEXT, '
           'PRIMARY KEY (lineId, noteIndex))');
       db.execute('CREATE TABLE upsert_line_note_divine_name (lineId INTEGER, '
-          'noteIndex INTEGER, charStart INTEGER, charEnd INTEGER, '
-          'kind INTEGER, source INTEGER, '
+          'noteIndex INTEGER, charStart INTEGER, span INTEGER, '
           'PRIMARY KEY (lineId, noteIndex, charStart))');
       insertRows(db, 'upsert_', rows ?? newRows());
       db.close();
@@ -2252,8 +2248,8 @@ void main() {
       final base =
           buildDb('s7_ndn_only_base', version: 1, schema: 7, rows: newRows());
       final changed = [
-        [10, 0, 4, 9, 1, 1],
-        [30, 0, 0, 4, 5, 3],
+        [10, 0, 4, 657],
+        [30, 0, 0, 565],
       ];
       final expected = buildDb('s7_ndn_only_expected',
           version: 2,
@@ -2262,11 +2258,10 @@ void main() {
       final patch = buildPatchDb(from: 1, to: 2, schemaVersion: 4);
       final pdb = sqlite3.sqlite3.open(patch);
       pdb.execute('CREATE TABLE upsert_line_note_divine_name (lineId INTEGER, '
-          'noteIndex INTEGER, charStart INTEGER, charEnd INTEGER, '
-          'kind INTEGER, source INTEGER, '
+          'noteIndex INTEGER, charStart INTEGER, span INTEGER, '
           'PRIMARY KEY (lineId, noteIndex, charStart))');
       pdb.execute('INSERT INTO upsert_line_note_divine_name VALUES '
-          '(30, 0, 0, 4, 5, 3)');
+          '(30, 0, 0, 565)');
       pdb.close();
 
       final r = _applier.apply(
@@ -2309,11 +2304,11 @@ void main() {
         'book_protection':
             '260da62f074581043b5bf203c9790203a9ea052f9d1e14e27ecc780f66790a81',
         'line_divine_name':
-            '278213e576ad7f0865c73036789d82ec801bb65e594d9eee0ec6e6e799325b85',
+            '239a3a2f98562426e3b5a8830f4f3c8749ef55315b6a9a0c49e3337c81f55007',
         'line_note':
             '1424aefc886962c989c6ba346334c848597e391523ab4a2562b35f4621be946f',
         'line_note_divine_name':
-            '4c7710872d55a8575723dac795a2de02e09085ec0643712cc4aa41014d5320aa',
+            'c79ab180b41eb063b7754e8000ff73748940002a1617ea31e40d6f74f3cb650c',
       });
 
       final w = sqlite3.sqlite3.open(path);
@@ -2330,11 +2325,12 @@ void main() {
           [1, 1],
           [2, 2],
         ],
+        // (charEnd, kind, source): (24, 3, 4), (4, 1, 1), (6, 7, 3), (17, 5, 2).
         'line_divine_name': [
-          [2, 20, 24, 3, 4],
-          [1, 0, 4, 1, 1],
-          [2, 3, 6, 7, 3],
-          [1, 12, 17, 5, 2],
+          [2, 20, 579],
+          [1, 0, 529],
+          [2, 3, 439],
+          [1, 12, 677],
         ],
         // אותן שורות כמו GOLDEN_NOTES ו-GOLDEN_NOTE_NAMES ב-SchemaSevenPatchTest.
         'line_note': [
@@ -2343,11 +2339,12 @@ void main() {
           [1, 0, 3, 1, 'גוף "ב"\nשורה שנייה'],
           [2, 1, 9, 1, '<b>ב</b> &amp; ג'],
         ],
+        // (charEnd, kind, source): (4, 1, 1), (11, 5, 2), (6, 7, 3), (14, 3, 4).
         'line_note_divine_name': [
-          [2, 0, 0, 4, 1, 1],
-          [1, 1, 6, 11, 5, 2],
-          [1, 0, 3, 6, 7, 3],
-          [2, 0, 10, 14, 3, 4],
+          [2, 0, 0, 529],
+          [1, 1, 6, 677],
+          [1, 0, 3, 439],
+          [2, 0, 10, 579],
         ],
       });
       w.close();
@@ -2357,11 +2354,11 @@ void main() {
         'book_protection':
             '015c3c2291e1ebac6c68a6f33c8c01b42af0ce46dc3840d7e0a12ae370ae1319',
         'line_divine_name':
-            'ab37c80ae94f079eabde2b02cd108fc90f1c75f523f0f8fd1f9b87f5a8dc67b6',
+            '5ed480458a0ab23dfaaa765fc98696a9d06300c5951085ebb8666925fce92840',
         'line_note':
             '8c5772a1b7560b4c29abafe619d7e3ba35882aed9d1e933eb8ce1f2c0ea00284',
         'line_note_divine_name':
-            '5c2aded4a4b3fa5a4146308c2bc07cbfe0926766ddcb2e6c4b13785db1b893cf',
+            '6e85bbf63c7ad1dbcefdc54ff74edca27957d4310bf65e2f2e486a8effb64507',
       });
     });
 

@@ -39,12 +39,12 @@ final setupSqlSchema7 = <String>[
   "INSERT INTO link_anchor VALUES (2,0,4,5,NULL),(1,1,0,9,'ב'),(1,0,7,1,'א')",
   'CREATE TABLE book_banner (bookId INTEGER PRIMARY KEY NOT NULL, text TEXT NOT NULL)',
   "INSERT INTO book_banner VALUES (10,'באדיבות'),(3,'שורה\nשנייה')",
-  'CREATE TABLE line_divine_name (lineId INTEGER NOT NULL, charStart INTEGER NOT NULL, charEnd INTEGER NOT NULL, kind INTEGER NOT NULL, source INTEGER NOT NULL, PRIMARY KEY (lineId, charStart)) WITHOUT ROWID',
-  'INSERT INTO line_divine_name VALUES (2,20,24,3,4),(1,0,4,1,1),(2,3,6,7,3),(1,12,17,5,2)',
+  'CREATE TABLE line_divine_name (lineId INTEGER NOT NULL, charStart INTEGER NOT NULL, span INTEGER NOT NULL, PRIMARY KEY (lineId, charStart)) WITHOUT ROWID',
+  'INSERT INTO line_divine_name VALUES (2,20,579),(1,0,529),(2,3,439),(1,12,677)',
   'CREATE TABLE line_note (lineId INTEGER NOT NULL, noteIndex INTEGER NOT NULL, charPos INTEGER NOT NULL, hasMarker INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (lineId, noteIndex)) WITHOUT ROWID',
   "INSERT INTO line_note VALUES (2,0,5,1,'הערה <i>פנימית</i> א'),(1,1,12,0,'נספח בסוף השורה'),(1,0,3,1,'גוף \"ב\"\nשורה שנייה'),(2,1,9,1,'<b>ב</b> &amp; ג')",
-  'CREATE TABLE line_note_divine_name (lineId INTEGER NOT NULL, noteIndex INTEGER NOT NULL, charStart INTEGER NOT NULL, charEnd INTEGER NOT NULL, kind INTEGER NOT NULL, source INTEGER NOT NULL, PRIMARY KEY (lineId, noteIndex, charStart)) WITHOUT ROWID',
-  'INSERT INTO line_note_divine_name VALUES (2,0,0,4,1,1),(1,1,6,11,5,2),(1,0,3,6,7,3),(2,0,10,14,3,4)',
+  'CREATE TABLE line_note_divine_name (lineId INTEGER NOT NULL, noteIndex INTEGER NOT NULL, charStart INTEGER NOT NULL, span INTEGER NOT NULL, PRIMARY KEY (lineId, noteIndex, charStart)) WITHOUT ROWID',
+  'INSERT INTO line_note_divine_name VALUES (2,0,0,529),(1,1,6,677),(1,0,3,439),(2,0,10,579)',
 ];
 
 void main() {
