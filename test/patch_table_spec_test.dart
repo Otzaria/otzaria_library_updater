@@ -12,9 +12,9 @@ void main() {
   final fkNames = kPatchTablesInFkOrder.map((t) => t.name).toList();
 
   group('kPatchTablesInFkOrder', () {
-    test('44 טבלאות, ללא כפילויות', () {
-      expect(kPatchTablesInFkOrder, hasLength(44));
-      expect(fkNames.toSet(), hasLength(44));
+    test('45 טבלאות, ללא כפילויות', () {
+      expect(kPatchTablesInFkOrder, hasLength(45));
+      expect(fkNames.toSet(), hasLength(45));
     });
 
     test('לכל טבלה יש מפתח ראשי לא ריק', () {
@@ -63,8 +63,8 @@ void main() {
   });
 
   group('kHashTableOrder', () {
-    test('44 טבלאות, אותה קבוצה כמו סדר ה-FK', () {
-      expect(kHashTableOrder, hasLength(44));
+    test('45 טבלאות, אותה קבוצה כמו סדר ה-FK', () {
+      expect(kHashTableOrder, hasLength(45));
       expect(kHashTableOrder.toSet(), fkNames.toSet());
     });
 

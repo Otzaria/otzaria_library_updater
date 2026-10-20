@@ -99,9 +99,9 @@ void main() {
       expect(
         _hasher.compute(db,
             tableOrder: kHashTableOrder, rowOrder: kHashRowOrder),
-        // 44 טבלאות ב-kHashTableOrder (סכמה 7) — כל שם נכתב כ-
+        // 45 טבלאות ב-kHashTableOrder (סכמה 7) — כל שם נכתב כ-
         // marker גם כשהטבלה נעדרת, לכן ה-golden מתעדכן עם סנכרון הרשימה.
-        '96422e6c37fe6dd3c9720a8862ab6f5c31c5d7b1ea16f55d0c311defd7941615',
+        'f908089db0ce13f4efa59fce69fd5615e105f83152fde8660f64edd9f76da169',
       );
       expect(
         _hasher.compute(db, tableOrder: kHashTableOrderSchema6, rowOrder: null),

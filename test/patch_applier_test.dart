@@ -1734,10 +1734,14 @@ void main() {
   group('שדרוג סכמה 6→7 (line_note וטבלאות התצוגה)', () {
     // אות-באות כמו בחוזה של SeforimLibrary — אלה שורות ה-migrations של 6→7.
     const schema7Ddl = [
+      'CREATE TABLE IF NOT EXISTS banner (\n'
+          '    id INTEGER PRIMARY KEY NOT NULL,\n'
+          '    text TEXT NOT NULL\n'
+          ')',
       'CREATE TABLE IF NOT EXISTS book_banner (\n'
           '    bookId INTEGER PRIMARY KEY NOT NULL REFERENCES book(id) '
           'ON DELETE CASCADE,\n'
-          '    text TEXT NOT NULL\n'
+          '    bannerId INTEGER NOT NULL REFERENCES banner(id)\n'
           ')',
       'CREATE TABLE IF NOT EXISTS book_protection (\n'
           '    bookId INTEGER PRIMARY KEY NOT NULL REFERENCES book(id) '
@@ -1772,6 +1776,7 @@ void main() {
     const bookContentHashDdl = 'ALTER TABLE "book" ADD COLUMN "contentHash" '
         'INTEGER NOT NULL DEFAULT 0';
     const newTables = [
+      'banner',
       'book_banner',
       'book_protection',
       'line_divine_name',
@@ -1779,8 +1784,11 @@ void main() {
       'line_note_divine_name',
     ];
     const lineWithNotes = 'פסוק<sup class="footnote-marker">1</sup> וסוף';
+    const bannerTexts = [
+      [4, 'באדיבות המו"ל [ויקי](https://w.org/{title})'],
+    ];
     const banners = [
-      [1, 'באדיבות המו"ל'],
+      [1, 4],
     ];
     const protections = [
       [2, 1],
@@ -1801,6 +1809,7 @@ void main() {
     ];
 
     Map<String, List<List<Object?>>> newRows() => {
+          'banner': bannerTexts,
           'book_banner': banners,
           'book_protection': protections,
           'line_divine_name': divineNames,
@@ -1901,8 +1910,10 @@ void main() {
           '(id INTEGER PRIMARY KEY, content TEXT NOT NULL)');
       db.execute(
           'INSERT INTO upsert_line_content VALUES (10, ?)', [lineWithNotes]);
-      db.execute('CREATE TABLE upsert_book_banner (bookId INTEGER PRIMARY KEY, '
+      db.execute('CREATE TABLE upsert_banner (id INTEGER PRIMARY KEY, '
           'text TEXT NOT NULL)');
+      db.execute('CREATE TABLE upsert_book_banner (bookId INTEGER PRIMARY KEY, '
+          'bannerId INTEGER NOT NULL)');
       db.execute('CREATE TABLE upsert_book_protection '
           '(bookId INTEGER PRIMARY KEY, level INTEGER NOT NULL)');
       db.execute('CREATE TABLE upsert_line_divine_name (lineId INTEGER, '
@@ -1975,7 +1986,7 @@ void main() {
               perTable ? tableHashes(expected, kHashTableOrderSchema7) : null,
         );
 
-    test('אימות מלא: migrations יוצרות את חמש הטבלאות וה-upserts ממלאים', () {
+    test('אימות מלא: migrations יוצרות את שש הטבלאות וה-upserts ממלאים', () {
       final base = buildSchema6Base('s7_full_base');
       final expected = buildExpected7('s7_full_expected');
       final patch = buildPatch6to7('s7_full_patch');
@@ -1988,12 +1999,13 @@ void main() {
           patchPath: patch,
           manifest: manifest6to7(base, expected));
 
-      expect(r.migrations, 5);
+      expect(r.migrations, 6);
       expect(
           r.resultHash,
           _hashWithOrder(
               expected, kHashTableOrderSchema7, kHashRowOrderSchema7));
       expect(r.upserts, containsPair('line_content', 1));
+      expect(r.upserts, containsPair('banner', 1));
       expect(r.upserts, containsPair('book_banner', 1));
       expect(r.upserts, containsPair('book_protection', 1));
       expect(r.upserts, containsPair('line_divine_name', 1));
@@ -2023,7 +2035,7 @@ void main() {
           manifest: manifest6to7(base, expected, perTable: true),
           enablePartialTableVerification: true);
 
-      expect(r.migrations, 6);
+      expect(r.migrations, 7);
       expect(r.upserts, containsPair('book', 2));
       expect(r.booksTouched, {1, 2});
       expect(r.hasChangesOutsideBooksTouched, isFalse);
@@ -2171,7 +2183,7 @@ void main() {
           schema: 7,
           lines: const [20],
           books: const [1],
-          rows: {'book_banner': banners});
+          rows: {'banner': bannerTexts, 'book_banner': banners});
       final patch = buildPatchDb(from: 1, to: 2, schemaVersion: 4);
       final pdb = sqlite3.sqlite3.open(patch);
       pdb.execute('CREATE TABLE delete_line (id INTEGER PRIMARY KEY)');
@@ -2202,6 +2214,7 @@ void main() {
       expect(rowsOf(base, 'line_note_divine_name'), isEmpty);
       expect(rowsOf(base, 'line_divine_name'), isEmpty);
       expect(rowsOf(base, 'book_protection'), isEmpty);
+      expect(rowsOf(base, 'banner'), bannerTexts);
       expect(rowsOf(base, 'book_banner'), banners);
     });
 
@@ -2299,8 +2312,10 @@ void main() {
       }
       db.close();
       expect(tableHashes(path, newTables), {
+        'banner':
+            '0c43cad9ba168dad63f91972f3687622f971e8f75b15db32f829ef74ffd13833',
         'book_banner':
-            '473b121ac837ac17a9627ed583981faec4074ec3217224c18bb0a6bb62752240',
+            'a5eaa7ed08b7e7271d2d09eba8b0e2e90fca6c00fd909c2c95a1cea2793bf2a3',
         'book_protection':
             '260da62f074581043b5bf203c9790203a9ea052f9d1e14e27ecc780f66790a81',
         'line_divine_name':
@@ -2313,13 +2328,18 @@ void main() {
 
       final w = sqlite3.sqlite3.open(path);
       insertRows(w, '', {
-        'book_banner': [
+        'banner': [
           [
-            1,
+            7,
             'ספר זה באדיבות המו"ל\n'
-                '[לאתר המו"ל](https://example.com/books?id=1)',
+                '[לאתר המו"ל](https://example.com/wiki/{title})',
           ],
-          [2, 'שורה ראשונה\nשורה שנייה'],
+          [3, 'שורה ראשונה\nשורה שנייה'],
+        ],
+        'book_banner': [
+          [2, 7],
+          [1, 7],
+          [3, 3],
         ],
         'book_protection': [
           [1, 1],
@@ -2349,8 +2369,10 @@ void main() {
       });
       w.close();
       expect(tableHashes(path, newTables), {
+        'banner':
+            'aea9be7ae48f7214bafb8b438c4445c4007d3e1e7b7c0d309ce94eab9be04689',
         'book_banner':
-            '87026c32c4996eee6e5c75b65ce5e08be1a1a28e52864a57a696cbb6555a0c59',
+            '5b85390ed44d6cb3cd83b9a0c15a39dd1a66a39244f614699c9537abae98e553',
         'book_protection':
             '015c3c2291e1ebac6c68a6f33c8c01b42af0ce46dc3840d7e0a12ae370ae1319',
         'line_divine_name':
@@ -2426,8 +2448,9 @@ void main() {
             ..remove('zstd_dict'),
           kHashTableOrderSchema5);
     });
-    test('סכמה-7 → סדר 44 הנוכחי, חמש הטבלאות החדשות לפני schema_meta', () {
+    test('סכמה-7 → סדר 45 הנוכחי, שש הטבלאות החדשות לפני schema_meta', () {
       const added = [
+        'banner',
         'book_banner',
         'book_protection',
         'line_divine_name',
@@ -2442,13 +2465,14 @@ void main() {
         'schema_meta',
       ]);
       final fk = kPatchTablesInFkOrder.map((t) => t.name).toList();
-      expect(fk.sublist(fk.length - 6), [...added, 'schema_meta']);
+      expect(fk.sublist(fk.length - 7), [...added, 'schema_meta']);
       expect(fk.toSet(), kHashTableOrderSchema7.toSet());
       expect({
         for (final t in kPatchTablesInFkOrder)
           if (added.contains(t.name))
             t.name: '${t.primaryKey.join(',')} ${t.updatable}'
       }, {
+        'banner': 'id true',
         'book_banner': 'bookId true',
         'book_protection': 'bookId true',
         'line_divine_name': 'lineId,charStart true',

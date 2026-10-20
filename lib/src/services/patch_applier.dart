@@ -126,6 +126,7 @@ class PatchApplyResult {
       'schema_meta',
       'line_ref',
       'line_dh',
+      'banner',
       'book_banner',
       'book_protection',
       'line_divine_name',

@@ -68,8 +68,9 @@ const List<PatchTableSpec> kPatchTablesInFkOrder = [
   PatchTableSpec('default_commentator', ['bookId', 'commentatorBookId'],
       updatable: true),
   PatchTableSpec('default_targum', ['bookId', 'targumBookId'], updatable: true),
-  // סכמה 7. באנר והגבלת מו"ל לספר, שמות קודש מאומתים והערות שוליים לשורה,
-  // ושמות הקודש שבגוף ההערות.
+  // סכמה 7. טקסטי באנר, באנר והגבלת מו"ל לספר, שמות קודש מאומתים והערות
+  // שוליים לשורה, ושמות הקודש שבגוף ההערות.
+  PatchTableSpec('banner', ['id'], updatable: true),
   PatchTableSpec('book_banner', ['bookId'], updatable: true),
   PatchTableSpec('book_protection', ['bookId'], updatable: true),
   PatchTableSpec('line_divine_name', ['lineId', 'charStart'], updatable: true),
@@ -264,9 +265,9 @@ const List<String> kHashTableOrderSchema6 = [
   'schema_meta',
 ];
 
-/// סדר ה-hash של סכמה 7 (44 טבלאות): סדר סכמה 6, ולפני `schema_meta` חמש
-/// הטבלאות `book_banner`, `book_protection`, `line_divine_name`, `line_note`
-/// ו-`line_note_divine_name`.
+/// סדר ה-hash של סכמה 7 (45 טבלאות): סדר סכמה 6, ולפני `schema_meta` שש
+/// הטבלאות `banner`, `book_banner`, `book_protection`, `line_divine_name`,
+/// `line_note` ו-`line_note_divine_name`.
 const List<String> kHashTableOrderSchema7 = [
   'source',
   'author',
@@ -306,6 +307,7 @@ const List<String> kHashTableOrderSchema7 = [
   'line_alt_toc',
   'default_commentator',
   'default_targum',
+  'banner',
   'book_banner',
   'book_protection',
   'line_divine_name',
