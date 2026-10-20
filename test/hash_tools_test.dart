@@ -40,9 +40,16 @@ void main() {
     final db = sqlite3.sqlite3.open(path, mode: sqlite3.OpenMode.readOnly);
     try {
       const hasher = LogicalContentHasher();
-      final hash = hasher.compute(db, tableOrder: order);
-      expect(hash, hasher.compute(db, tableOrder: kHashTableOrderSchema5));
-      expect(hash, isNot(hasher.compute(db, tableOrder: kHashTableOrder)));
+      final hash = hasher.compute(db,
+          tableOrder: order, rowOrder: hashRowOrderForDbFile(path));
+      expect(
+          hash,
+          hasher.compute(db,
+              tableOrder: kHashTableOrderSchema5, rowOrder: null));
+      expect(
+          hash,
+          isNot(hasher.compute(db,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder)));
     } finally {
       db.close();
     }

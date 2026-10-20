@@ -13,10 +13,11 @@ const _applier = PatchApplier();
 
 /// ה-fixtures בונים DB ו-patch של סכמה-2, ולכן ה-hash הצפוי חייב להיחשב
 /// בסדר הקפוא של סכמה-2 — לא בברירת המחדל, שמאז סכמה-3 כוללת טבלה נוספת.
-String _hashWithOrder(String dbPath, List<String> order) {
+String _hashWithOrder(String dbPath, List<String> order,
+    [Map<String, List<String>>? rowOrder]) {
   final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
   try {
-    return _hasher.compute(db, tableOrder: order);
+    return _hasher.compute(db, tableOrder: order, rowOrder: rowOrder);
   } finally {
     db.close();
   }
@@ -27,7 +28,7 @@ Map<String, String> _tableHashesOf(String dbPath) {
   final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
   try {
     return _hasher
-        .computeReport(db, tableOrder: kHashTableOrderSchema2)
+        .computeReport(db, tableOrder: kHashTableOrderSchema2, rowOrder: null)
         .tableHashes;
   } finally {
     db.close();
@@ -37,7 +38,8 @@ Map<String, String> _tableHashesOf(String dbPath) {
 String _hashOf(String dbPath) {
   final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
   try {
-    return _hasher.compute(db, tableOrder: kHashTableOrderSchema2);
+    return _hasher.compute(db,
+        tableOrder: kHashTableOrderSchema2, rowOrder: null);
   } finally {
     db.close();
   }
@@ -1924,7 +1926,9 @@ void main() {
     Map<String, String> tableHashes(String dbPath, List<String> order) {
       final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
       try {
-        return _hasher.computeReport(db, tableOrder: order).tableHashes;
+        return _hasher
+            .computeReport(db, tableOrder: order, rowOrder: kHashRowOrder)
+            .tableHashes;
       } finally {
         db.close();
       }
@@ -1967,7 +1971,8 @@ void main() {
           toSchema: 7,
           patchFormat: 4,
           fromHash: _hashWithOrder(base, kHashTableOrderSchema6),
-          toHash: _hashWithOrder(expected, kHashTableOrderSchema7),
+          toHash: _hashWithOrder(
+              expected, kHashTableOrderSchema7, kHashRowOrderSchema7),
           fromTables:
               perTable ? tableHashes(base, kHashTableOrderSchema6) : null,
           toTables:
@@ -1979,7 +1984,7 @@ void main() {
       final expected = buildExpected7('s7_full_expected');
       final patch = buildPatch6to7('s7_full_patch');
       // אותו DB נותן hash אחר בסדר סכמה 7 — אסור לחשב את ה-from בסדר היעד.
-      expect(_hashWithOrder(base, kHashTableOrderSchema7),
+      expect(_hashWithOrder(base, kHashTableOrderSchema7, kHashRowOrderSchema7),
           isNot(_hashWithOrder(base, kHashTableOrderSchema6)));
 
       final r = _applier.apply(
@@ -1988,7 +1993,10 @@ void main() {
           manifest: manifest6to7(base, expected));
 
       expect(r.migrations, 5);
-      expect(r.resultHash, _hashWithOrder(expected, kHashTableOrderSchema7));
+      expect(
+          r.resultHash,
+          _hashWithOrder(
+              expected, kHashTableOrderSchema7, kHashRowOrderSchema7));
       expect(r.upserts, containsPair('line_content', 1));
       expect(r.upserts, containsPair('book_banner', 1));
       expect(r.upserts, containsPair('book_protection', 1));
@@ -2028,8 +2036,10 @@ void main() {
         [1, 'ספר 1', -3371204337321344343],
         [2, 'ספר 2', 9007199254740993],
       ]);
-      expect(_hashWithOrder(base, kHashTableOrderSchema7),
-          _hashWithOrder(expected, kHashTableOrderSchema7));
+      expect(
+          _hashWithOrder(base, kHashTableOrderSchema7, kHashRowOrderSchema7),
+          _hashWithOrder(
+              expected, kHashTableOrderSchema7, kHashRowOrderSchema7));
     });
 
     test('שינוי contentHash בלבד מסמן רק את הספר שלו', () {
@@ -2058,8 +2068,10 @@ void main() {
           to: 2,
           fromSchema: 7,
           toSchema: 7,
-          fromHash: _hashWithOrder(base, kHashTableOrderSchema7),
-          toHash: _hashWithOrder(expected, kHashTableOrderSchema7),
+          fromHash: _hashWithOrder(
+              base, kHashTableOrderSchema7, kHashRowOrderSchema7),
+          toHash: _hashWithOrder(
+              expected, kHashTableOrderSchema7, kHashRowOrderSchema7),
         ),
       );
 
@@ -2095,7 +2107,8 @@ void main() {
         ),
         isEmpty,
       );
-      expect(_hashWithOrder(base, kHashTableOrderSchema7), r.resultHash);
+      expect(_hashWithOrder(base, kHashTableOrderSchema7, kHashRowOrderSchema7),
+          r.resultHash);
     });
 
     test('hash שגוי של line_note מגלגל לאחור גם את ה-migrations', () {
@@ -2144,7 +2157,8 @@ void main() {
             to: 2,
             fromSchema: 6,
             toSchema: 7,
-            fromHash: _hashWithOrder(base, kHashTableOrderSchema7),
+            fromHash: _hashWithOrder(
+                base, kHashTableOrderSchema7, kHashRowOrderSchema7),
             toHash: m.toContentHash,
           ),
         ),
@@ -2179,8 +2193,10 @@ void main() {
           to: 2,
           fromSchema: 7,
           toSchema: 7,
-          fromHash: _hashWithOrder(base, kHashTableOrderSchema7),
-          toHash: _hashWithOrder(expected, kHashTableOrderSchema7),
+          fromHash: _hashWithOrder(
+              base, kHashTableOrderSchema7, kHashRowOrderSchema7),
+          toHash: _hashWithOrder(
+              expected, kHashTableOrderSchema7, kHashRowOrderSchema7),
         ),
       );
 
@@ -2218,8 +2234,10 @@ void main() {
           to: 2,
           fromSchema: 7,
           toSchema: 7,
-          fromHash: _hashWithOrder(base, kHashTableOrderSchema7),
-          toHash: _hashWithOrder(expected, kHashTableOrderSchema7),
+          fromHash: _hashWithOrder(
+              base, kHashTableOrderSchema7, kHashRowOrderSchema7),
+          toHash: _hashWithOrder(
+              expected, kHashTableOrderSchema7, kHashRowOrderSchema7),
         ),
       );
 
@@ -2259,8 +2277,10 @@ void main() {
           to: 2,
           fromSchema: 7,
           toSchema: 7,
-          fromHash: _hashWithOrder(base, kHashTableOrderSchema7),
-          toHash: _hashWithOrder(expected, kHashTableOrderSchema7),
+          fromHash: _hashWithOrder(
+              base, kHashTableOrderSchema7, kHashRowOrderSchema7),
+          toHash: _hashWithOrder(
+              expected, kHashTableOrderSchema7, kHashRowOrderSchema7),
         ),
       );
 
@@ -2316,17 +2336,18 @@ void main() {
           [2, 3, 6, 7, 3],
           [1, 12, 17, 5, 2],
         ],
+        // אותן שורות כמו GOLDEN_NOTES ו-GOLDEN_NOTE_NAMES ב-SchemaSevenPatchTest.
         'line_note': [
-          [2, 0, 7, null, 'הערה בלי סימן'],
-          [1, 1, 12, '<b>ב</b>', 'גוף עם <i>נטוי</i> פנימי'],
-          [1, 0, 3, '1', 'הערה ראשונה'],
-          [3, 0, 0, '*', ''],
+          [2, 0, 5, '1', 'הערה <i>פנימית</i> א'],
+          [1, 1, 12, null, 'נספח בסוף השורה'],
+          [1, 0, 3, '*', 'גוף "ב"\nשורה שנייה'],
+          [2, 1, 9, '<b>2</b>', '<b>ב</b> &amp; ג'],
         ],
         'line_note_divine_name': [
-          [1, 1, 8, 12, 3, 4],
-          [1, 0, 0, 4, 1, 1],
-          [2, 0, 5, 9, 7, 3],
-          [1, 0, 6, 11, 5, 2],
+          [2, 0, 0, 4, 1, 1],
+          [1, 1, 6, 11, 5, 2],
+          [1, 0, 3, 6, 7, 3],
+          [2, 0, 10, 14, 3, 4],
         ],
       });
       w.close();
@@ -2336,11 +2357,11 @@ void main() {
         'book_protection':
             '015c3c2291e1ebac6c68a6f33c8c01b42af0ce46dc3840d7e0a12ae370ae1319',
         'line_divine_name':
-            'e0b9cc2885495c4bf2ebdfe044b06948aa8cb0c859e777d45b880e59f3d4e799',
+            'ab37c80ae94f079eabde2b02cd108fc90f1c75f523f0f8fd1f9b87f5a8dc67b6',
         'line_note':
-            'faaf50adcffcf819341d2c49153a0d641f2de65efda01aa92a465f7617bd7fb0',
+            'b01db649c8a87765a89d0667849cad5389f9cc5b64137486e06d1bb631b6c487',
         'line_note_divine_name':
-            '85daae62eaacd8c85f7c3ae1c572e37be89da49f9b73278a5fbfbf91dc4bd673',
+            '5c2aded4a4b3fa5a4146308c2bc07cbfe0926766ddcb2e6c4b13785db1b893cf',
       });
     });
 
@@ -3017,8 +3038,10 @@ class _PragmaProbeHasher extends LogicalContentHasher {
   @override
   String compute(api.Database db,
       {required List<String> tableOrder,
+      required Map<String, List<String>>? rowOrder,
       void Function(int bytesHashed)? onProgress}) {
     _record(db);
-    return super.compute(db, tableOrder: tableOrder, onProgress: onProgress);
+    return super.compute(db,
+        tableOrder: tableOrder, rowOrder: rowOrder, onProgress: onProgress);
   }
 }

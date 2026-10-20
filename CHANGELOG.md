@@ -46,6 +46,13 @@
 
 ### Hash לוגי
 
+- **שינוי API ו-hash:** מסכמה 7 השורות של כל טבלה נכתבות לזרם ה-hash לפי
+  המפתח הראשי שמוצהר ב-`kPatchTablesInFkOrder`, כמו `LogicalContentHasher.kt`;
+  סכמות 1–6 שומרות על הכלל הקפוא (`id`, אחרת כל העמודות).
+  `LogicalContentHasher.compute`/`computeReport` מקבלים `rowOrder` חובה (`null`
+  רק לסכמה 6 ומטה), ש-`hashRowOrderForSchemaVersion` בוחר לפי סכמת ה-DB.
+  ייצואים חדשים: `kHashRowOrder`, `kHashRowOrderBySchemaVersion`,
+  `kPkRowOrderSchemaVersion`, `hashOrderByClause`, `hashRowOrderForSchemaVersion`.
 - **שינוי hash:** ערכי REAL נכתבים לזרם ה-hash בפורמט `Double.toString` של
   Java (`1.0E-4`, `1.0E7`), כמו `LogicalContentHasher.kt`. עד עכשיו Dart כתב
   `0.0001`/`10000000.0`, וה-hash לא תאם ליצרן בכל טבלה עם ערך כזה.

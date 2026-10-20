@@ -21,8 +21,11 @@ void main() {
       a.execute("INSERT INTO source VALUES (1,'aleph'),(2,'bet'),(3,'gimel')");
       b.execute("INSERT INTO source VALUES (3,'gimel'),(1,'aleph'),(2,'bet')");
 
-      expect(_hasher.compute(a, tableOrder: kHashTableOrder),
-          _hasher.compute(b, tableOrder: kHashTableOrder));
+      expect(
+          _hasher.compute(a,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder),
+          _hasher.compute(b,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder));
       a.close();
       b.close();
     });
@@ -36,8 +39,11 @@ void main() {
       }
       b.execute("UPDATE source SET name='changed' WHERE id=2");
 
-      expect(_hasher.compute(a, tableOrder: kHashTableOrder),
-          isNot(_hasher.compute(b, tableOrder: kHashTableOrder)));
+      expect(
+          _hasher.compute(a,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder),
+          isNot(_hasher.compute(b,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder)));
       a.close();
       b.close();
     });
@@ -51,8 +57,11 @@ void main() {
       // ב-a הערך הוא טקסט "1", ב-b הוא מספר 1 — צריך hash שונה (type tag).
       a.execute("INSERT INTO source VALUES (1,'1')");
       b.execute('INSERT INTO source VALUES (1,1)');
-      expect(_hasher.compute(a, tableOrder: kHashTableOrder),
-          isNot(_hasher.compute(b, tableOrder: kHashTableOrder)));
+      expect(
+          _hasher.compute(a,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder),
+          isNot(_hasher.compute(b,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder)));
       a.close();
       b.close();
     });
@@ -62,7 +71,9 @@ void main() {
       db.execute('CREATE TABLE source (id INTEGER PRIMARY KEY, name TEXT)');
       db.execute("INSERT INTO source VALUES (1,'x')");
       // שאר הטבלאות ב-kHashTableOrder חסרות — אסור שזה יזרוק.
-      expect(() => _hasher.compute(db, tableOrder: kHashTableOrder),
+      expect(
+          () => _hasher.compute(db,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder),
           returnsNormally);
       db.close();
     });
@@ -75,19 +86,20 @@ void main() {
       db.execute('CREATE TABLE source (id INTEGER PRIMARY KEY, name TEXT)');
       db.execute("INSERT INTO source VALUES (1,'aleph'),(2,'bet'),(3,'gimel')");
       expect(
-        _hasher.compute(db, tableOrder: kHashTableOrder),
+        _hasher.compute(db,
+            tableOrder: kHashTableOrder, rowOrder: kHashRowOrder),
         // 44 טבלאות ב-kHashTableOrder (סכמה 7) — כל שם נכתב כ-
         // marker גם כשהטבלה נעדרת, לכן ה-golden מתעדכן עם סנכרון הרשימה.
         '96422e6c37fe6dd3c9720a8862ab6f5c31c5d7b1ea16f55d0c311defd7941615',
       );
       expect(
-        _hasher.compute(db, tableOrder: kHashTableOrderSchema6),
+        _hasher.compute(db, tableOrder: kHashTableOrderSchema6, rowOrder: null),
         '64b1814ecabdb19afbdccb938fc22a4828a591bff8a253fbd4a01a2563753199',
       );
       // הסדר הקפוא של סכמה-3 חייב להמשיך לשחזר את ה-golden ההיסטורי —
       // מוכיח שההקפאה נאמנה בית-בבית לרשימה שלפני הוספת line_ref ו-line_dh.
       expect(
-        _hasher.compute(db, tableOrder: kHashTableOrderSchema3),
+        _hasher.compute(db, tableOrder: kHashTableOrderSchema3, rowOrder: null),
         'c26ea1c49cab50b9893df661a98211e8fd923269df79e13cbd89a88f98f2e6c0',
       );
       db.close();
@@ -101,8 +113,11 @@ void main() {
       }
       withBom.execute('INSERT INTO source VALUES (1, ?)', ['﻿aleph']);
       without.execute("INSERT INTO source VALUES (1,'aleph')");
-      expect(_hasher.compute(withBom, tableOrder: kHashTableOrder),
-          isNot(_hasher.compute(without, tableOrder: kHashTableOrder)));
+      expect(
+          _hasher.compute(withBom,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder),
+          isNot(_hasher.compute(without,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder)));
       withBom.close();
       without.close();
     });
@@ -126,7 +141,7 @@ void main() {
         0x1F,
         0xFF,
       ];
-      expect(_hasher.compute(db, tableOrder: const ['source']),
+      expect(_hasher.compute(db, tableOrder: const ['source'], rowOrder: null),
           sha256.convert(stream).toString());
       db.close();
     });
@@ -160,11 +175,13 @@ void main() {
         final db = sqlite3.sqlite3.open(path, mode: sqlite3.OpenMode.readOnly);
         try {
           expect(
-            _hasher.compute(db, tableOrder: kHashTableOrderSchema2),
+            _hasher.compute(db,
+                tableOrder: kHashTableOrderSchema2, rowOrder: null),
             hash34,
           );
           expect(
-            _hasher.compute(db, tableOrder: kHashTableOrderSchema1),
+            _hasher.compute(db,
+                tableOrder: kHashTableOrderSchema1, rowOrder: null),
             hashLegacy,
           );
         } finally {

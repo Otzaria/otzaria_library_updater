@@ -3,6 +3,8 @@
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:seforim_library_updater/src/services/logical_content_hasher.dart'
+    show hashOrderByClause;
 import 'package:sqlite3/sqlite3.dart';
 
 import 'src/db_hash_order.dart';
@@ -20,6 +22,7 @@ void main(List<String> args) {
   }
 
   final order = hashTableOrderForDbFile(dbPath);
+  final rowOrder = hashRowOrderForDbFile(dbPath);
   final db = sqlite3.open(dbPath, mode: OpenMode.readOnly);
 
   print('DB: $dbPath\n');
@@ -33,7 +36,7 @@ void main(List<String> args) {
       print('  $table: (לא קיימת)');
       continue;
     }
-    final sql = _buildSql(table, cols);
+    final sql = _buildSql(table, cols, rowOrder);
     final plan = db.select('EXPLAIN QUERY PLAN $sql');
     final detail = plan.map((r) => r['detail'].toString()).join(' | ');
     final sorts = detail.toUpperCase().contains('B-TREE');
@@ -48,7 +51,7 @@ void main(List<String> args) {
   for (final table in order) {
     final cols = _cols(db, table);
     if (cols == null) continue;
-    final sql = _buildSql(table, cols);
+    final sql = _buildSql(table, cols, rowOrder);
     final sw = Stopwatch()..start();
     var rows = 0;
     var bytes = 0;
@@ -84,12 +87,12 @@ List<String>? _cols(Database db, String table) {
   return names;
 }
 
-String _buildSql(String table, List<String> cols) {
+String _buildSql(
+    String table, List<String> cols, Map<String, List<String>>? rows) {
   final selectCols = cols
       .map((c) => 'typeof("$c"),CASE WHEN typeof("$c")=\'text\' '
           'THEN CAST("$c" AS BLOB) ELSE "$c" END')
       .join(',');
-  final orderBy =
-      cols.contains('id') ? 'id' : cols.map((c) => '"$c"').join(',');
+  final orderBy = hashOrderByClause(table, cols, rows);
   return 'SELECT $selectCols FROM "$table" ORDER BY $orderBy';
 }

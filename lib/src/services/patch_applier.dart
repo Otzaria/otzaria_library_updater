@@ -204,6 +204,13 @@ List<String> hashTableOrderForSchemaVersion(int schemaVersion) {
   return order;
 }
 
+/// בוחר את סדר השורות ב-hash לפי גרסת הסכמה, מתוך [kHashRowOrderBySchemaVersion].
+/// null = הכלל הקפוא של סכמה ≤6. סכמה שאין לה סדר טבלאות → זריקה.
+Map<String, List<String>>? hashRowOrderForSchemaVersion(int schemaVersion) {
+  hashTableOrderForSchemaVersion(schemaVersion);
+  return kHashRowOrderBySchemaVersion[schemaVersion];
+}
+
 /// מחיל patch DB דלתאי על `seforim.db` בצורה אטומית, ומשכפל את
 /// `PatchApplier.kt` בצד הייצור.
 ///
@@ -279,6 +286,8 @@ class PatchApplier {
     final fromOrder =
         hashTableOrderForSchemaVersion(manifest.fromSchemaVersion);
     final toOrder = hashTableOrderForSchemaVersion(manifest.toSchemaVersion);
+    final fromRows = hashRowOrderForSchemaVersion(manifest.fromSchemaVersion);
+    final toRows = hashRowOrderForSchemaVersion(manifest.toSchemaVersion);
 
     // סך הבתים למד: ה-hint מריצה קודמת, או גודל הקובץ (הערכת-יתר) שנמדד
     // מחדש לפני כל אימות.
@@ -326,6 +335,7 @@ class PatchApplier {
         final localHash = hasher.compute(
           db,
           tableOrder: fromOrder,
+          rowOrder: fromRows,
           onProgress: verifyProgress,
         );
         _setCacheSize(db, cacheSizeKib);
@@ -395,6 +405,7 @@ class PatchApplier {
           final actual = hasher.compute(
             db,
             tableOrder: toOrder,
+            rowOrder: toRows,
             onProgress: verifyProgress,
           );
           if (actual != manifest.toContentHash) {
@@ -413,6 +424,7 @@ class PatchApplier {
           final report = hasher.computeReport(
             db,
             tableOrder: toOrder,
+            rowOrder: toRows,
             only: toTables.toSet(),
             onProgress: verifyProgress,
           );
@@ -483,6 +495,7 @@ class PatchApplier {
     Map<String, int>? tableBytesHint,
   }) {
     final order = hashTableOrderForSchemaVersion(schemaVersion);
+    final rows = hashRowOrderForSchemaVersion(schemaVersion);
     final only = tables.toSet();
     var totalBytes = _hintedTotal(tableBytesHint, tables);
     if (totalBytes == 0) totalBytes = File(dbPath).lengthSync();
@@ -492,6 +505,7 @@ class PatchApplier {
       final report = hasher.computeReport(
         db,
         tableOrder: order,
+        rowOrder: rows,
         only: only,
         onProgress: onProgress == null
             ? null
