@@ -164,6 +164,12 @@ void main() {
           throwsA(isA<PatchApplyException>()));
     });
 
+    test('המפות אינן ניתנות לשינוי', () {
+      expect(() => kHashRowOrderSchema7['x'] = ['y'], throwsUnsupportedError);
+      expect(() => kHashRowOrderBySchemaVersion[8] = kHashRowOrderSchema7,
+          throwsUnsupportedError);
+    });
+
     // patch_tables_contract.json זהה בתים לצד ה-Kotlin: ה-PK שם הוא סדר השורות.
     test('סדר השורות של סכמה 7 = ה-PK שבחוזה טבלאות ה-patch', () {
       final contract =

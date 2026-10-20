@@ -230,12 +230,17 @@ class LogicalContentHasher {
 /// ה-ORDER BY של [table] ב-hash: עמודות [rowOrder] שלה, וכש-null — הכלל הקפוא
 /// של סכמה ≤6: `id`, ואם אין — כל [cols] (ממוינות). זהה ל-`LogicalContentHasher.kt`.
 String hashOrderByClause(
-        String table, List<String> cols, Map<String, List<String>>? rowOrder) =>
-    rowOrder != null
-        ? rowOrder[table]!.map((c) => '"$c"').join(',')
-        : cols.contains('id')
-            ? 'id'
-            : cols.map((c) => '"$c"').join(',');
+    String table, List<String> cols, Map<String, List<String>>? rowOrder) {
+  if (rowOrder == null) {
+    return cols.contains('id') ? 'id' : cols.map((c) => '"$c"').join(',');
+  }
+  final pk = rowOrder[table]!;
+  // כמו בצד ה-Kotlin: עמודה חסרה נכשלת בקול, לא נקראת כמחרוזת קבועה.
+  if (!pk.every(cols.contains)) {
+    throw ArgumentError.value(pk, 'rowOrder[$table]', 'אינן בעמודות $cols');
+  }
+  return pk.map((c) => '"$c"').join(',');
+}
 
 /// `Double.toString` של Java — מה ש-`LogicalContentHasher.kt` כותב ל-REAL.
 /// Dart כותב `0.0001` ו-`10000000.0` היכן ש-Java כותבת `1.0E-4` ו-`1.0E7`.

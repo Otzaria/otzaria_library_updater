@@ -372,17 +372,16 @@ const int kPkRowOrderSchemaVersion = 7;
 
 /// סדר השורות ב-hash של סכמה 7: המפתח הראשי של כל טבלה ב-[kPatchTablesInFkOrder].
 /// סכמה עתידית שתשנה מפתח ראשי חייבת להקפיא כאן עותק.
-final Map<String, List<String>> kHashRowOrderSchema7 = {
+final Map<String, List<String>> kHashRowOrderSchema7 = Map.unmodifiable({
   for (final table in kPatchTablesInFkOrder) table.name: table.primaryKey,
-};
+});
 
 /// סדר השורות הנוכחי (סכמה 7), לצד [kHashTableOrder].
 final Map<String, List<String>> kHashRowOrder = kHashRowOrderSchema7;
 
-/// סדרי השורות לפי גרסת סכמה. סכמה שאינה כאן נגבבת בכלל הקפוא של סכמה 6.
-final Map<int, Map<String, List<String>>> kHashRowOrderBySchemaVersion = {
-  7: kHashRowOrderSchema7,
-};
+/// סדרי השורות לפי גרסת סכמה, מ-[kPkRowOrderSchemaVersion] ואילך.
+final Map<int, Map<String, List<String>>> kHashRowOrderBySchemaVersion =
+    Map.unmodifiable({7: kHashRowOrderSchema7});
 
 /// האם קיים סדר hash לסכמה — כלומר האם אפשר להחיל patch שנוגע בה.
 bool isSupportedSchemaVersion(int schemaVersion) =>

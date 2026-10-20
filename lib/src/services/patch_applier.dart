@@ -205,10 +205,19 @@ List<String> hashTableOrderForSchemaVersion(int schemaVersion) {
 }
 
 /// בוחר את סדר השורות ב-hash לפי גרסת הסכמה, מתוך [kHashRowOrderBySchemaVersion].
-/// null = הכלל הקפוא של סכמה ≤6. סכמה שאין לה סדר טבלאות → זריקה.
+/// null = הכלל הקפוא של סכמה ≤6. סכמה בלי סדר טבלאות, או סכמה ≥7 בלי סדר
+/// שורות → זריקה.
 Map<String, List<String>>? hashRowOrderForSchemaVersion(int schemaVersion) {
   hashTableOrderForSchemaVersion(schemaVersion);
-  return kHashRowOrderBySchemaVersion[schemaVersion];
+  if (schemaVersion < kPkRowOrderSchemaVersion) return null;
+  final rows = kHashRowOrderBySchemaVersion[schemaVersion];
+  if (rows == null) {
+    throw PatchApplyException(
+      LibraryUpdaterMessages.current
+          .unsupportedSchemaForHashOrder(schemaVersion),
+    );
+  }
+  return rows;
 }
 
 /// מחיל patch DB דלתאי על `seforim.db` בצורה אטומית, ומשכפל את

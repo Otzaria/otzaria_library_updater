@@ -66,6 +66,17 @@ void main() {
       b.close();
     });
 
+    // sqlite קורא שם עמודה לא מוכר במירכאות כמחרוזת קבועה — כלומר בלי סדר.
+    test('עמודת PK מוצהרת שחסרה בטבלה נכשלת בקול', () {
+      final db = sqlite3.sqlite3.openInMemory();
+      db.execute('CREATE TABLE line_note (lineId INTEGER, body TEXT)');
+      expect(
+          () => _hasher.compute(db,
+              tableOrder: const ['line_note'], rowOrder: kHashRowOrder),
+          throwsArgumentError);
+      db.close();
+    });
+
     test('טבלה חסרה אינה מפילה את החישוב', () {
       final db = sqlite3.sqlite3.openInMemory();
       db.execute('CREATE TABLE source (id INTEGER PRIMARY KEY, name TEXT)');
