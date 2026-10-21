@@ -36,8 +36,8 @@ class LogicalContentHasher {
   static const int _unitSeparator = 0x1F;
   static const int _rowSeparator = 0xFF;
 
-  // בתי-הסוג נקראים כמסכה: 3 ביטים לעמודה, 20 עמודות (60 ביט) למסכה.
-  static const int _bitsPerTag = 3;
+  // ביט "blob" לכל עמודה, 20 עמודות למסכה. שאר הסוגים נגזרים מסוג הערך
+  // בדארט: null, מספר, ו-Uint8List שהוא טקסט (CAST) כשהביט כבוי.
   static const int _colsPerMask = 20;
 
   /// מחשב את ה-hash על [db] ומחזיר אותו כ-hex. ניתן להריץ על חיבור read-only
@@ -115,9 +115,16 @@ class LogicalContentHasher {
             while (cursor.moveNext()) {
               final values = cursor.current.values;
               for (var i = 0; i < colCount; i++) {
+                final value = values[maskCount + i];
                 final mask = values[i ~/ _colsPerMask] as int;
-                final tag = (mask >> ((i % _colsPerMask) * _bitsPerTag)) & 0x07;
-                _encodeCell(out, tag, values[maskCount + i]);
+                final tag = value == null
+                    ? _nullTag
+                    : value is! Uint8List
+                        ? _numberTag
+                        : (mask >> (i % _colsPerMask)) & 1 == 1
+                            ? _blobTag
+                            : _textTag;
+                _encodeCell(out, tag, value);
               }
               out.addByte(_rowSeparator);
             }
@@ -154,28 +161,20 @@ class LogicalContentHasher {
   String _valueExpression(String c) =>
       'CASE WHEN typeof("$c")=\'text\' THEN CAST("$c" AS BLOB) ELSE "$c" END';
 
-  /// בתי-הסוג של כל העמודות ארוזים למספרים שלמים — קריאת FFI אחת לשורה במקום
-  /// מחרוזת `typeof()` לכל תא. הערכים 0–3 הם בדיוק תגי הסוג של הזרם.
+  /// ביטי ה-blob של כל העמודות ארוזים למספרים שלמים — קריאת FFI אחת לשורה
+  /// והשוואה אחת לתא, במקום CASE של עד שלוש השוואות מחרוזת.
   List<String> _maskExpressions(List<String> cols) {
     final masks = <String>[];
     for (var start = 0; start < cols.length; start += _colsPerMask) {
       final end = math.min(start + _colsPerMask, cols.length);
       final parts = <String>[];
       for (var i = start; i < end; i++) {
-        parts.add(
-            '((${_tagExpression(cols[i])})<<${(i - start) * _bitsPerTag})');
+        parts.add('((typeof("${cols[i]}")=\'blob\')<<${i - start})');
       }
       masks.add(parts.join('|'));
     }
     return masks;
   }
-
-  /// ה-ELSE מכסה 'integer' ו-'real'; ההבחנה ביניהם לפי סוג הערך בדארט.
-  String _tagExpression(String c) => 'CASE typeof("$c") '
-      'WHEN \'null\' THEN $_nullTag '
-      'WHEN \'blob\' THEN $_blobTag '
-      'WHEN \'text\' THEN $_textTag '
-      'ELSE $_numberTag END';
 
   /// קורא את שמות העמודות ממוינים אלפביתית, או null אם הטבלה אינה קיימת.
   List<String>? _readColumnsCanonical(sqlite3.Database db, String table) {
@@ -186,7 +185,7 @@ class LogicalContentHasher {
     return names;
   }
 
-  /// [tag] הוא בית-הסוג מהמסכה. עבור [_textTag] ו-[_blobTag], [value] הוא
+  /// [tag] הוא בית-הסוג של התא. עבור [_textTag] ו-[_blobTag], [value] הוא
   /// ה-bytes הגולמיים (Uint8List).
   void _encodeCell(_BufferedByteSink out, int tag, Object? value) {
     switch (tag) {
