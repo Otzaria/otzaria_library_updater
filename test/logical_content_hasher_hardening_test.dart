@@ -190,6 +190,42 @@ void main() {
       db.close();
     });
 
+    test('INTEGER בקצוות הטווח — זהה למימוש-העד', () {
+      final db = sqlite3.sqlite3.openInMemory();
+      db.execute('CREATE TABLE source (id INTEGER PRIMARY KEY, v INTEGER)');
+      const values = [0, 7, 9, 10, 99, 100, 123456789, -1, -10, -905, 1 << 53];
+      const extremes = [9223372036854775807, -9223372036854775808];
+      for (final (i, v) in [...values, ...extremes].indexed) {
+        db.execute('INSERT INTO source VALUES (?,?)', [i + 1, v]);
+      }
+      final reports = <int>[];
+      final reference = referenceStream(db, const ['source']);
+      expect(
+        _hasher.compute(db,
+            tableOrder: const ['source'], onProgress: reports.add),
+        sha256.convert(reference).toString(),
+      );
+      expect(reports.last, reference.length);
+      db.close();
+    });
+
+    // מספר ארוך שנכתב בדיוק סביב סוף החוצץ (1MB) לא נחתך ולא מוזז.
+    test('INTEGER סביב גבול החוצץ — זהה למימוש-העד', () {
+      const capacity = 1 << 20;
+      for (var pad = capacity - 50; pad < capacity - 20; pad++) {
+        final db = sqlite3.sqlite3.openInMemory();
+        db.execute('CREATE TABLE source (a TEXT, b INTEGER)');
+        db.execute('INSERT INTO source VALUES (?,?)',
+            ['x' * pad, 9223372036854775807]);
+        expect(
+          _hasher.compute(db, tableOrder: const ['source']),
+          sha256.convert(referenceStream(db, const ['source'])).toString(),
+          reason: 'pad=$pad',
+        );
+        db.close();
+      }
+    });
+
     test('onProgress: הדיווח האחרון הוא סך הבתים המדויק ומונוטוני', () {
       final db = sqlite3.sqlite3.openInMemory();
       db.execute('CREATE TABLE source (id INTEGER PRIMARY KEY, name TEXT)');

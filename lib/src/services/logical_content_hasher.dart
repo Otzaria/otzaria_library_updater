@@ -200,8 +200,12 @@ class LogicalContentHasher {
         out.addBytes(value as Uint8List);
       default:
         out.addByte(_numberTag);
-        out.addBytes(utf8.encode(
-            value is double ? javaDoubleToString(value) : value.toString()));
+        if (value is int && value >= 0) {
+          out.addDecimal(value);
+        } else {
+          out.addBytes(utf8.encode(
+              value is double ? javaDoubleToString(value) : value.toString()));
+        }
     }
     out.addByte(_unitSeparator);
   }
@@ -315,6 +319,24 @@ class _BufferedByteSink {
     }
     if (_length + len > _capacity) flush();
     _buffer.setRange(_length, _length + len, bytes);
+    _length += len;
+    _totalHashed += len;
+  }
+
+  /// כותב את [value] (אי-שלילי) בספרות ASCII, כמו `utf8.encode(toString())`
+  /// אך בלי שתי הקצאות לכל תא — עשרות מיליוני תאים מספריים ב-DB מלא.
+  void addDecimal(int value) {
+    var len = 1;
+    for (var n = value; n >= 10; n ~/= 10) {
+      len++;
+    }
+    if (_length + len > _capacity) flush();
+    var i = _length + len;
+    var n = value;
+    do {
+      _buffer[--i] = 0x30 + n % 10;
+      n ~/= 10;
+    } while (n > 0);
     _length += len;
     _totalHashed += len;
   }
