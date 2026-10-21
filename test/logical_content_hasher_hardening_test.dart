@@ -298,6 +298,29 @@ void main() {
       db.close();
     });
 
+    // טקסט ו-blob מגיעים שניהם כ-Uint8List, ורק המסכה מבדילה ביניהם — גם
+    // כשהם ריקים או זהים בבתים, ובקצות המסכה (19/20).
+    test('טקסט מול blob ריקים וזהים בקצות המסכה — זהה למימוש-העד', () {
+      final db = sqlite3.sqlite3.openInMemory();
+      final cols = [for (var i = 0; i < 25; i++) 'c${'$i'.padLeft(2, '0')}'];
+      db.execute('CREATE TABLE book (${cols.join(',')})');
+      final ph = List.filled(25, '?').join(',');
+      for (final pair in [
+        ['', Uint8List(0)],
+        ['﻿ab', Uint8List.fromList(utf8.encode('﻿ab'))],
+      ]) {
+        for (final shift in [0, 1]) {
+          db.execute('INSERT INTO book VALUES ($ph)',
+              [for (var i = 0; i < 25; i++) pair[(i + shift) % 2]]);
+        }
+      }
+      expect(
+        _hasher.compute(db, tableOrder: kHashTableOrder),
+        sha256.convert(referenceStream(db, kHashTableOrder)).toString(),
+      );
+      db.close();
+    });
+
     // כל חמשת הסוגים בשורה אחת, בטבלה צרה — נועל את מיפוי ה-CASE בעצמו.
     test('כל חמשת סוגי SQLite בשורה אחת — זהה למימוש-העד', () {
       final db = sqlite3.sqlite3.openInMemory();
