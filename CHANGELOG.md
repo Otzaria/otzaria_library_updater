@@ -18,7 +18,7 @@
   החיבורים בייצוא עד `maxTotalConnections` (8), מחולק שווה בין משבצות ה-scheduler.
   בדיקת המקום הפנוי כוללת את הטווח הגדול ביותר של כל קובץ שיורד בטווחים.
 - סכמת DB 7: `book_banner`, `book_protection`, `line_divine_name`, `line_note`
-  (הערות השוליים של השורה: `lineId`, `noteIndex`, `charPos`, `marker`, `body`)
+  (הערות השוליים של השורה: `lineId`, `noteIndex`, `charPos`, `hasMarker`, `body`)
   ו-`line_note_divine_name` (שמות הקודש בגוף ההערה, FK מורכב ל-`line_note`) הן
   טבלאות חוזה רגילות. `kSupportedDbSchemaVersion` = 7; `kPatchTablesInFkOrder`
   ו-`kHashTableOrderSchema7` (44 טבלאות) מוסיפים את חמשתן, בסדר הזה, מיד לפני

@@ -1756,7 +1756,7 @@ void main() {
           '    lineId INTEGER NOT NULL REFERENCES line(id) ON DELETE CASCADE,\n'
           '    noteIndex INTEGER NOT NULL,\n'
           '    charPos INTEGER NOT NULL,\n'
-          '    marker TEXT,\n'
+          '    hasMarker INTEGER NOT NULL,\n'
           '    body TEXT NOT NULL,\n'
           '    PRIMARY KEY (lineId, noteIndex)\n'
           ') WITHOUT ROWID',
@@ -1794,9 +1794,9 @@ void main() {
     ];
     // charPos: מיקום גלוי בשורה המופשטת — אחרי ה-sup המעוגן, או בסוף השורה.
     const notes = [
-      [10, 0, 5, '1', 'גוף <i>ההערה</i>'],
-      [10, 1, 10, null, 'הערה בלי סימן'],
-      [30, 0, 0, '*', 'בספר השני'],
+      [10, 0, 5, 1, 'גוף <i>ההערה</i>'],
+      [10, 1, 10, 0, 'הערה בלי סימן'],
+      [30, 0, 0, 1, 'בספר השני'],
     ];
     const noteDivineNames = [
       [10, 0, 4, 9, 1, 1],
@@ -1912,7 +1912,7 @@ void main() {
           'charStart INTEGER, charEnd INTEGER, kind INTEGER, source INTEGER, '
           'PRIMARY KEY (lineId, charStart))');
       db.execute('CREATE TABLE upsert_line_note (lineId INTEGER, '
-          'noteIndex INTEGER, charPos INTEGER, marker TEXT, body TEXT, '
+          'noteIndex INTEGER, charPos INTEGER, hasMarker INTEGER, body TEXT, '
           'PRIMARY KEY (lineId, noteIndex))');
       db.execute('CREATE TABLE upsert_line_note_divine_name (lineId INTEGER, '
           'noteIndex INTEGER, charStart INTEGER, charEnd INTEGER, '
@@ -2117,9 +2117,9 @@ void main() {
       final patch = buildPatch6to7('s7_bad_patch', rows: {
         ...newRows(),
         'line_note': [
-          [10, 0, 5, '1', 'גוף אחר'],
-          [10, 1, 10, null, 'הערה בלי סימן'],
-          [30, 0, 0, '*', 'בספר השני'],
+          [10, 0, 5, 1, 'גוף אחר'],
+          [10, 1, 10, 0, 'הערה בלי סימן'],
+          [30, 0, 0, 1, 'בספר השני'],
         ],
       });
       final before = _hashWithOrder(base, kHashTableOrderSchema6);
@@ -2311,7 +2311,7 @@ void main() {
         'line_divine_name':
             '278213e576ad7f0865c73036789d82ec801bb65e594d9eee0ec6e6e799325b85',
         'line_note':
-            '027c225d40b02cfc2025d0c279668dcd341af7ab68c725b3b187fac0dbdce8a8',
+            '1424aefc886962c989c6ba346334c848597e391523ab4a2562b35f4621be946f',
         'line_note_divine_name':
             '4c7710872d55a8575723dac795a2de02e09085ec0643712cc4aa41014d5320aa',
       });
@@ -2338,10 +2338,10 @@ void main() {
         ],
         // אותן שורות כמו GOLDEN_NOTES ו-GOLDEN_NOTE_NAMES ב-SchemaSevenPatchTest.
         'line_note': [
-          [2, 0, 5, '1', 'הערה <i>פנימית</i> א'],
-          [1, 1, 12, null, 'נספח בסוף השורה'],
-          [1, 0, 3, '*', 'גוף "ב"\nשורה שנייה'],
-          [2, 1, 9, '<b>2</b>', '<b>ב</b> &amp; ג'],
+          [2, 0, 5, 1, 'הערה <i>פנימית</i> א'],
+          [1, 1, 12, 0, 'נספח בסוף השורה'],
+          [1, 0, 3, 1, 'גוף "ב"\nשורה שנייה'],
+          [2, 1, 9, 1, '<b>ב</b> &amp; ג'],
         ],
         'line_note_divine_name': [
           [2, 0, 0, 4, 1, 1],
@@ -2359,7 +2359,7 @@ void main() {
         'line_divine_name':
             'ab37c80ae94f079eabde2b02cd108fc90f1c75f523f0f8fd1f9b87f5a8dc67b6',
         'line_note':
-            'b01db649c8a87765a89d0667849cad5389f9cc5b64137486e06d1bb631b6c487',
+            '8c5772a1b7560b4c29abafe619d7e3ba35882aed9d1e933eb8ce1f2c0ea00284',
         'line_note_divine_name':
             '5c2aded4a4b3fa5a4146308c2bc07cbfe0926766ddcb2e6c4b13785db1b893cf',
       });
