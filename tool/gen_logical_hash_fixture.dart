@@ -37,15 +37,18 @@ final setupSqlSchema7 = <String>[
   "INSERT INTO line_dh VALUES (10,'בראשית',1,'א'),(10,'אלה',0,'ב'),(3,'ואלה',0,'ג')",
   'CREATE TABLE link_anchor (linkId INTEGER NOT NULL, side INTEGER NOT NULL DEFAULT 0, charStart INTEGER NOT NULL, charEnd INTEGER, label TEXT, PRIMARY KEY (linkId, side, charStart))',
   "INSERT INTO link_anchor VALUES (2,0,4,5,NULL),(1,1,0,9,'ב'),(1,0,7,1,'א')",
-  'CREATE TABLE banner (id INTEGER PRIMARY KEY NOT NULL, text TEXT NOT NULL)',
+  // הטבלאות של סכמה 7 ב-DDL של SCHEMA_7_TABLE_DDL (PatchTables.kt), בדיוק.
+  'CREATE TABLE IF NOT EXISTS banner (id INTEGER PRIMARY KEY NOT NULL, text TEXT NOT NULL)',
   "INSERT INTO banner VALUES (2,'שורה\nשנייה'),(1,'באדיבות')",
-  'CREATE TABLE book_banner (bookId INTEGER PRIMARY KEY NOT NULL, bannerId INTEGER NOT NULL)',
+  'CREATE TABLE IF NOT EXISTS book_banner (bookId INTEGER PRIMARY KEY NOT NULL REFERENCES book(id) ON DELETE CASCADE, bannerId INTEGER NOT NULL REFERENCES banner(id))',
   'INSERT INTO book_banner VALUES (10,1),(3,2)',
-  'CREATE TABLE line_divine_name (lineId INTEGER NOT NULL, charStart INTEGER NOT NULL, span INTEGER NOT NULL, PRIMARY KEY (lineId, charStart)) WITHOUT ROWID',
+  'CREATE TABLE IF NOT EXISTS book_protection (bookId INTEGER PRIMARY KEY NOT NULL REFERENCES book(id) ON DELETE CASCADE, level INTEGER NOT NULL CHECK (level >= 1))',
+  'INSERT INTO book_protection VALUES (10,2),(3,1)',
+  'CREATE TABLE IF NOT EXISTS line_divine_name (lineId INTEGER NOT NULL REFERENCES line(id) ON DELETE CASCADE, charStart INTEGER NOT NULL, span INTEGER NOT NULL, PRIMARY KEY (lineId, charStart)) WITHOUT ROWID',
   'INSERT INTO line_divine_name VALUES (2,20,579),(1,0,529),(2,3,439),(1,12,677)',
-  'CREATE TABLE line_note (lineId INTEGER NOT NULL, noteIndex INTEGER NOT NULL, charPos INTEGER NOT NULL, hasMarker INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (lineId, noteIndex)) WITHOUT ROWID',
+  'CREATE TABLE IF NOT EXISTS line_note (lineId INTEGER NOT NULL REFERENCES line(id) ON DELETE CASCADE, noteIndex INTEGER NOT NULL, charPos INTEGER NOT NULL, hasMarker INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (lineId, noteIndex)) WITHOUT ROWID',
   "INSERT INTO line_note VALUES (2,0,5,1,'הערה <i>פנימית</i> א'),(1,1,12,0,'נספח בסוף השורה'),(1,0,3,1,'גוף \"ב\"\nשורה שנייה'),(2,1,9,1,'<b>ב</b> &amp; ג')",
-  'CREATE TABLE line_note_divine_name (lineId INTEGER NOT NULL, noteIndex INTEGER NOT NULL, charStart INTEGER NOT NULL, span INTEGER NOT NULL, PRIMARY KEY (lineId, noteIndex, charStart)) WITHOUT ROWID',
+  'CREATE TABLE IF NOT EXISTS line_note_divine_name (lineId INTEGER NOT NULL, noteIndex INTEGER NOT NULL, charStart INTEGER NOT NULL, span INTEGER NOT NULL, PRIMARY KEY (lineId, noteIndex, charStart), FOREIGN KEY (lineId, noteIndex) REFERENCES line_note(lineId, noteIndex) ON DELETE CASCADE) WITHOUT ROWID',
   'INSERT INTO line_note_divine_name VALUES (2,0,0,529),(1,1,6,677),(1,0,3,439),(2,0,10,579)',
 ];
 
