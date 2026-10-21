@@ -31,7 +31,7 @@ Map<String, dynamic> _asset(String name, int size,
       'size': size,
       'id': name.hashCode.abs(),
       'state': 'uploaded',
-      if (digest != null) 'digest': digest,
+      'digest': ?digest,
     };
 
 void main() {
