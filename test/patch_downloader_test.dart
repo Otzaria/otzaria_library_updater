@@ -151,7 +151,7 @@ void main() {
         patchFile: entry(),
         downloadUrl: 'https://x/p',
         destDir: tmp,
-        onProgress: (_, __) => cancelled = true,
+        onProgress: (_, _) => cancelled = true,
         isCancelled: () => cancelled,
       ),
       throwsA(isA<PatchDownloadCancelled>()),
@@ -464,7 +464,7 @@ void main() {
               expectedSize: big.length,
               expectedSha256: bigHash,
               resumeToken: 'v-1',
-              onProgress: (_, __) {
+              onProgress: (_, _) {
                 if (!cancelOnVerification) cancel = true;
               },
               onVerifyProgress: (done, total) {

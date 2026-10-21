@@ -182,7 +182,7 @@ class LibraryMirrorExporter {
           personal ? _newestFullDbCarrier(eligible, latestEligible) : null;
       final unresolved = {
         ...relevant,
-        if (personalCarrier != null) personalCarrier,
+        ?personalCarrier,
       }.where((r) => _fullDb(r)?.isSplitFullDbManifest ?? false).toList();
       if (unresolved.isEmpty) break;
       _throwIfCancelled(isCancelled);
@@ -612,7 +612,7 @@ class LibraryMirrorExporter {
                 updatedAt: asset.updatedAt,
                 digest: asset.digest,
               ),
-            if (schemaMarkers[entry.key] case final marker?) marker,
+            ?schemaMarkers[entry.key],
           ],
         ),
     ];
@@ -648,7 +648,7 @@ class LibraryMirrorExporter {
       for (final entry in plannedByRelease.entries)
         entry.key: [
           ...entry.value,
-          if (schemaMarkers[entry.key] case final marker?) marker,
+          ?schemaMarkers[entry.key],
         ],
     });
 
@@ -1357,7 +1357,7 @@ class LibraryMirrorExporter {
         assets: [
           for (final asset in release.assets)
             if (!identical(asset, manifestAsset)) asset,
-          if (outcome.asset case final resolved?) resolved,
+          ?outcome.asset,
         ],
       );
     }

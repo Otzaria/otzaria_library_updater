@@ -458,7 +458,7 @@ void main() {
           split: _split(),
           destPath: dest,
           resumeToken: 'v31',
-          onProgress: (_, __) => verifying = true,
+          onProgress: (_, _) => verifying = true,
           isCancelled: () => verifying,
         ),
         throwsA(isA<PatchDownloadCancelled>()),
@@ -504,7 +504,7 @@ void main() {
             split: split,
             destPath: dest,
             resumeToken: 'v31',
-            onProgress: (_, __) => scheduleMicrotask(() => cancelled = true),
+            onProgress: (_, _) => scheduleMicrotask(() => cancelled = true),
             isCancelled: () => cancelled,
           ),
           zoneSpecification: ZoneSpecification(
@@ -547,7 +547,7 @@ void main() {
     test('downloadReleaseAssetToFile: נכס יחיד מאומת לפי ה-digest', () async {
       final downloader = PatchDownloader(
         decompress: (c) async => c,
-        httpClient: MockClient.streaming((_, __) async => http.StreamedResponse(
+        httpClient: MockClient.streaming((_, _) async => http.StreamedResponse(
             Stream.value(_full), 200,
             contentLength: _full.length)),
       );

@@ -1137,7 +1137,7 @@ class PatchDownloader {
       final lines = <String>[
         token,
         if (etag != null || verified != null) etag ?? '',
-        if (verified != null) verified,
+        ?verified,
       ];
       File(sidecarPath).writeAsStringSync(lines.join('\n'), flush: true);
     } catch (error) {

@@ -465,7 +465,7 @@ extension _SegmentedDownload on PatchDownloader {
       {
         'Accept': 'application/octet-stream',
         'Range': 'bytes=$start-$end',
-        if (knownEtag != null) 'If-Range': knownEtag,
+        'If-Range': ?knownEtag,
       },
       abortTrigger: abortTrigger,
     );

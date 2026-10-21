@@ -222,7 +222,7 @@ void main() {
         downloader().downloadToFile(
           url: src,
           destPath: dest,
-          onProgress: (_, __) => cancel = true,
+          onProgress: (_, _) => cancel = true,
           isCancelled: () => cancel,
         ),
         throwsA(isA<PatchDownloadCancelled>()),
