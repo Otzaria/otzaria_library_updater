@@ -13,6 +13,7 @@ jobs:
     env:
       KOTLIN_FIXTURE: seforim-library/generator/common/src/jvmTest/resources/patch_tables_contract.json
       KOTLIN_HASH_FIXTURE: seforim-library/generator/common/src/jvmTest/resources/logical_hash_contract.json
+      KOTLIN_HASH7_FIXTURE: seforim-library/generator/common/src/jvmTest/resources/logical_hash_contract_schema_7.json
     steps:
       - uses: actions/checkout@v7
 
@@ -57,12 +58,18 @@ jobs:
       - name: Verify Kotlin hash fixture exists
         run: test -f "$KOTLIN_HASH_FIXTURE"
 
+      - name: Verify Kotlin schema 7 hash fixture exists
+        run: test -f "$KOTLIN_HASH7_FIXTURE"
+
       # השוואת בתים ישירה בין שני ה-fixtures — בלתי תלויה ב-Dart
       - name: cmp fixtures (byte-identical)
         run: cmp test/patch_tables_contract.json "$KOTLIN_FIXTURE"
 
       - name: cmp hash fixtures (byte-identical)
         run: cmp test/logical_hash_contract.json "$KOTLIN_HASH_FIXTURE"
+
+      - name: cmp schema 7 hash fixtures (byte-identical)
+        run: cmp test/logical_hash_contract_schema_7.json "$KOTLIN_HASH7_FIXTURE"
 
       - uses: dart-lang/setup-dart@v1
 

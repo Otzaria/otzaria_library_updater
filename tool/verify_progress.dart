@@ -21,13 +21,14 @@ void main(List<String> args) {
   }
 
   final order = hashTableOrderForDbFile(dbPath);
+  final rows = hashRowOrderForDbFile(dbPath);
   final db = sqlite3.open(dbPath, mode: OpenMode.readOnly);
 
   var reports = 0;
   var last = 0;
   final sw = Stopwatch()..start();
-  final hash = const LogicalContentHasher().compute(db, tableOrder: order,
-      onProgress: (bytes) {
+  final hash = const LogicalContentHasher()
+      .compute(db, tableOrder: order, rowOrder: rows, onProgress: (bytes) {
     reports++;
     last = bytes;
     if (reports % 20 == 0) {

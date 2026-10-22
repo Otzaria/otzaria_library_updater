@@ -31,6 +31,9 @@ export 'src/models/patch_table_spec.dart'
         kHashTableOrderSchema5,
         kHashTableOrderSchema6,
         kHashTableOrderBySchemaVersion,
+        kHashRowOrder,
+        kHashRowOrderBySchemaVersion,
+        kPkRowOrderSchemaVersion,
         kDefaultConsumerDbSchemaVersion,
         kSupportedDbSchemaVersion,
         kSupportedPatchFormatVersion,
@@ -59,7 +62,7 @@ export 'src/services/local_db_version_reader.dart'
 export 'src/services/local_mirror_library_release_client.dart'
     show LocalMirrorLibraryReleaseClient, LocalMirrorException;
 export 'src/services/logical_content_hasher.dart'
-    show LogicalContentHasher, LogicalContentHashReport;
+    show LogicalContentHasher, LogicalContentHashReport, hashOrderByClause;
 export 'src/services/offline_library_db_recovery_service.dart'
     show OfflineLibraryDbRecoveryService;
 export 'src/services/offline_library_update_discovery.dart'
@@ -73,6 +76,7 @@ export 'src/services/patch_applier.dart'
         PatchApplyException,
         PatchHashMismatchStage,
         hashTableOrderForSchemaVersion,
+        hashRowOrderForSchemaVersion,
         kBooksTouchedTables,
         kDefaultApplyChunkSize;
 export 'src/services/patch_downloader.dart'

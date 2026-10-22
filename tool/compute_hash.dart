@@ -8,10 +8,12 @@ import 'src/db_hash_order.dart';
 /// כלי עזר: מחשב את ה-logical content hash של DB נתון ומדפיס אותו.
 void main(List<String> args) {
   final order = hashTableOrderForDbFile(args.single);
+  final rows = hashRowOrderForDbFile(args.single);
   final db = sqlite3.sqlite3.open(args.single, mode: sqlite3.OpenMode.readOnly);
   try {
     final sw = Stopwatch()..start();
-    final hash = const LogicalContentHasher().compute(db, tableOrder: order);
+    final hash = const LogicalContentHasher()
+        .compute(db, tableOrder: order, rowOrder: rows);
     stdout.writeln('$hash  ${args.single}  (${sw.elapsed})');
   } finally {
     db.close();

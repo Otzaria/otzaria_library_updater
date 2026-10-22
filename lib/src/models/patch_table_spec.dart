@@ -68,8 +68,9 @@ const List<PatchTableSpec> kPatchTablesInFkOrder = [
   PatchTableSpec('default_commentator', ['bookId', 'commentatorBookId'],
       updatable: true),
   PatchTableSpec('default_targum', ['bookId', 'targumBookId'], updatable: true),
-  // סכמה 7. באנר והגבלת מו"ל לספר, שמות קודש מאומתים והערות שוליים לשורה,
-  // ושמות הקודש שבגוף ההערות.
+  // סכמה 7. טקסטי באנר, באנר והגבלת מו"ל לספר, שמות קודש מאומתים והערות
+  // שוליים לשורה, ושמות הקודש שבגוף ההערות.
+  PatchTableSpec('banner', ['id'], updatable: true),
   PatchTableSpec('book_banner', ['bookId'], updatable: true),
   PatchTableSpec('book_protection', ['bookId'], updatable: true),
   PatchTableSpec('line_divine_name', ['lineId', 'charStart'], updatable: true),
@@ -264,9 +265,9 @@ const List<String> kHashTableOrderSchema6 = [
   'schema_meta',
 ];
 
-/// סדר ה-hash של סכמה 7 (44 טבלאות): סדר סכמה 6, ולפני `schema_meta` חמש
-/// הטבלאות `book_banner`, `book_protection`, `line_divine_name`, `line_note`
-/// ו-`line_note_divine_name`.
+/// סדר ה-hash של סכמה 7 (45 טבלאות): סדר סכמה 6, ולפני `schema_meta` שש
+/// הטבלאות `banner`, `book_banner`, `book_protection`, `line_divine_name`,
+/// `line_note` ו-`line_note_divine_name`.
 const List<String> kHashTableOrderSchema7 = [
   'source',
   'author',
@@ -306,6 +307,7 @@ const List<String> kHashTableOrderSchema7 = [
   'line_alt_toc',
   'default_commentator',
   'default_targum',
+  'banner',
   'book_banner',
   'book_protection',
   'line_divine_name',
@@ -365,6 +367,23 @@ const Map<int, List<String>> kHashTableOrderBySchemaVersion = {
   6: kHashTableOrderSchema6,
   7: kHashTableOrderSchema7,
 };
+
+/// הסכמה הראשונה שבה שורות כל טבלה נכנסות ל-hash לפי המפתח הראשי שלה, ישר
+/// מאינדקס המפתח ובלי מיון זמני. קודם לה: `id`, ואם אין — כל העמודות.
+const int kPkRowOrderSchemaVersion = 7;
+
+/// סדר השורות ב-hash של סכמה 7: המפתח הראשי של כל טבלה ב-[kPatchTablesInFkOrder].
+/// סכמה עתידית שתשנה מפתח ראשי חייבת להקפיא כאן עותק.
+final Map<String, List<String>> kHashRowOrderSchema7 = Map.unmodifiable({
+  for (final table in kPatchTablesInFkOrder) table.name: table.primaryKey,
+});
+
+/// סדר השורות הנוכחי (סכמה 7), לצד [kHashTableOrder].
+final Map<String, List<String>> kHashRowOrder = kHashRowOrderSchema7;
+
+/// סדרי השורות לפי גרסת סכמה, מ-[kPkRowOrderSchemaVersion] ואילך.
+final Map<int, Map<String, List<String>>> kHashRowOrderBySchemaVersion =
+    Map.unmodifiable({7: kHashRowOrderSchema7});
 
 /// האם קיים סדר hash לסכמה — כלומר האם אפשר להחיל patch שנוגע בה.
 bool isSupportedSchemaVersion(int schemaVersion) =>

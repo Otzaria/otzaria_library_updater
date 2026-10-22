@@ -17,19 +17,21 @@
 - `LibraryMirrorExporter`: מקבל `maxConnections`/`segmentThresholdBytes`; סך
   החיבורים בייצוא עד `maxTotalConnections` (8), מחולק שווה בין משבצות ה-scheduler.
   בדיקת המקום הפנוי כוללת את הטווח הגדול ביותר של כל קובץ שיורד בטווחים.
-- סכמת DB 7: `book_banner`, `book_protection`, `line_divine_name`, `line_note`
-  (הערות השוליים של השורה: `lineId`, `noteIndex`, `charPos`, `marker`, `body`)
+- סכמת DB 7: `banner` (טקסטי הבאנר לפי מזהה קבוע), `book_banner` (`bookId` →
+  `bannerId`), `book_protection`, `line_divine_name`, `line_note`
+  (הערות השוליים של השורה: `lineId`, `noteIndex`, `charPos`, `hasMarker`, `body`)
   ו-`line_note_divine_name` (שמות הקודש בגוף ההערה, FK מורכב ל-`line_note`) הן
   טבלאות חוזה רגילות. `kSupportedDbSchemaVersion` = 7; `kPatchTablesInFkOrder`
-  ו-`kHashTableOrderSchema7` (44 טבלאות) מוסיפים את חמשתן, בסדר הזה, מיד לפני
+  ו-`kHashTableOrderSchema7` (45 טבלאות) מוסיפים את ששתן, בסדר הזה, מיד לפני
   `schema_meta`; `hashTableOrderForSchemaVersion(7)` נתמך, והסדרים 1–6 קפואים.
   `kDefaultConsumerDbSchemaVersion` נשאר 5 — צרכן שקורא סכמה 7 מצהיר על כך.
-- patch 6→7 הוא דלתא רגילה בפורמט 4: ה-`CREATE TABLE IF NOT EXISTS` של חמש
+- patch 6→7 הוא דלתא רגילה בפורמט 4: ה-`CREATE TABLE IF NOT EXISTS` של שש
   הטבלאות ב-`migrations` ואחריהן upserts. ה-hash לפני ההחלה בסדר סכמה 6 ואחריה
   בסדר סכמה 7. מחיקת `line`/`book` מתגלגלת אליהן ב-`ON DELETE CASCADE`, ומחיקת
   `line_note` מתגלגלת ל-`line_note_divine_name`.
 - `line_note` ממופה ל-`booksTouched` דרך `line`; שינוי בטבלאות התצוגה
-  (`book_banner`, `book_protection`, `line_divine_name`, `line_note_divine_name`)
+  (`banner`, `book_banner`, `book_protection`, `line_divine_name`,
+  `line_note_divine_name`)
   לבדן אינו מסמן `hasChangesOutsideBooksTouched`.
 - `patch_tables_contract.json` בסכמה 7, בלי הסעיף `optionalTables`.
 - סכמת DB 7: `book.contentHash INTEGER NOT NULL DEFAULT 0` — טביעה אטומה של 64 ביט
@@ -46,6 +48,13 @@
 
 ### Hash לוגי
 
+- **שינוי API ו-hash:** מסכמה 7 השורות של כל טבלה נכתבות לזרם ה-hash לפי
+  המפתח הראשי שמוצהר ב-`kPatchTablesInFkOrder`, כמו `LogicalContentHasher.kt`;
+  סכמות 1–6 שומרות על הכלל הקפוא (`id`, אחרת כל העמודות).
+  `LogicalContentHasher.compute`/`computeReport` מקבלים `rowOrder` חובה (`null`
+  רק לסכמה 6 ומטה), ש-`hashRowOrderForSchemaVersion` בוחר לפי סכמת ה-DB.
+  ייצואים חדשים: `kHashRowOrder`, `kHashRowOrderBySchemaVersion`,
+  `kPkRowOrderSchemaVersion`, `hashOrderByClause`, `hashRowOrderForSchemaVersion`.
 - **שינוי hash:** ערכי REAL נכתבים לזרם ה-hash בפורמט `Double.toString` של
   Java (`1.0E-4`, `1.0E7`), כמו `LogicalContentHasher.kt`. עד עכשיו Dart כתב
   `0.0001`/`10000000.0`, וה-hash לא תאם ליצרן בכל טבלה עם ערך כזה.

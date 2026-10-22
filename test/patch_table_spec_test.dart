@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:seforim_library_updater/src/models/patch_table_spec.dart';
 import 'package:seforim_library_updater/src/services/patch_applier.dart';
 import 'package:test/test.dart';
@@ -9,9 +12,9 @@ void main() {
   final fkNames = kPatchTablesInFkOrder.map((t) => t.name).toList();
 
   group('kPatchTablesInFkOrder', () {
-    test('44 טבלאות, ללא כפילויות', () {
-      expect(kPatchTablesInFkOrder, hasLength(44));
-      expect(fkNames.toSet(), hasLength(44));
+    test('45 טבלאות, ללא כפילויות', () {
+      expect(kPatchTablesInFkOrder, hasLength(45));
+      expect(fkNames.toSet(), hasLength(45));
     });
 
     test('לכל טבלה יש מפתח ראשי לא ריק', () {
@@ -60,8 +63,8 @@ void main() {
   });
 
   group('kHashTableOrder', () {
-    test('44 טבלאות, אותה קבוצה כמו סדר ה-FK', () {
-      expect(kHashTableOrder, hasLength(44));
+    test('45 טבלאות, אותה קבוצה כמו סדר ה-FK', () {
+      expect(kHashTableOrder, hasLength(45));
       expect(kHashTableOrder.toSet(), fkNames.toSet());
     });
 
@@ -141,6 +144,42 @@ void main() {
       // 0 אינה סכמה, ו-8 היא סכמה עתידית שאין לנו סדר hash לה.
       expect(isSupportedSchemaVersion(0), isFalse);
       expect(isSupportedSchemaVersion(8), isFalse);
+    });
+  });
+
+  // מסכמה 7 השורות נגבבות לפי המפתח הראשי — ישר מהאינדקס, בלי מיון זמני.
+  group('kHashRowOrderBySchemaVersion', () {
+    test('לכל סכמה נתמכת מ-7 ואילך יש סדר שורות, ולקודמות אין', () {
+      for (final schema in kHashTableOrderBySchemaVersion.keys) {
+        final rows = hashRowOrderForSchemaVersion(schema);
+        if (schema < kPkRowOrderSchemaVersion) {
+          expect(rows, isNull, reason: '$schema');
+        } else {
+          expect(rows!.keys.toSet(),
+              kHashTableOrderBySchemaVersion[schema]!.toSet(),
+              reason: '$schema');
+        }
+      }
+      expect(() => hashRowOrderForSchemaVersion(8),
+          throwsA(isA<PatchApplyException>()));
+    });
+
+    test('המפות אינן ניתנות לשינוי', () {
+      expect(() => kHashRowOrderSchema7['x'] = ['y'], throwsUnsupportedError);
+      expect(() => kHashRowOrderBySchemaVersion[8] = kHashRowOrderSchema7,
+          throwsUnsupportedError);
+    });
+
+    // patch_tables_contract.json זהה בתים לצד ה-Kotlin: ה-PK שם הוא סדר השורות.
+    test('סדר השורות של סכמה 7 = ה-PK שבחוזה טבלאות ה-patch', () {
+      final contract =
+          jsonDecode(File('test/patch_tables_contract.json').readAsStringSync())
+              as Map<String, dynamic>;
+      expect(contract['schemaVersion'], 7);
+      expect(kHashRowOrderSchema7, {
+        for (final t in (contract['fkOrder'] as List).cast<Map>())
+          t['table'] as String: (t['pk'] as List).cast<String>(),
+      });
     });
   });
 

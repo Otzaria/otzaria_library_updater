@@ -18,7 +18,7 @@ String hashDbAtPath(String dbPath) {
   final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
   try {
     return const LogicalContentHasher()
-        .compute(db, tableOrder: kHashTableOrderSchema2);
+        .compute(db, tableOrder: kHashTableOrderSchema2, rowOrder: null);
   } finally {
     db.close();
   }

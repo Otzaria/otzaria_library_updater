@@ -13,7 +13,8 @@ const _hasher = LogicalContentHasher();
 /// מימוש-עד עצמאי של פורמט הבתים המתועד, בלי חוצץ ובלי הזרמה. משמש לאימות
 /// שה-[LogicalContentHasher] המקובץ מייצר בדיוק את אותו זרם — כולל סביב גבול
 /// החוצץ (1MB), שם באג היה משנה סדר בתים בלי לשנות אף hash קטן.
-List<int> referenceStream(sqlite3.Database db, List<String> tableOrder) {
+List<int> referenceStream(sqlite3.Database db, List<String> tableOrder,
+    [Map<String, List<String>>? rowOrder]) {
   final out = <int>[];
   for (final table in tableOrder) {
     out.addAll(utf8.encode(' table:$table '));
@@ -27,8 +28,11 @@ List<int> referenceStream(sqlite3.Database db, List<String> tableOrder) {
         .map((c) => 'typeof("$c"),CASE WHEN typeof("$c")=\'text\' '
             'THEN CAST("$c" AS BLOB) ELSE "$c" END')
         .join(',');
-    final orderBy =
-        cols.contains('id') ? 'id' : cols.map((c) => '"$c"').join(',');
+    final orderBy = rowOrder != null
+        ? rowOrder[table]!.map((c) => '"$c"').join(',')
+        : cols.contains('id')
+            ? 'id'
+            : cols.map((c) => '"$c"').join(',');
     for (final row
         in db.select('SELECT $selectCols FROM "$table" ORDER BY $orderBy')) {
       final values = row.values;
@@ -73,9 +77,11 @@ void main() {
 
       addTearDown(() => FastSha256.useFallbackOnly = false);
       FastSha256.useFallbackOnly = false;
-      final native = _hasher.compute(db, tableOrder: kHashTableOrder);
+      final native = _hasher.compute(db,
+          tableOrder: kHashTableOrder, rowOrder: kHashRowOrder);
       FastSha256.useFallbackOnly = true;
-      final fallback = _hasher.compute(db, tableOrder: kHashTableOrder);
+      final fallback = _hasher.compute(db,
+          tableOrder: kHashTableOrder, rowOrder: kHashRowOrder);
       expect(native, fallback);
       db.close();
     });
@@ -86,7 +92,7 @@ void main() {
     test('golden: DB ללא אף טבלה — רק ה-markers של 34 הטבלאות', () {
       final db = sqlite3.sqlite3.openInMemory();
       expect(
-        _hasher.compute(db, tableOrder: kHashTableOrderSchema2),
+        _hasher.compute(db, tableOrder: kHashTableOrderSchema2, rowOrder: null),
         'a90dcaf32e725f36c18bc4bfaa503768777cea28267328ec65d4cf2b00c1b20f',
       );
       db.close();
@@ -96,7 +102,7 @@ void main() {
       final db = sqlite3.sqlite3.openInMemory();
       db.execute('CREATE TABLE source (id INTEGER PRIMARY KEY, name TEXT)');
       expect(
-        _hasher.compute(db, tableOrder: kHashTableOrderSchema2),
+        _hasher.compute(db, tableOrder: kHashTableOrderSchema2, rowOrder: null),
         'b2ff6c3838f06cff468875141e36898b788ac42a66c9ff4273e7ce59635bd675',
       );
       db.close();
@@ -108,7 +114,7 @@ void main() {
       db.execute('CREATE TABLE source (id INTEGER PRIMARY KEY, name TEXT)');
       db.execute('INSERT INTO source VALUES (1,?),(2,?)', ['﻿aleph', 'aleph']);
       expect(
-        _hasher.compute(db, tableOrder: kHashTableOrderSchema2),
+        _hasher.compute(db, tableOrder: kHashTableOrderSchema2, rowOrder: null),
         'f23214051daa700264659215f40bf88ca2b4c0905426034ff2d83e8b265b25fa',
       );
       db.close();
@@ -127,7 +133,7 @@ void main() {
       db.execute('INSERT INTO source VALUES (2,?,?,?,?)',
           ['﻿רש״י', -0.0, <int>[], '']);
       expect(
-        _hasher.compute(db, tableOrder: kHashTableOrderSchema2),
+        _hasher.compute(db, tableOrder: kHashTableOrderSchema2, rowOrder: null),
         '70723509e74ff527af77abb47c28c68b1f18d14375ff3d598882921fa4b4336b',
       );
       db.close();
@@ -151,8 +157,11 @@ void main() {
           '(ancestorId INTEGER, descendantId INTEGER)');
       db.execute('INSERT INTO category_closure VALUES (2,3),(1,2),(1,3)');
       expect(
-        _hasher.compute(db, tableOrder: kHashTableOrder),
-        sha256.convert(referenceStream(db, kHashTableOrder)).toString(),
+        _hasher.compute(db,
+            tableOrder: kHashTableOrder, rowOrder: kHashRowOrder),
+        sha256
+            .convert(referenceStream(db, kHashTableOrder, kHashRowOrder))
+            .toString(),
       );
       db.close();
     });
@@ -166,8 +175,11 @@ void main() {
       db.execute('INSERT INTO source VALUES (2,?)', ['א' * 1200000]);
       db.execute('INSERT INTO source VALUES (3,?)', ['אחרי']);
       expect(
-        _hasher.compute(db, tableOrder: kHashTableOrder),
-        sha256.convert(referenceStream(db, kHashTableOrder)).toString(),
+        _hasher.compute(db,
+            tableOrder: kHashTableOrder, rowOrder: kHashRowOrder),
+        sha256
+            .convert(referenceStream(db, kHashTableOrder, kHashRowOrder))
+            .toString(),
       );
       db.close();
     });
@@ -184,8 +196,11 @@ void main() {
         db.execute('INSERT INTO source VALUES (?,?)', [i, 'x' * len]);
       }
       expect(
-        _hasher.compute(db, tableOrder: kHashTableOrder),
-        sha256.convert(referenceStream(db, kHashTableOrder)).toString(),
+        _hasher.compute(db,
+            tableOrder: kHashTableOrder, rowOrder: kHashRowOrder),
+        sha256
+            .convert(referenceStream(db, kHashTableOrder, kHashRowOrder))
+            .toString(),
       );
       db.close();
     });
@@ -202,7 +217,9 @@ void main() {
       final reference = referenceStream(db, const ['source']);
       expect(
         _hasher.compute(db,
-            tableOrder: const ['source'], onProgress: reports.add),
+            tableOrder: const ['source'],
+            rowOrder: null,
+            onProgress: reports.add),
         sha256.convert(reference).toString(),
       );
       expect(reports.last, reference.length);
@@ -218,7 +235,7 @@ void main() {
         db.execute('INSERT INTO source VALUES (?,?)',
             ['x' * pad, 9223372036854775807]);
         expect(
-          _hasher.compute(db, tableOrder: const ['source']),
+          _hasher.compute(db, tableOrder: const ['source'], rowOrder: null),
           sha256.convert(referenceStream(db, const ['source'])).toString(),
           reason: 'pad=$pad',
         );
@@ -233,9 +250,13 @@ void main() {
         db.execute('INSERT INTO source VALUES (?,?)', [i, 'y' * 900000]);
       }
       final reports = <int>[];
-      _hasher.compute(db, tableOrder: kHashTableOrder, onProgress: reports.add);
+      _hasher.compute(db,
+          tableOrder: kHashTableOrder,
+          rowOrder: kHashRowOrder,
+          onProgress: reports.add);
       expect(reports, isNotEmpty);
-      expect(reports.last, referenceStream(db, kHashTableOrder).length);
+      expect(reports.last,
+          referenceStream(db, kHashTableOrder, kHashRowOrder).length);
       expect(reports, orderedEquals(reports.toList()..sort()));
       db.close();
     }, timeout: const Timeout(Duration(minutes: 2)));
@@ -275,7 +296,7 @@ void main() {
       test('טבלה בת-$n עמודות — זהה למימוש-העד', () {
         final db = wide(n);
         expect(
-          _hasher.compute(db, tableOrder: kHashTableOrder),
+          _hasher.compute(db, tableOrder: kHashTableOrder, rowOrder: null),
           sha256.convert(referenceStream(db, kHashTableOrder)).toString(),
         );
         db.close();
@@ -292,7 +313,7 @@ void main() {
         ..sort();
       expect(cols.take(3), ['c0', 'c1', 'c10']);
       expect(
-        _hasher.compute(db, tableOrder: kHashTableOrder),
+        _hasher.compute(db, tableOrder: kHashTableOrder, rowOrder: null),
         sha256.convert(referenceStream(db, kHashTableOrder)).toString(),
       );
       db.close();
@@ -315,7 +336,7 @@ void main() {
         }
       }
       expect(
-        _hasher.compute(db, tableOrder: kHashTableOrder),
+        _hasher.compute(db, tableOrder: kHashTableOrder, rowOrder: null),
         sha256.convert(referenceStream(db, kHashTableOrder)).toString(),
       );
       db.close();
@@ -334,7 +355,7 @@ void main() {
       db.execute('INSERT INTO source VALUES (2,?,?,?,?)',
           [1.5, -0.0, double.infinity, double.nan]);
       expect(
-        _hasher.compute(db, tableOrder: kHashTableOrder),
+        _hasher.compute(db, tableOrder: kHashTableOrder, rowOrder: null),
         sha256.convert(referenceStream(db, kHashTableOrder)).toString(),
       );
       db.close();
@@ -361,8 +382,11 @@ void main() {
         'CREATE TABLE source (name TEXT, id INTEGER PRIMARY KEY)',
         ["INSERT INTO source (id,name) VALUES (1,'aleph')"],
       );
-      expect(_hasher.compute(a, tableOrder: kHashTableOrder),
-          _hasher.compute(b, tableOrder: kHashTableOrder));
+      expect(
+          _hasher.compute(a,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder),
+          _hasher.compute(b,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder));
       a.close();
       b.close();
     });
@@ -376,8 +400,11 @@ void main() {
         'CREATE TABLE source (id INTEGER PRIMARY KEY, title TEXT)',
         ["INSERT INTO source VALUES (1,'aleph')"],
       );
-      expect(_hasher.compute(a, tableOrder: kHashTableOrder),
-          isNot(_hasher.compute(b, tableOrder: kHashTableOrder)));
+      expect(
+          _hasher.compute(a,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder),
+          isNot(_hasher.compute(b,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder)));
       a.close();
       b.close();
     });
@@ -392,8 +419,11 @@ void main() {
         'CREATE TABLE category_closure (ancestorId INTEGER, descendantId INTEGER)',
         ['INSERT INTO category_closure VALUES (2,3),(1,3),(1,2)'],
       );
-      expect(_hasher.compute(a, tableOrder: kHashTableOrder),
-          _hasher.compute(b, tableOrder: kHashTableOrder));
+      expect(
+          _hasher.compute(a,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder),
+          _hasher.compute(b,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder));
       a.close();
       b.close();
     });
@@ -403,8 +433,11 @@ void main() {
           ['INSERT INTO source VALUES (1,NULL)']);
       final b = build('CREATE TABLE source (id INTEGER PRIMARY KEY, name TEXT)',
           ["INSERT INTO source VALUES (1,'')"]);
-      expect(_hasher.compute(a, tableOrder: kHashTableOrder),
-          isNot(_hasher.compute(b, tableOrder: kHashTableOrder)));
+      expect(
+          _hasher.compute(a,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder),
+          isNot(_hasher.compute(b,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder)));
       a.close();
       b.close();
     });
@@ -415,8 +448,11 @@ void main() {
           ['INSERT INTO source VALUES (1,1)']);
       final b = build('CREATE TABLE source (id INTEGER PRIMARY KEY, v)',
           ['INSERT INTO source VALUES (1,1.0)']);
-      expect(_hasher.compute(a, tableOrder: kHashTableOrder),
-          isNot(_hasher.compute(b, tableOrder: kHashTableOrder)));
+      expect(
+          _hasher.compute(a,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder),
+          isNot(_hasher.compute(b,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder)));
       a.close();
       b.close();
     });
@@ -429,8 +465,11 @@ void main() {
       b.execute('INSERT INTO source VALUES (1,?)', [
         [0x41, 0x42]
       ]);
-      expect(_hasher.compute(a, tableOrder: kHashTableOrder),
-          isNot(_hasher.compute(b, tableOrder: kHashTableOrder)));
+      expect(
+          _hasher.compute(a,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder),
+          isNot(_hasher.compute(b,
+              tableOrder: kHashTableOrder, rowOrder: kHashRowOrder)));
       a.close();
       b.close();
     });
@@ -440,8 +479,9 @@ void main() {
       final db = build('CREATE TABLE source (id INTEGER PRIMARY KEY)',
           ['INSERT INTO source VALUES (1)']);
       expect(
-        _hasher.compute(db, tableOrder: const ['source']),
-        isNot(_hasher.compute(db, tableOrder: const ['source', 'author'])),
+        _hasher.compute(db, tableOrder: const ['source'], rowOrder: null),
+        isNot(_hasher.compute(db,
+            tableOrder: const ['source', 'author'], rowOrder: null)),
       );
       db.close();
     });
@@ -454,8 +494,10 @@ void main() {
       db.execute('CREATE TABLE author (id INTEGER PRIMARY KEY, name TEXT)');
       db.execute("INSERT INTO author VALUES (1,'b')");
       expect(
-        _hasher.compute(db, tableOrder: const ['source', 'author']),
-        isNot(_hasher.compute(db, tableOrder: const ['author', 'source'])),
+        _hasher.compute(db,
+            tableOrder: const ['source', 'author'], rowOrder: null),
+        isNot(_hasher.compute(db,
+            tableOrder: const ['author', 'source'], rowOrder: null)),
       );
       db.close();
     });
@@ -466,8 +508,9 @@ void main() {
         ['INSERT INTO book_base_text VALUES (1,2)'],
       );
       expect(
-        _hasher.compute(db, tableOrder: kHashTableOrderSchema2),
-        isNot(_hasher.compute(db, tableOrder: kHashTableOrderSchema1)),
+        _hasher.compute(db, tableOrder: kHashTableOrderSchema2, rowOrder: null),
+        isNot(_hasher.compute(db,
+            tableOrder: kHashTableOrderSchema1, rowOrder: null)),
       );
       db.close();
     });
@@ -543,7 +586,7 @@ void main() {
         0xFF,
       ];
       expect(
-        _hasher.compute(db, tableOrder: const ['t']),
+        _hasher.compute(db, tableOrder: const ['t'], rowOrder: null),
         sha256.convert(expected).toString(),
       );
       db.close();

@@ -16,10 +16,11 @@ const _applier = PatchApplier();
 String _hashOf(
   String dbPath, {
   List<String> tableOrder = kHashTableOrderSchema2,
+  Map<String, List<String>>? rowOrder,
 }) {
   final db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
   try {
-    return _hasher.compute(db, tableOrder: tableOrder);
+    return _hasher.compute(db, tableOrder: tableOrder, rowOrder: rowOrder);
   } finally {
     db.close();
   }
@@ -662,8 +663,10 @@ void main() {
           fromSchema: 4,
           toSchema: 5,
           patchFormat: 4,
-          fromHash: _hashOf(base, tableOrder: kHashTableOrderSchema4),
-          toHash: _hashOf(expected, tableOrder: kHashTableOrderSchema4),
+          fromHash:
+              _hashOf(base, tableOrder: kHashTableOrderSchema4, rowOrder: null),
+          toHash: _hashOf(expected,
+              tableOrder: kHashTableOrderSchema4, rowOrder: null),
         ),
       );
 

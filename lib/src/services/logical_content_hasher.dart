@@ -16,7 +16,8 @@ import '../hashing/fast_sha256_sink.dart';
 ///   ראו `hashTableOrderForSchemaVersion`) נכתב הקידומת `" table:<name> "` —
 ///   תמיד, גם אם הטבלה אינה קיימת.
 /// * אם הטבלה קיימת: `"cols:<c1,c2,...>"` (עמודות ממוינות אלפביתית) ואז בית 0x00.
-/// * השורות נקראות לפי `ORDER BY id` (אם יש עמודת id) או לפי כל העמודות.
+/// * השורות נקראות לפי [hashOrderByClause]: מסכמה 7 — המפתח הראשי המוצהר
+///   ([rowOrder]); קודם לה — `ORDER BY id` (אם יש עמודת id) או כל העמודות.
 /// * לכל תא: בית-סוג ואז הנתונים, ואז מפריד יחידה 0x1F.
 ///   null=0, blob=1+bytes, מספר=2+toString().utf8, טקסט=3+toString().utf8;
 ///   REAL בפורמט `Double.toString` של Java ([javaDoubleToString]).
@@ -47,11 +48,15 @@ class LogicalContentHasher {
   /// ~16MB), למד התקדמות במהלך האימות הארוך.
   /// [tableOrder] — סדר הטבלאות לפי גרסת הסכמה של ה-DB. אין ברירת מחדל:
   /// הסדר של הסכמה הנוכחית נותן hash שגוי על DB בסכמה ישנה.
+  /// [rowOrder] — סדר השורות של אותה סכמה (`hashRowOrderForSchemaVersion`);
+  /// null רק לסכמה ≤6. גם לו אין ברירת מחדל, מאותה סיבה.
   String compute(sqlite3.Database db,
           {required List<String> tableOrder,
+          required Map<String, List<String>>? rowOrder,
           void Function(int bytesHashed)? onProgress}) =>
       _compute(db,
               tableOrder: tableOrder,
+              rowOrder: rowOrder,
               onProgress: onProgress,
               includeTableHashes: false)
           .wholeHash!;
@@ -63,10 +68,12 @@ class LogicalContentHasher {
   /// ו-[LogicalContentHashReport.wholeHash] יהיה null.
   LogicalContentHashReport computeReport(sqlite3.Database db,
           {required List<String> tableOrder,
+          required Map<String, List<String>>? rowOrder,
           Set<String>? only,
           void Function(int bytesHashed)? onProgress}) =>
       _compute(db,
           tableOrder: tableOrder,
+          rowOrder: rowOrder,
           only: only,
           onProgress: onProgress,
           includeTableHashes: true);
@@ -75,10 +82,21 @@ class LogicalContentHasher {
   /// hash לכל טבלה מחושב רק דרך [computeReport], שבו הוא נדרש בפועל.
   LogicalContentHashReport _compute(sqlite3.Database db,
       {required List<String> tableOrder,
+      required Map<String, List<String>>? rowOrder,
       required bool includeTableHashes,
       Set<String>? only,
       void Function(int bytesHashed)? onProgress}) {
     assert(includeTableHashes || only == null);
+    if (rowOrder != null) {
+      final undeclared = [
+        for (final t in tableOrder)
+          if (!rowOrder.containsKey(t)) t
+      ];
+      if (undeclared.isNotEmpty) {
+        throw ArgumentError.value(
+            undeclared, 'rowOrder', 'אין סדר שורות לטבלאות');
+      }
+    }
     final wholeDigest = only == null ? Sha256DigestCollector() : null;
     final wholeSink =
         wholeDigest == null ? null : FastSha256.start(wholeDigest);
@@ -104,8 +122,7 @@ class LogicalContentHasher {
           final masks = _maskExpressions(cols);
           final selectCols =
               [...masks, ...cols.map(_valueExpression)].join(',');
-          final orderBy =
-              cols.contains('id') ? 'id' : cols.map((c) => '"$c"').join(',');
+          final orderBy = hashOrderByClause(table, cols, rowOrder);
           final stmt =
               db.prepare('SELECT $selectCols FROM "$table" ORDER BY $orderBy');
           try {
@@ -208,6 +225,21 @@ class LogicalContentHasher {
     }
     out.addByte(_unitSeparator);
   }
+}
+
+/// ה-ORDER BY של [table] ב-hash: עמודות [rowOrder] שלה, וכש-null — הכלל הקפוא
+/// של סכמה ≤6: `id`, ואם אין — כל [cols] (ממוינות). זהה ל-`LogicalContentHasher.kt`.
+String hashOrderByClause(
+    String table, List<String> cols, Map<String, List<String>>? rowOrder) {
+  if (rowOrder == null) {
+    return cols.contains('id') ? 'id' : cols.map((c) => '"$c"').join(',');
+  }
+  final pk = rowOrder[table]!;
+  // כמו בצד ה-Kotlin: עמודה חסרה נכשלת בקול, לא נקראת כמחרוזת קבועה.
+  if (!pk.every(cols.contains)) {
+    throw ArgumentError.value(pk, 'rowOrder[$table]', 'אינן בעמודות $cols');
+  }
+  return pk.map((c) => '"$c"').join(',');
 }
 
 /// `Double.toString` של Java — מה ש-`LogicalContentHasher.kt` כותב ל-REAL.
