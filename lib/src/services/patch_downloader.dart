@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
+import 'package:meta/meta.dart';
 import 'package:path/path.dart' as p;
 import 'package:seforim_library_updater/src/sqlite/sqlite3_api.dart' as sqlite3;
 
@@ -52,6 +53,11 @@ class PatchDownloader {
   /// `IOSink.add` אינו מפעיל לחץ-נגד; בלי flush תקופתי ההפרש בין רשת מהירה
   /// ליעד איטי (כונן נייד) נערם ב-RAM.
   static const int _writeBufferBytes = 4 << 20;
+
+  /// גודל הקריאה באימות sha256 של קובץ; גוש של 64KB מ-`openRead` הוא סבב
+  /// async והקצאה לכל גוש, ובקובץ של כמה GB זה ניכר.
+  @visibleForTesting
+  static const int fileHashReadBytes = 1 << 20;
 
   final http.Client _httpClient;
   final bool _ownsClient;
@@ -1588,19 +1594,23 @@ Future<String> _hashFileSha256(
   void Function(int verified, int total)? onProgress,
 ]) async {
   const reportEvery = 4 << 20;
-  final file = File(path);
-  final total = onProgress == null ? 0 : await file.length();
+  final total = onProgress == null ? 0 : await File(path).length();
+  final buffer = Uint8List(PatchDownloader.fileHashReadBytes);
   final digestSink = Sha256DigestCollector();
   final input = FastSha256.start(digestSink);
+  RandomAccessFile? file;
   try {
+    file = await File(path).open();
     var verified = 0;
     var lastReported = 0;
-    await for (final chunk in file.openRead()) {
+    for (var read = await file.readInto(buffer);
+        read > 0;
+        read = await file.readInto(buffer)) {
       if (isCancelled != null && isCancelled()) {
         throw const PatchDownloadCancelled();
       }
-      input.add(chunk);
-      verified += chunk.length;
+      input.addSlice(buffer, 0, read, false);
+      verified += read;
       if (onProgress != null &&
           (verified - lastReported >= reportEvery || verified == total)) {
         lastReported = verified;
@@ -1610,6 +1620,7 @@ Future<String> _hashFileSha256(
     input.close();
   } finally {
     input.dispose();
+    await file?.close();
   }
   return digestSink.value.toString();
 }
