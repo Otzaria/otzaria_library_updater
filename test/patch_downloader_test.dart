@@ -1784,10 +1784,10 @@ void main() {
 
     // finding 1: כשל flush/close במסלול ההצלחה חייב להיכשל (לא הצלחה שקטה) —
     // קובץ שאורכו מלא אך תוכנו לא נכתב לדיסק היה עובר alreadyComplete בריצה
-    // הבאה. תיקיה במקום הקובץ מכשילה את openWrite בסגירה בצורה דטרמיניסטית.
+    // הבאה. תיקיה במקום הקובץ מכשילה את הכתיבה בצורה דטרמיניסטית.
     test('כשל כתיבה לדיסק במסלול ההצלחה → נכשל, קובץ הצד נמחק', () async {
       final dest = '${tmp.path}/seforim.db.zst';
-      Directory(dest).createSync(); // openWrite ייכשל ב-flush/close
+      Directory(dest).createSync(); // open ייכשל על תיקייה
       final downloader = downloaderThatCaptures(
         [],
         handler: (req) async => http.StreamedResponse(
