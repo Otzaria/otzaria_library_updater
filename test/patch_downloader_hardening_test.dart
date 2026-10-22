@@ -139,11 +139,10 @@ void main() {
           decompress: (c) async => uncompressed,
         );
 
-    // הכתיבה לדיסק נעצרת לצורך flush כל כמה מגה־בייטים (לחץ-נגד מול כונן
-    // איטי). הבדיקה מוודאת שהחצייה של הגבול הזה אינה מאבדת או מערבבת בייטים.
-    test('גוף שחוצה את גבול ה-flush נכתב שלם ובסדר הנכון', () async {
+    // כל צ'אנק נכתב לפני שהבא נקרא (לחץ-נגד מול כונן איטי); גוף רב-צ'אנקים
+    // חייב להגיע שלם ובסדר.
+    test('גוף גדול בצ׳אנקים רבים נכתב שלם ובסדר הנכון', () async {
       final dest = '${tmp.path}/seforim.db.zst';
-      // 12MB בצ׳אנקים של 1MB — שלוש חציות של גבול ה-4MB.
       const chunkSize = 1 << 20;
       const chunkCount = 12;
       final body = Uint8List(chunkSize * chunkCount);

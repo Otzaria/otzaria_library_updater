@@ -8,7 +8,7 @@ class DownloadScheduler {
   DownloadScheduler({int maxConcurrent = defaultMaxConcurrent})
       : maxConcurrent = maxConcurrent < 1 ? 1 : maxConcurrent;
 
-  /// כל הורדה מחזיקה חוצץ כתיבה של 4MB, וכונן נייד איטי הוא היעד.
+  /// החנק הוא לכל חיבור (~0.7MB/s), וארבעה מגיעים לתפוקה הכוללת (~2.1MB/s).
   static const int defaultMaxConcurrent = 4;
 
   final int maxConcurrent;
