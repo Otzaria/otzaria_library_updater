@@ -338,10 +338,16 @@ extension _SegmentedDownload on PatchDownloader {
     });
 
     Future<void> consume(int index, _OpenedSegment opened) async {
-      final sink =
-          File(_segmentPath(destPath, index)).openWrite(mode: FileMode.append);
+      // כתיבה ממתינה ולא IOSink — ראו _consumeBody.
+      final RandomAccessFile output;
+      try {
+        output = await File(_segmentPath(destPath, index))
+            .open(mode: FileMode.append);
+      } catch (_) {
+        await _abandonBody(opened.response);
+        rethrow;
+      }
       var received = 0;
-      var buffered = 0;
       try {
         await for (final chunk
             in opened.response.stream.timeout(stallTimeout)) {
@@ -349,24 +355,18 @@ extension _SegmentedDownload on PatchDownloader {
           if (received + chunk.length > opened.length) {
             throw const _SegmentFallback();
           }
-          sink.add(chunk);
+          await output.writeFrom(chunk);
           received += chunk.length;
           present[index] += chunk.length;
-          buffered += chunk.length;
           emit();
-          if (buffered >= PatchDownloader._writeBufferBytes) {
-            buffered = 0;
-            await sink.flush();
-          }
         }
       } catch (_) {
         try {
-          await sink.close();
+          await output.close();
         } catch (_) {}
         rethrow;
       }
-      await sink.flush();
-      await sink.close();
+      await output.close();
       if (!stopped() && received != opened.length) {
         throw const HttpException('Range body ended early');
       }

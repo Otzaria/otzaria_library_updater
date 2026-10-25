@@ -50,10 +50,6 @@ class PatchDownloader {
   /// חסם עליון על סבבי-המשך (206 קצר) בניסיון בודד.
   static const int _maxContinuationRounds = 32;
 
-  /// `IOSink.add` אינו מפעיל לחץ-נגד; בלי flush תקופתי ההפרש בין רשת מהירה
-  /// ליעד איטי (כונן נייד) נערם ב-RAM.
-  static const int _writeBufferBytes = 4 << 20;
-
   /// גודל הקריאה באימות sha256 של קובץ; גוש של 64KB מ-`openRead` הוא סבב
   /// async והקצאה לכל גוש, ובקובץ של כמה GB זה ניכר.
   @visibleForTesting
@@ -971,8 +967,23 @@ class PatchDownloader {
     final append = resumeOffset > 0;
     final messages = LibraryUpdaterMessages.current;
 
-    final sink =
-        file.openWrite(mode: append ? FileMode.append : FileMode.write);
+    // תוכן אחרי כשל כתיבה אינו ודאי — החלקי וקובץ הצד נמחקים לפני הזריקה.
+    Never saveFailed(Object error) {
+      _deleteQuietly(file.path);
+      _deleteQuietly(resumeSidecarPath(file.path));
+      throw PatchDownloadException(messages.saveDownloadedFileFailed('$error'));
+    }
+
+    // כתיבה ממתינה ולא IOSink: שגיאה אסינכרונית של IOSink הולכת ל-done בלבד,
+    // דולפת ל-zone, וה-flush הבא נתקע לתמיד (#124).
+    final RandomAccessFile output;
+    try {
+      output = await file.open(mode: append ? FileMode.append : FileMode.write);
+    } catch (error) {
+      // לא נכתב דבר: חלקי קיים נשאר להמשך אם הוא ניתן-לחידוש.
+      await _abandonBody(response);
+      throw PatchDownloadException(messages.saveDownloadedFileFailed('$error'));
+    }
     final total = overallTotal ??
         (response.contentLength == null
             ? null
@@ -984,12 +995,11 @@ class PatchDownloader {
       if (closed) return;
       closed = true;
       try {
-        await sink.close();
+        await output.close();
       } catch (_) {}
     }
 
     var overrun = false;
-    var buffered = 0;
     try {
       await for (final chunk in response.stream.timeout(stallTimeout)) {
         _throwIfCancelled(isCancelled);
@@ -1007,15 +1017,15 @@ class PatchDownloader {
           overrun = true;
           break;
         }
-        sink.add(chunk);
+        try {
+          await output.writeFrom(chunk);
+        } catch (error) {
+          await closeQuietly();
+          saveFailed(error);
+        }
         hashInput?.add(chunk);
         downloaded += chunk.length;
-        buffered += chunk.length;
         onProgress?.call(downloaded, total);
-        if (buffered >= _writeBufferBytes) {
-          buffered = 0;
-          await sink.flush();
-        }
       }
       // ביטול שהתרחש ב-onProgress של הצ'אנק האחרון.
       _throwIfCancelled(isCancelled);
@@ -1023,16 +1033,11 @@ class PatchDownloader {
       await closeQuietly();
       rethrow;
     }
-    // כשל flush/close משאיר קובץ באורך מלא ובתוכן פגום — נמחק לפני הזריקה.
     try {
-      await sink.flush();
-      await sink.close();
       closed = true;
+      await output.close();
     } catch (error) {
-      await closeQuietly();
-      _deleteQuietly(file.path);
-      _deleteQuietly(resumeSidecarPath(file.path));
-      throw PatchDownloadException(messages.saveDownloadedFileFailed('$error'));
+      saveFailed(error);
     }
     return (downloaded: downloaded, overrun: overrun);
   }
@@ -1461,29 +1466,23 @@ class PatchDownloader {
         messages.localFileSizeMismatch(expectedSize, size, url),
       );
     }
-    IOSink? sink;
+    RandomAccessFile? output;
     final digestSink = expectedSha256 != null ? Sha256DigestCollector() : null;
     final input = digestSink != null ? FastSha256.start(digestSink) : null;
     try {
       _deleteQuietly(destPath);
-      sink = File(destPath).openWrite();
+      output = await File(destPath).open(mode: FileMode.write);
       var copied = 0;
-      var buffered = 0;
       await for (final chunk in source.openRead()) {
         _throwIfCancelled(isCancelled);
-        sink.add(chunk);
+        await output.writeFrom(chunk);
         input?.add(chunk);
         copied += chunk.length;
-        buffered += chunk.length;
         onProgress?.call(copied, size);
-        if (buffered >= _writeBufferBytes) {
-          buffered = 0;
-          await sink.flush();
-        }
       }
-      await sink.flush();
-      await sink.close();
-      sink = null;
+      final closing = output;
+      output = null;
+      await closing.close();
       input?.close();
       if (expectedSha256 != null &&
           digestSink!.value.toString() != expectedSha256.toLowerCase()) {
@@ -1491,9 +1490,9 @@ class PatchDownloader {
       }
     } catch (_) {
       // ב-Windows handle פתוח חוסם את המחיקה.
-      if (sink != null) {
+      if (output != null) {
         try {
-          await sink.close();
+          await output.close();
         } catch (_) {}
       }
       _deleteQuietly(destPath);
