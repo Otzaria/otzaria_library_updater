@@ -1629,16 +1629,16 @@ Future<String> _hashFileSha256(
 Future<void> _joinPartsInIsolate(List<String> partPaths, String destPath,
     int expectedSize, String expectedSha256) {
   final messages = LibraryUpdaterMessages.current;
-  return Isolate.run(() {
+  return Isolate.run(() async {
     LibraryUpdaterMessages.current = messages;
-    _joinParts(partPaths, destPath, expectedSize, expectedSha256);
+    await _joinParts(partPaths, destPath, expectedSize, expectedSha256);
   });
 }
 
 /// מצרף לקובץ זמני, מוחק כל חלק אחרי צירופו, ומעביר ל-[destPath] רק אחרי
 /// אימות. אינו נעצר בביטול: חיבור שנקטע היה מאבד חלקים שכבר צורפו.
-void _joinParts(List<String> partPaths, String destPath, int expectedSize,
-    String expectedSha256) {
+Future<void> _joinParts(List<String> partPaths, String destPath,
+    int expectedSize, String expectedSha256) async {
   final messages = LibraryUpdaterMessages.current;
   final tempPath = '$destPath.joining';
   final digestSink = Sha256DigestCollector();
@@ -1654,7 +1654,9 @@ void _joinParts(List<String> partPaths, String destPath, int expectedSize,
               chunk.isNotEmpty;
               chunk = input.readSync(1 << 20)) {
             hasher.add(chunk);
-            output.writeFromSync(chunk);
+            // writeFromSync מחזיק את ה-buffer עד סוף הכתיבה, וה-GC של כל
+            // ה-isolates (גם של ה-UI) ממתין לו בדיסק עמוס.
+            await output.writeFrom(chunk);
             written += chunk.length;
           }
         } finally {

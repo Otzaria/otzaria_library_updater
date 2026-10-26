@@ -607,7 +607,9 @@ Future<String?> _assembleSegments(
               chunk.isNotEmpty;
               chunk = input.readSync(chunkSize)) {
             await advance(chunk);
-            output.writeFromSync(chunk);
+            // writeFromSync מחזיק את ה-buffer עד סוף הכתיבה, וה-GC של כל
+            // ה-isolates (גם של ה-UI) ממתין לו בדיסק עמוס.
+            await output.writeFrom(chunk);
           }
         } finally {
           input.closeSync();
