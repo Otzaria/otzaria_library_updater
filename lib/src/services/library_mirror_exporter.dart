@@ -16,6 +16,7 @@ import 'apply_time_estimate.dart';
 import 'disk_space_probe.dart';
 import 'download_scheduler.dart';
 import 'github_library_release_client.dart';
+import 'library_http_exception.dart';
 import 'library_update_discovery.dart';
 import 'local_mirror_library_release_client.dart';
 import 'patch_downloader.dart';
@@ -731,6 +732,7 @@ class LibraryMirrorExporter {
       } on FormatException {
         rethrow;
       } catch (e) {
+        if (e is LibraryHttpException && e.isBlockedByFilter) rethrow;
         lastError = e;
         if (attempt < _manifestAttempts) {
           await Future<void>.delayed(Duration(milliseconds: 400 * attempt));

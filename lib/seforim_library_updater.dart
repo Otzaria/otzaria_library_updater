@@ -45,6 +45,7 @@ export 'src/services/download_scheduler.dart'
     show DownloadScheduler, ByteProgressAggregator, ByteProgressSlot;
 export 'src/services/github_library_release_client.dart'
     show GithubLibraryReleaseClient;
+export 'src/services/library_http_exception.dart' show LibraryHttpException;
 export 'src/services/library_db_recovery_service.dart'
     show LibraryDbRecoveryService, RecoveryResult, RecoveryAction;
 export 'src/services/library_mirror_exporter.dart' show LibraryMirrorExporter;
