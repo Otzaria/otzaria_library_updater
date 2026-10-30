@@ -6,6 +6,7 @@ import '../messages/library_updater_messages.dart';
 import '../models/delta_manifest.dart';
 import '../models/library_release.dart';
 import '../models/split_asset.dart';
+import 'library_http_exception.dart';
 import 'library_release_source.dart';
 
 /// לקוח לקריאת ה-releases וה-assets של ספריית הספרים מ-GitHub.
@@ -57,15 +58,19 @@ class GithubLibraryReleaseClient implements LibraryReleaseSource {
       final response =
           await _httpClient.get(url, headers: _apiHeaders).timeout(timeout);
       if (response.statusCode != 200) {
-        throw Exception(messages.releasesRequestFailed(response.statusCode));
+        throw LibraryHttpException.fromResponse(
+          response,
+          uri: url,
+          message: messages.releasesRequestFailed(response.statusCode),
+        );
       }
       final decoded = jsonDecode(utf8.decode(response.bodyBytes));
       if (decoded is! List) {
         throw FormatException(messages.releasesResponseNotList);
       }
-      all.addAll(decoded
-          .whereType<Map<String, dynamic>>()
-          .map(LibraryRelease.fromJson));
+      all.addAll(
+        decoded.whereType<Map<String, dynamic>>().map(LibraryRelease.fromJson),
+      );
       if (decoded.length < _perPage) break; // העמוד האחרון
     }
     return all;
@@ -80,8 +85,11 @@ class GithubLibraryReleaseClient implements LibraryReleaseSource {
       headers: {'Accept': 'application/json', 'User-Agent': userAgent},
     ).timeout(timeout);
     if (response.statusCode != 200) {
-      throw Exception(
-          messages.manifestDownloadFailed(url, response.statusCode));
+      throw LibraryHttpException.fromResponse(
+        response,
+        uri: Uri.parse(url),
+        message: messages.manifestDownloadFailed(url, response.statusCode),
+      );
     }
     final decoded = jsonDecode(utf8.decode(response.bodyBytes));
     if (decoded is! Map<String, dynamic>) {
@@ -101,9 +109,14 @@ class GithubLibraryReleaseClient implements LibraryReleaseSource {
       headers: {'Accept': 'application/json', 'User-Agent': userAgent},
     ).timeout(timeout);
     if (response.statusCode != 200) {
-      throw Exception(LibraryUpdaterMessages.current
-          .splitManifestDownloadFailed(
-              manifestAsset.name, response.statusCode));
+      throw LibraryHttpException.fromResponse(
+        response,
+        uri: Uri.parse(manifestAsset.downloadUrl),
+        message: LibraryUpdaterMessages.current.splitManifestDownloadFailed(
+          manifestAsset.name,
+          response.statusCode,
+        ),
+      );
     }
     final index = release.assetIndex;
     final split = SplitAsset.fromManifestJson(
