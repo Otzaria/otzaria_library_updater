@@ -1429,7 +1429,7 @@ class LibraryMirrorExporter {
         throw StateError(strings.exportAssembledReplaceFailed(
             split.dest, e.osError?.message ?? e.message));
       }
-      _downloader.recordVerified(
+      await _downloader.recordVerified(
         destPath: split.dest,
         resumeToken: _assembledToken(manifest),
         sha256: manifest.sha256,

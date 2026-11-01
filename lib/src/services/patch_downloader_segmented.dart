@@ -33,10 +33,11 @@ String _segmentPath(String destPath, int index) =>
 String _segmentStatePath(String destPath) => '$destPath.segments';
 
 /// כתיבה דרך קובץ זמני: קובץ מצב קטוע היה נקרא כתוכנית אחרת.
-void _writeSegmentStateFile(String statePath, Map<String, Object?> state) {
+Future<void> _writeSegmentStateFile(
+    String statePath, Map<String, Object?> state) async {
   final temp = File('$statePath.tmp');
-  temp.writeAsStringSync(jsonEncode(state), flush: true);
-  temp.renameSync(statePath);
+  await temp.writeAsString(jsonEncode(state), flush: true);
+  await temp.rename(statePath);
 }
 
 /// מוחק את קובצי הטווחים ואת קובץ המצב (לא את dest עצמו). קובץ המצב נמחק
@@ -117,12 +118,12 @@ extension _SegmentedDownload on PatchDownloader {
     }
   }
 
-  void _writeSegmentState(String destPath, String? resumeToken, String url,
-      int size, String? sha256, _SegmentPlan plan) {
+  Future<void> _writeSegmentState(String destPath, String? resumeToken,
+      String url, int size, String? sha256, _SegmentPlan plan) async {
     if (resumeToken == null) return;
     final statePath = _segmentStatePath(destPath);
     try {
-      _writeSegmentStateFile(
+      await _writeSegmentStateFile(
         statePath,
         _segmentStateJson(resumeToken, url, size, sha256, plan),
       );
@@ -183,8 +184,8 @@ extension _SegmentedDownload on PatchDownloader {
     var restarts = 0;
     var cleanRetryUsed = false;
 
-    void discardAll() {
-      _deleteRequired(
+    Future<void> discardAll() async {
+      await _deleteRequired(
         destPath,
         LibraryUpdaterMessages.current.deletePartialBeforeRetryFailed,
       );
@@ -195,14 +196,13 @@ extension _SegmentedDownload on PatchDownloader {
     }
 
     while (true) {
-      final current = plan ??
-          _planSegments(
-              file.existsSync() ? file.lengthSync() : 0, size, validator);
+      final current =
+          plan ?? _planSegments(await _lengthOrZero(file), size, validator);
       if (current == null) return (done: false, validator: validator);
       plan = current;
       // תחילית שירדה בלי ETag אינה כבולה ל-ETag שהבדיקה תביא עכשיו.
       final unboundPrefix =
-          current.etag == null && file.existsSync() && file.lengthSync() > 0;
+          current.etag == null && await _lengthOrZero(file) > 0;
 
       final outcome = await _fetchSegments(
         url: url,
@@ -219,7 +219,7 @@ extension _SegmentedDownload on PatchDownloader {
         _deleteSegmentLeftovers(destPath);
         // בלי ETag אין If-Range שיכבול את התחילית לגרסת השרת.
         if (current.etag == null || unboundPrefix) {
-          _deleteRequired(
+          await _deleteRequired(
             destPath,
             LibraryUpdaterMessages.current.deletePartialWithoutValidatorFailed,
           );
@@ -227,7 +227,7 @@ extension _SegmentedDownload on PatchDownloader {
         return (done: false, validator: unboundPrefix ? null : current.etag);
       }
       if (outcome is _SegmentRestart) {
-        discardAll();
+        await discardAll();
         if (++restarts > 2) return (done: false, validator: null);
         continue;
       }
@@ -259,7 +259,7 @@ extension _SegmentedDownload on PatchDownloader {
             LibraryUpdaterMessages.current.fullDbHashMismatch);
       }
       cleanRetryUsed = true;
-      discardAll();
+      await discardAll();
     }
   }
 
@@ -276,9 +276,8 @@ extension _SegmentedDownload on PatchDownloader {
     void Function(int bytes)? onExistingBytes,
     bool Function()? isCancelled,
   }) async {
-    int onDisk(int i) {
-      final file = File(_segmentPath(destPath, i));
-      final length = file.existsSync() ? file.lengthSync() : 0;
+    Future<int> onDisk(int i) async {
+      final length = await _lengthOrZero(File(_segmentPath(destPath, i)));
       return length < plan.length(i) ? length : plan.length(i);
     }
 
@@ -287,7 +286,7 @@ extension _SegmentedDownload on PatchDownloader {
         if (plan.assembled > 1 && i < plan.assembled)
           plan.length(i)
         else
-          onDisk(i),
+          await onDisk(i),
     ];
     int presentTotal() => present.fold(0, (sum, value) => sum + value);
     onExistingBytes?.call(presentTotal());
@@ -298,15 +297,15 @@ extension _SegmentedDownload on PatchDownloader {
     ];
     if (incomplete.isEmpty) return null;
 
-    void persist() {
-      _writeSegmentState(destPath, resumeToken, url, size, sha256, plan);
+    Future<void> persist() async {
+      await _writeSegmentState(destPath, resumeToken, url, size, sha256, plan);
       if (resumeToken != null) {
-        _writeSidecar(PatchDownloader.resumeSidecarPath(destPath), resumeToken,
-            plan.etag);
+        await _writeSidecar(PatchDownloader.resumeSidecarPath(destPath),
+            resumeToken, plan.etag);
       }
     }
 
-    persist();
+    await persist();
 
     final stop = Completer<void>();
     Object? failure;
@@ -377,7 +376,11 @@ extension _SegmentedDownload on PatchDownloader {
       var idleAttempts = 0;
       try {
         while (present[index] < plan.length(index)) {
-          if (stopped()) return;
+          if (stopped()) {
+            // ביטול בזמן persist שאחרי הבדיקה המקדימה: גוף ה-probe עוד פתוח.
+            if (pending != null) await _abandonBody(pending.response);
+            return;
+          }
           final before = present[index];
           try {
             final opened = pending ??
@@ -423,7 +426,7 @@ extension _SegmentedDownload on PatchDownloader {
         return outcome;
       }
       try {
-        persist();
+        await persist();
       } catch (_) {
         await _abandonBody(probe.response);
         rethrow;
@@ -616,7 +619,8 @@ Future<String?> _assembleSegments(
         }
         output.flushSync();
         if (statePath != null) {
-          _writeSegmentStateFile(statePath, {...state, 'assembled': i + 1});
+          await _writeSegmentStateFile(
+              statePath, {...state, 'assembled': i + 1});
         }
         _deleteFileQuietly(segmentPath);
       }

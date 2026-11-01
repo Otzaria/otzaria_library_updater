@@ -119,9 +119,7 @@ class PatchDownloader {
     bool Function()? isCancelled,
   }) async {
     final messages = LibraryUpdaterMessages.current;
-    if (!destDir.existsSync()) {
-      destDir.createSync(recursive: true);
-    }
+    await destDir.create(recursive: true);
     final extractedName = patchFile.file.endsWith('.zst')
         ? patchFile.file.substring(0, patchFile.file.length - 4)
         : '${patchFile.file}.db';
@@ -262,12 +260,12 @@ class PatchDownloader {
       String? storedValidator;
       String? storedVerified;
       if (resumeToken == null) {
-        _deleteRequired(
+        await _deleteRequired(
           destPath,
           messages.deleteExistingWithoutResumeIdentityFailed,
         );
         _deleteQuietly(sidecarPath);
-      } else if (file.existsSync()) {
+      } else if (await file.exists()) {
         final sidecar = _readSidecar(sidecarPath);
         adopting = sidecar?.token != resumeToken;
         final adopted = !adopting
@@ -288,7 +286,7 @@ class PatchDownloader {
         } else if (adopting) {
           adopting = false;
           // כשל שקט היה כובל תוכן ישן לטוקן החדש (frankenfile).
-          _deleteRequired(
+          await _deleteRequired(
             destPath,
             messages.deletePartialFromPreviousVersionFailed,
           );
@@ -299,7 +297,7 @@ class PatchDownloader {
         }
       }
 
-      var offset = file.existsSync() ? file.lengthSync() : 0;
+      var offset = await _lengthOrZero(file);
       final alreadyComplete = expectedSize != null && offset >= expectedSize;
       final segmented = _segmentationApplies(expectedSize);
       final resumedPlan = segmented && !alreadyComplete
@@ -313,7 +311,8 @@ class PatchDownloader {
           offset > 0 &&
           storedValidator == null &&
           resumedPlan == null) {
-        _deleteRequired(destPath, messages.deletePartialWithoutValidatorFailed);
+        await _deleteRequired(
+            destPath, messages.deletePartialWithoutValidatorFailed);
         offset = 0;
       }
 
@@ -333,7 +332,7 @@ class PatchDownloader {
           _throwIfCancelled(isCancelled);
           return;
         }
-        _deleteRequired(destPath, messages.deletePartialBeforeRetryFailed);
+        await _deleteRequired(destPath, messages.deletePartialBeforeRetryFailed);
         _deleteQuietly(sidecarPath);
         storedValidator = null;
         offset = 0;
@@ -359,7 +358,7 @@ class PatchDownloader {
           return;
         }
         storedValidator = result.validator;
-        offset = file.existsSync() ? file.lengthSync() : 0;
+        offset = await _lengthOrZero(file);
         onExistingBytes?.call(offset);
       }
 
@@ -371,7 +370,7 @@ class PatchDownloader {
             return (downloaded: offset, digest: null);
           }
           if (resumeToken != null) {
-            _writeSidecar(sidecarPath, resumeToken, storedValidator);
+            await _writeSidecar(sidecarPath, resumeToken, storedValidator);
           }
           return _streamToFile(
             url: url,
@@ -389,18 +388,17 @@ class PatchDownloader {
           );
         },
         isCancelled: isCancelled,
-        onRetry: () {
+        onRetry: () async {
           retrying = true;
           if (_partialIsResumable(
               destPath, sidecarPath, expectedSize, resumeToken)) {
             storedValidator = _strongEtag(_readSidecar(sidecarPath)?.etag);
-            offset = file.lengthSync();
+            offset = await file.length();
             onExistingBytes?.call(offset);
             return;
           }
-          if (file.existsSync()) {
-            _deleteRequired(destPath, messages.deletePartialBeforeRetryFailed);
-          }
+          await _deleteRequired(
+              destPath, messages.deletePartialBeforeRetryFailed);
           storedValidator = null;
           offset = 0;
           onExistingBytes?.call(0);
@@ -467,7 +465,9 @@ class PatchDownloader {
     bool Function()? isCancelled,
   }) async {
     final file = File(destPath);
-    if (!file.existsSync() || file.lengthSync() != expectedSize) return false;
+    if (!await file.exists() || await file.length() != expectedSize) {
+      return false;
+    }
     final expected = expectedSha256.toLowerCase();
     final sidecar = _readSidecar(resumeSidecarPath(destPath));
     if (sidecar?.token == resumeToken &&
@@ -477,22 +477,22 @@ class PatchDownloader {
     final actual =
         await _hashFileSha256InIsolate(destPath, isCancelled, onVerifyProgress);
     if (actual != expected) return false;
-    recordVerified(
+    await recordVerified(
         destPath: destPath, resumeToken: resumeToken, sha256: expected);
     return true;
   }
 
   /// רושם ש-[destPath] אומת מול [sha256], כדי שהריצה הבאה תדלג על ה-hash.
   /// כשל כתיבה נבלע — הסימון הוא חיסכון בלבד.
-  void recordVerified({
+  Future<void> recordVerified({
     required String destPath,
     required String resumeToken,
     required String sha256,
-  }) {
+  }) async {
     final mark = _verifiedMarkFor(File(destPath), sha256.toLowerCase());
     if (mark == null) return;
     try {
-      _writeSidecar(resumeSidecarPath(destPath), resumeToken, null,
+      await _writeSidecar(resumeSidecarPath(destPath), resumeToken, null,
           verified: mark);
     } catch (_) {}
   }
@@ -550,8 +550,7 @@ class PatchDownloader {
 
     if (joinedToken != null &&
         _readSidecar(sidecarPath)?.token == joinedToken &&
-        File(destPath).existsSync() &&
-        File(destPath).lengthSync() == split.size) {
+        await _lengthOrZero(File(destPath)) == split.size) {
       onProgress?.call(split.size, split.size);
       if (await _hashFileSha256InIsolate(destPath, isCancelled) ==
           split.sha256) {
@@ -559,7 +558,7 @@ class PatchDownloader {
         return;
       }
     }
-    _deleteRequired(
+    await _deleteRequired(
       destPath,
       LibraryUpdaterMessages.current.deletePreviousArchiveFailed,
     );
@@ -592,7 +591,9 @@ class PatchDownloader {
       split.size,
       split.sha256,
     );
-    if (joinedToken != null) _writeSidecar(sidecarPath, joinedToken, null);
+    if (joinedToken != null) {
+      await _writeSidecar(sidecarPath, joinedToken, null);
+    }
   }
 
   /// מוחק חלקים (ואת קבצי הצד שלהם) מהאינדקס [from] והלאה.
@@ -630,9 +631,9 @@ class PatchDownloader {
   }) async {
     final messages = LibraryUpdaterMessages.current;
     // נכתב ברגע שהבייטים מגיעים, כדי שהפרעה תשאיר validator להמשך.
-    void persistValidator(String? etag) {
+    Future<void> persistValidator(String? etag) async {
       if (sidecarPath != null && resumeToken != null) {
-        _writeSidecar(sidecarPath, resumeToken, etag);
+        await _writeSidecar(sidecarPath, resumeToken, etag);
       }
     }
 
@@ -679,14 +680,12 @@ class PatchDownloader {
             // השרת התעלם מ-Range — גוף מלא מאפס.
             try {
               // הבייטים הישנים נמחקים לפני שמירת ה-validator החדש (frankenfile).
-              if (file.existsSync()) {
-                _deleteRequired(
-                  file.path,
-                  messages.deletePartialFromPreviousRepresentationFailed,
-                );
-              }
+              await _deleteRequired(
+                file.path,
+                messages.deletePartialFromPreviousRepresentationFailed,
+              );
               validator = _strongEtag(response.headers['etag']);
-              persistValidator(validator);
+              await persistValidator(validator);
               onExistingBytes?.call(0);
             } catch (_) {
               await _abandonBody(response);
@@ -739,8 +738,7 @@ class PatchDownloader {
                 _parseUnsatisfiedRangeTotal(response.headers['content-range']);
             await _abandonBody(response);
             final complete = roundOffset > 0 &&
-                file.existsSync() &&
-                file.lengthSync() == roundOffset &&
+                await _lengthOrZero(file) == roundOffset &&
                 total != null &&
                 total == roundOffset &&
                 (sessionTotal == null || total == sessionTotal) &&
@@ -777,7 +775,7 @@ class PatchDownloader {
             if (roundEtag != null) {
               validator = roundEtag;
               try {
-                persistValidator(roundEtag);
+                await persistValidator(roundEtag);
               } catch (_) {
                 await _abandonBody(response);
                 rethrow;
@@ -881,12 +879,10 @@ class PatchDownloader {
 
         if (restart) {
           // הבייטים הישנים נמחקים לפני שהניסיון הבא כובל validator חדש.
-          if (file.existsSync()) {
-            _deleteRequired(
-              file.path,
-              messages.deletePartialBeforeRetryFailed,
-            );
-          }
+          await _deleteRequired(
+            file.path,
+            messages.deletePartialBeforeRetryFailed,
+          );
           currentOffset = 0;
           onExistingBytes?.call(0);
           validator = null;
@@ -1142,15 +1138,16 @@ class PatchDownloader {
   }
 
   /// בלי ETag ובלי סימון נכתב הטוקן לבדו — וכך גם נמחק סימון של תוכן משתנה.
-  void _writeSidecar(String sidecarPath, String token, String? etag,
-      {String? verified}) {
+  /// אסינכרוני: ב-Windows ה-isolate של ה-UI רץ על ה-thread של הפלטפורמה (#3780).
+  Future<void> _writeSidecar(String sidecarPath, String token, String? etag,
+      {String? verified}) async {
     try {
       final lines = <String>[
         token,
         if (etag != null || verified != null) etag ?? '',
         ?verified,
       ];
-      File(sidecarPath).writeAsStringSync(lines.join('\n'), flush: true);
+      await File(sidecarPath).writeAsString(lines.join('\n'), flush: true);
     } catch (error) {
       throw PatchDownloadException(
         LibraryUpdaterMessages.current
@@ -1210,7 +1207,7 @@ class PatchDownloader {
     final mark = _verifiedMarkFor(file, digest);
     if (mark == null) return;
     try {
-      _writeSidecar(sidecarPath, token, _readSidecar(sidecarPath)?.etag,
+      await _writeSidecar(sidecarPath, token, _readSidecar(sidecarPath)?.etag,
           verified: mark);
     } catch (_) {}
   }
@@ -1229,7 +1226,7 @@ class PatchDownloader {
   ) async {
     if (expectedSha256 == null ||
         expectedSize == null ||
-        file.lengthSync() != expectedSize) {
+        await file.length() != expectedSize) {
       return null;
     }
     final expected = expectedSha256.toLowerCase();
@@ -1240,7 +1237,7 @@ class PatchDownloader {
     }
     final mark = _verifiedMarkFor(file, expected);
     if (mark == null) return null;
-    _writeSidecar(sidecarPath, resumeToken, null, verified: mark);
+    await _writeSidecar(sidecarPath, resumeToken, null, verified: mark);
     return mark;
   }
 
@@ -1408,16 +1405,19 @@ class PatchDownloader {
 
   void _deleteQuietly(String path) => _deleteFileQuietly(path);
 
+  Future<int> _lengthOrZero(File file) async =>
+      await file.exists() ? await file.length() : 0;
+
   /// מוחק קובץ שחייב להיעלם לפני שאפשר להמשיך בבטחה.
-  void _deleteRequired(String path, String failureMessage) {
+  Future<void> _deleteRequired(String path, String failureMessage) async {
     final file = File(path);
     try {
-      if (file.existsSync()) file.deleteSync();
+      if (await file.exists()) await file.delete();
     } catch (_) {
-      if (!file.existsSync()) return;
+      if (!await file.exists()) return;
       throw PatchDownloadException(failureMessage);
     }
-    if (file.existsSync()) {
+    if (await file.exists()) {
       throw PatchDownloadException(failureMessage);
     }
   }

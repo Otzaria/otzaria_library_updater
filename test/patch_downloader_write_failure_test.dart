@@ -52,6 +52,13 @@ class _FailingWriteFile implements File {
   int lengthSync() => _real.lengthSync();
   @override
   void deleteSync({bool recursive = false}) => _real.deleteSync();
+  @override
+  Future<bool> exists() => _real.exists();
+  @override
+  Future<int> length() => _real.length();
+  @override
+  Future<File> delete({bool recursive = false}) =>
+      _real.delete().then((_) => this);
 
   void _truncateOrCreate(FileMode mode) => _real.writeAsBytesSync(
     const [],
