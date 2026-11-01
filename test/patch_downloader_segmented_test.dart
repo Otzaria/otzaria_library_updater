@@ -155,6 +155,62 @@ class _CountingClient extends http.BaseClient {
   void close() => _inner.close();
 }
 
+/// קובצי המצב (`.resume`, `.segments`) ב-isolate הראשי: כתיבה סינכרונית
+/// נכשלת, וכל כתיבה אסינכרונית נרשמת יחד עם מספר הבקשות שכבר הגיעו לשרת.
+final class _AsyncStateWritesOnly extends IOOverrides {
+  _AsyncStateWritesOnly(this.requestsSoFar);
+
+  final int Function() requestsSoFar;
+  final List<({String name, String content, int requests})> writes = [];
+
+  @override
+  File createFile(String path) {
+    final file = super.createFile(path);
+    return RegExp(r'\.(resume|segments(\.tmp)?)$').hasMatch(path)
+        ? _AsyncWritesFile(file, this)
+        : file;
+  }
+}
+
+class _AsyncWritesFile implements File {
+  _AsyncWritesFile(this._real, this._owner);
+
+  final File _real;
+  final _AsyncStateWritesOnly _owner;
+
+  @override
+  String get path => _real.path;
+  @override
+  bool existsSync() => _real.existsSync();
+  @override
+  Future<bool> exists() => _real.exists();
+  @override
+  String readAsStringSync({Encoding encoding = utf8}) =>
+      _real.readAsStringSync(encoding: encoding);
+  @override
+  void deleteSync({bool recursive = false}) => _real.deleteSync();
+  @override
+  Future<File> writeAsString(String contents,
+      {FileMode mode = FileMode.write,
+      Encoding encoding = utf8,
+      bool flush = false}) {
+    _owner.writes.add((
+      name: p.basename(path),
+      content: contents,
+      requests: _owner.requestsSoFar(),
+    ));
+    return _real.writeAsString(contents,
+        mode: mode, encoding: encoding, flush: flush);
+  }
+
+  @override
+  Future<File> rename(String newPath) => _real.rename(newPath);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnsupportedError('sync IO on state file: ${invocation.memberName}');
+}
+
 Uint8List _data(int length, [int seed = 0]) => Uint8List.fromList(
     List.generate(length, (i) => (i * 31 + i ~/ 251 + seed) & 0xff));
 
@@ -575,6 +631,32 @@ void main() {
     await download(downloader(maxConnections: 1), sha: _sha(server.data));
     expect(File(dest).readAsBytesSync(), server.data);
     expect(server.requests.single.range, isNull);
+  });
+
+  test('קובצי המצב נכתבים אסינכרונית, ה-ETag נשמר לפני שאר הטווחים (#3780)',
+      () async {
+    final io = _AsyncStateWritesOnly(() => server.requests.length);
+    await IOOverrides.runWithIOOverrides(
+        () => download(downloader(), sha: _sha(server.data)), io);
+
+    expect(File(dest).readAsBytesSync(), server.data);
+    expect(leftovers(), isEmpty);
+    final sidecar = [
+      for (final w in io.writes)
+        if (w.name.endsWith('.resume')) w,
+    ];
+    // לפני הבדיקה המקדימה בלי ETag; אחריה עם ETag, לפני שאר שלושת הטווחים.
+    expect(sidecar[0], (name: 'seforim.db.zst.resume', content: 'asset-1',
+        requests: 0));
+    expect(sidecar[1].content, 'asset-1\n"v1"');
+    expect(sidecar[1].requests, 1);
+    expect(sidecar.last.content, startsWith('asset-1\n"v1"\n'));
+    final state = [
+      for (final w in io.writes)
+        if (w.name.endsWith('.segments.tmp')) jsonDecode(w.content) as Map,
+    ];
+    expect(state.first['etag'], isNull);
+    expect(state[1]['etag'], '"v1"');
   });
 
   test('בלי resumeToken: פיצול בתוך הריצה, בלי מצב שנשמר לדיסק', () async {

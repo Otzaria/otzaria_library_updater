@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `PatchDownloader`: קובץ הצד (`.resume`), קובץ המצב של הטווחים (`.segments`)
+  ובדיקות האורך והמחיקה בזמן ההורדה עברו ל-IO אסינכרוני. ב-Windows ה-isolate
+  של ה-UI רץ על ה-thread של הפלטפורמה, ו-`writeAsStringSync(flush: true)` תקע
+  את אוצריא באמצע הורדת ספרייה (Otzaria/otzaria#3780). `recordVerified` מחזיר
+  עכשיו `Future<void>`.
 - `downloadToFile`: כשהשרת מכבד `Range`, קובץ מרוחק של 64MB ומעלה
   (`segmentThresholdBytes`) יורד ב-`maxConnections` (ברירת מחדל 4) טווחים
   מקבילים, אחרי שהבקשה הראשונה מאשרת 206 עם הגודל הצפוי. שרת שעונה 200
