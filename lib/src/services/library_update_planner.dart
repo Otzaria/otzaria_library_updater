@@ -82,6 +82,7 @@ class LibraryUpdatePlanner {
         reason: unsupportedLatest
             ? updateAppReason
             : messages.planLocalVersionUnknown,
+        needsAppUpdate: unsupportedLatest,
       );
     }
 
@@ -143,6 +144,7 @@ class LibraryUpdatePlanner {
         localVersion: localVersion,
         targetVersion: latestVersion,
         reason: updateAppReason,
+        blockReason: LibraryUpdateBlockReason.appUpdateRequired,
       );
     }
 
@@ -158,6 +160,7 @@ class LibraryUpdatePlanner {
             ? messages.planSchemaBarrierNeedsFullDownload(toSchema)
             : messages.planSchemaNeedsAppUpdate(
                 toSchema, supportedDbSchemaVersion),
+        needsAppUpdate: toSchema > supportedDbSchemaVersion,
       );
     }
 
@@ -180,6 +183,7 @@ class LibraryUpdatePlanner {
           ? messages.planDeltaNeedsAppUpdate(latestVersion,
               supportedDbSchemaVersion, supportedPatchFormatVersion)
           : messages.planNoDeltaRoute(localVersion, latestVersion),
+      needsAppUpdate: blockedByCapability,
     );
   }
 
@@ -222,6 +226,7 @@ class LibraryUpdatePlanner {
     required ReleaseAsset? asset,
     required String? tag,
     required String reason,
+    bool needsAppUpdate = false,
   }) {
     if (asset != null && tag != null) {
       return LibraryUpdatePlan.fullDownload(
@@ -236,6 +241,9 @@ class LibraryUpdatePlanner {
       localVersion: localVersion,
       targetVersion: latestVersion,
       reason: LibraryUpdaterMessages.current.planNoFullDbEither(reason),
+      blockReason: needsAppUpdate
+          ? LibraryUpdateBlockReason.appUpdateRequired
+          : LibraryUpdateBlockReason.other,
     );
   }
 

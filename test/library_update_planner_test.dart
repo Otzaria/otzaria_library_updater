@@ -164,6 +164,7 @@ void main() {
       );
       expect(p.kind, LibraryUpdatePlanKind.blocked);
       expect(p.reason, isNotNull);
+      expect(p.blockReason, LibraryUpdateBlockReason.other);
     });
 
     test('מתעלם מ-edges אחורה ולא משתמש בהם', () {
@@ -325,6 +326,7 @@ void main() {
       );
       expect(p.kind, LibraryUpdatePlanKind.blocked);
       expect(p.reason, contains('עדכון אפליקציה'));
+      expect(p.blockReason, LibraryUpdateBlockReason.appUpdateRequired);
     });
 
     test('סכמת המקור של ה-edge חייבת להתאים לסכמה המקומית', () {
@@ -575,6 +577,7 @@ void main() {
       );
       expect(p.kind, LibraryUpdatePlanKind.blocked);
       expect(p.reason, contains('עדכון אפליקציה'));
+      expect(p.blockReason, LibraryUpdateBlockReason.appUpdateRequired);
     });
 
     test('a supported full variant is usable despite a newer advertised schema',
@@ -669,6 +672,7 @@ void main() {
           using: schema5Client);
       expect(p.kind, LibraryUpdatePlanKind.blocked);
       expect(p.reason, contains('עדכון אפליקציה'));
+      expect(p.blockReason, LibraryUpdateBlockReason.appUpdateRequired);
     });
 
     test('planner שאינו מצהיר על סכמה נחסם במחסום ואינו מוריד סכמה 6', () {
@@ -680,6 +684,7 @@ void main() {
       expect(kDefaultConsumerDbSchemaVersion, 5);
       expect(p.kind, LibraryUpdatePlanKind.blocked);
       expect(p.reason, contains('עדכון אפליקציה'));
+      expect(p.blockReason, LibraryUpdateBlockReason.appUpdateRequired);
     });
 
     // מתעד את הלקוח הישן (upstream/main לפני סכמה 6): הוא מתעלם מ-fullRebase,
@@ -701,6 +706,7 @@ void main() {
       expect(p.kind, LibraryUpdatePlanKind.blocked);
       expect(p.fullDbAsset, isNull);
       expect(p.reason, contains('נדרש עדכון אפליקציה'));
+      expect(p.blockReason, LibraryUpdateBlockReason.appUpdateRequired);
     });
   });
 }

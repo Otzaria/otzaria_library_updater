@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `LibraryUpdatePlan.blockReason` (`LibraryUpdateBlockReason`): סיווג מובנה של
+  תוכנית `blocked`. `appUpdateRequired` כשהעדכון דורש סכמה או פורמט patch
+  שהצרכן אינו מכיר, אחרת `other`. הצרכן מבחין בין המקרים בלי לנתח את `reason`
+  (Otzaria/otzaria#3406).
 - `PatchDownloader`: קובץ הצד (`.resume`), קובץ המצב של הטווחים (`.segments`)
   ובדיקות האורך והמחיקה בזמן ההורדה עברו ל-IO אסינכרוני. ב-Windows ה-isolate
   של ה-UI רץ על ה-thread של הפלטפורמה, ו-`writeAsStringSync(flush: true)` תקע

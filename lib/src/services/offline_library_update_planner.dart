@@ -284,6 +284,10 @@ class OfflineLibraryUpdatePlanner {
                   localVersion,
                   latestVersion,
                 ),
+          blockReason: _blockReasonFor(
+            blockingSchemaVersion,
+            blockingPatchFormatVersion,
+          ),
         );
       }
       return LibraryUpdatePlan.fullDownload(
@@ -310,8 +314,20 @@ class OfflineLibraryUpdatePlanner {
       localVersion: localVersion,
       targetVersion: latestVersion,
       reason: strings.planNoFullDbEither(reason),
+      blockReason: _blockReasonFor(
+        blockingSchemaVersion,
+        blockingPatchFormatVersion,
+      ),
     );
   }
+
+  LibraryUpdateBlockReason _blockReasonFor(
+    int? blockingSchemaVersion,
+    int? blockingPatchFormatVersion,
+  ) =>
+      blockingSchemaVersion != null || blockingPatchFormatVersion != null
+          ? LibraryUpdateBlockReason.appUpdateRequired
+          : LibraryUpdateBlockReason.other;
 
   /// המסלול אל הגרסה הגבוהה ביותר שאפשר להגיע אליה מ-[from], עד [to] כולל.
   /// מנסה מלמעלה למטה ועוצר בהצלחה הראשונה, ולכן מחזיר תמיד את הגבוהה ביותר.
