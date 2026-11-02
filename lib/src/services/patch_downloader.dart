@@ -1711,6 +1711,10 @@ class _DestinationLock {
       try {
         db?.close();
       } catch (_) {}
+      if (error is sqlite3.SqliteException &&
+          error.resultCode == sqlite3.SqlError.SQLITE_BUSY) {
+        throw PatchDownloadException(messages.downloadAlreadyInProgress);
+      }
       throw PatchDownloadException(
           messages.writeResumeSidecarFailed(path, '$error'));
     }

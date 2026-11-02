@@ -129,6 +129,7 @@ abstract class LibraryUpdaterMessages {
   String saveDownloadedFileFailed(String error);
   String tooManyRedirects(String url);
   String writeResumeSidecarFailed(String path, String error);
+  String get downloadAlreadyInProgress;
   String checksumMismatchDetailed(String label, String expected, String actual);
   String checksumMismatch(String label);
   String localFileNotFound(String path);
@@ -475,6 +476,10 @@ class HebrewLibraryUpdaterMessages extends LibraryUpdaterMessages {
   @override
   String writeResumeSidecarFailed(String path, String error) =>
       'כתיבת קובץ הזהות להמשך ההורדה נכשלה ($path): $error';
+  @override
+  String get downloadAlreadyInProgress =>
+      'הורדה של אותו קובץ כבר רצה, כנראה בחלון אחר או בעותק אחר של אוצריא. '
+      'יש לסגור את העותק האחר או להמתין לסיום ההורדה, ולנסות שוב.';
   @override
   String checksumMismatchDetailed(
     String label,
