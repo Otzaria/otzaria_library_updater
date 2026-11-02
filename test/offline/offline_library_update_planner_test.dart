@@ -712,6 +712,20 @@ void main() {
         );
         expect(p.blockReason, LibraryUpdateBlockReason.appUpdateRequired);
       });
+
+      test('פורמט patch חוסם ובלי מסד מלא כלל → appUpdateRequired', () {
+        final p = planner.plan(
+          localVersion: 23,
+          hasLocalVersionMeta: true,
+          latestVersion: 26,
+          edges: const [],
+          latestFullDbAsset: null,
+          fullDbReleaseTag: null,
+          blockingPatchFormatVersion: 9,
+        );
+        expect(p.kind, LibraryUpdatePlanKind.blocked);
+        expect(p.blockReason, LibraryUpdateBlockReason.appUpdateRequired);
+      });
     });
   });
 }
