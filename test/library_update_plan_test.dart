@@ -268,6 +268,21 @@ void main() {
       expect(plan.kind, LibraryUpdatePlanKind.blocked);
       expect(plan.totalDownloadSize, 0);
       expect(plan.reason, 'stuck');
+      expect(plan.blockReason, LibraryUpdateBlockReason.other);
+    });
+
+    test('blocked — סיווג appUpdateRequired נשמר ונכנס לשוויון', () {
+      final plan = LibraryUpdatePlan.blocked(
+        localVersion: 1,
+        reason: 'x',
+        blockReason: LibraryUpdateBlockReason.appUpdateRequired,
+      );
+      expect(plan.blockReason, LibraryUpdateBlockReason.appUpdateRequired);
+      expect(
+        plan,
+        isNot(LibraryUpdatePlan.blocked(localVersion: 1, reason: 'x')),
+      );
+      expect(LibraryUpdatePlan.none(localVersion: 1).blockReason, isNull);
     });
 
     test('שוויון לפי ערך (props)', () {

@@ -72,6 +72,15 @@ enum LibraryUpdatePlanKind {
   blocked,
 }
 
+/// למה תוכנית [LibraryUpdatePlanKind.blocked] חסומה.
+enum LibraryUpdateBlockReason {
+  /// העדכון דורש גרסת תוכנה חדשה: סכמה או פורמט patch שהצרכן אינו מכיר.
+  appUpdateRequired,
+
+  /// כל חסימה אחרת, למשל חוסר מסלול דלתא ללא DB מלא להורדה.
+  other,
+}
+
 /// תוצאת התכנון: מה צריך לעשות כדי להביא את הספרייה לגרסה האחרונה.
 class LibraryUpdatePlan extends Equatable {
   final LibraryUpdatePlanKind kind;
@@ -95,6 +104,9 @@ class LibraryUpdatePlan extends Equatable {
   /// הסבר קריא — חובה ל-[LibraryUpdatePlanKind.blocked], אופציונלי לאחרים.
   final String? reason;
 
+  /// סיווג מובנה של החסימה; null בכל תוכנית שאינה blocked.
+  final LibraryUpdateBlockReason? blockReason;
+
   /// נימוק לכך שהחלת הדלתא צפויה להיות יקרה מאוד. null בתוכנית דלתא רגילה
   /// ובכל תוכנית שאינה דלתא. הבחירה נשארת של המשתמש — ראו [isHeavyDelta].
   final String? heavyDeltaReason;
@@ -114,6 +126,7 @@ class LibraryUpdatePlan extends Equatable {
     this.fullDbAsset,
     this.fullDbReleaseTag,
     this.reason,
+    this.blockReason,
     this.heavyDeltaReason,
     this.fullDownloadFallback,
     this.followUpDelta,
@@ -181,12 +194,14 @@ class LibraryUpdatePlan extends Equatable {
     required int localVersion,
     int? targetVersion,
     required String reason,
+    LibraryUpdateBlockReason blockReason = LibraryUpdateBlockReason.other,
   }) =>
       LibraryUpdatePlan._(
         kind: LibraryUpdatePlanKind.blocked,
         localVersion: localVersion,
         targetVersion: targetVersion,
         reason: reason,
+        blockReason: blockReason,
       );
 
   /// ממיר תוכנית דלתא לתוכנית הורדה מלאה — fallback כשההחלה נכשלת על סטיית
@@ -234,6 +249,7 @@ class LibraryUpdatePlan extends Equatable {
         fullDbAsset,
         fullDbReleaseTag,
         reason,
+        blockReason,
         heavyDeltaReason,
         fullDownloadFallback,
         followUpDelta,

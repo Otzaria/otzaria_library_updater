@@ -229,6 +229,7 @@ void main() {
       );
       expect(p.kind, LibraryUpdatePlanKind.blocked);
       expect(p.reason, isNotNull);
+      expect(p.blockReason, LibraryUpdateBlockReason.other);
     });
 
     // מסלול שמגיע רק לחצי הדרך עדיין שווה יותר מכלום: המשתמש עולה לגרסה 2
@@ -691,6 +692,7 @@ void main() {
         final strings = LibraryUpdaterMessages.current;
         expect(p.kind, LibraryUpdatePlanKind.blocked);
         expect(p.reason, strings.planPatchSchemaTooNew(7, 28));
+        expect(p.blockReason, LibraryUpdateBlockReason.appUpdateRequired);
       });
 
       test('סכמה חוסמת ובלי מסד מלא כלל → blocked', () {
@@ -708,6 +710,7 @@ void main() {
           p.reason,
           strings.planNoFullDbEither(strings.planPatchSchemaTooNew(4, 26)),
         );
+        expect(p.blockReason, LibraryUpdateBlockReason.appUpdateRequired);
       });
     });
   });
