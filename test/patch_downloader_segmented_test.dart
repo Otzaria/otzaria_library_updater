@@ -205,10 +205,121 @@ class _AsyncWritesFile implements File {
 
   @override
   Future<File> rename(String newPath) => _real.rename(newPath);
+  @override
+  Future<FileSystemEntity> delete({bool recursive = false}) =>
+      _real.delete(recursive: recursive);
 
   @override
   dynamic noSuchMethod(Invocation invocation) =>
       throw UnsupportedError('sync IO on state file: ${invocation.memberName}');
+}
+
+/// שאריות הטווחים נמחקות אסינכרונית בלבד: מחיקה סינכרונית של טווח בן כמה
+/// GB הקפיאה את ה-UI (#4070). רושם את סדר המחיקות.
+final class _AsyncDeletesOnly extends IOOverrides {
+  final List<String> deleted = [];
+
+  @override
+  File createFile(String path) =>
+      _AsyncDeleteFile(super.createFile(path), this);
+
+  @override
+  Directory createDirectory(String path) =>
+      _AsyncListDirectory(super.createDirectory(path));
+}
+
+class _AsyncDeleteFile implements File {
+  _AsyncDeleteFile(this._real, this._owner);
+
+  final File _real;
+  final _AsyncDeletesOnly _owner;
+
+  @override
+  String get path => _real.path;
+  @override
+  Future<FileSystemEntity> delete({bool recursive = false}) async {
+    final result = await _real.delete(recursive: recursive);
+    _owner.deleted.add(p.basename(path));
+    return result;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnsupportedError('sync IO: ${invocation.memberName}');
+}
+
+class _AsyncListDirectory implements Directory {
+  _AsyncListDirectory(this._real);
+
+  final Directory _real;
+
+  @override
+  String get path => _real.path;
+  @override
+  Stream<FileSystemEntity> list(
+          {bool recursive = false, bool followLinks = true}) =>
+      _real.list(recursive: recursive, followLinks: followLinks);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnsupportedError('sync IO: ${invocation.memberName}');
+}
+
+/// [dest] נמחק במסלולי שגיאה רק אסינכרונית; deleteSync עליו נכשל (#4070).
+final class _NoSyncDestDelete extends IOOverrides {
+  _NoSyncDestDelete(this.dest);
+
+  final String dest;
+  int syncDeletes = 0;
+
+  @override
+  File createFile(String path) {
+    final file = super.createFile(path);
+    return p.equals(path, dest) ? _NoSyncDeleteFile(file, this) : file;
+  }
+}
+
+class _NoSyncDeleteFile implements File {
+  _NoSyncDeleteFile(this._real, this._owner);
+
+  final File _real;
+  final _NoSyncDestDelete _owner;
+
+  @override
+  String get path => _real.path;
+  @override
+  void deleteSync({bool recursive = false}) {
+    _owner.syncDeletes++;
+    throw UnsupportedError('deleteSync on dest');
+  }
+  @override
+  Future<FileSystemEntity> delete({bool recursive = false}) =>
+      _real.delete(recursive: recursive);
+  @override
+  bool existsSync() => _real.existsSync();
+  @override
+  Future<bool> exists() => _real.exists();
+  @override
+  int lengthSync() => _real.lengthSync();
+  @override
+  Future<int> length() => _real.length();
+  @override
+  Future<RandomAccessFile> open({FileMode mode = FileMode.read}) =>
+      _real.open(mode: mode);
+  @override
+  RandomAccessFile openSync({FileMode mode = FileMode.read}) =>
+      _real.openSync(mode: mode);
+  @override
+  IOSink openWrite(
+          {FileMode mode = FileMode.write, Encoding encoding = utf8}) =>
+      _real.openWrite(mode: mode, encoding: encoding);
+  @override
+  Stream<List<int>> openRead([int? start, int? end]) =>
+      _real.openRead(start, end);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnsupportedError('unexpected: ${invocation.memberName}');
 }
 
 Uint8List _data(int length, [int seed = 0]) => Uint8List.fromList(
@@ -566,6 +677,23 @@ void main() {
             contains('seforim.db.zst.segments.tmp'))));
   });
 
+  test('שאריות הטווחים נמחקות אסינכרונית, קובץ המצב אחרון (#4070)',
+      () async {
+    for (final name in ['seg-1', 'seg-2', 'segments.tmp', 'segments']) {
+      File('$dest.$name').writeAsStringSync('x');
+    }
+    File(dest).writeAsStringSync('keep');
+    File('$dest.resume').writeAsStringSync('keep');
+    final io = _AsyncDeletesOnly();
+    await IOOverrides.runWithIOOverrides(
+        () => PatchDownloader.deleteSegmentFilesAsync(dest), io);
+
+    expect(io.deleted, hasLength(4));
+    expect(io.deleted.last, 'seforim.db.zst.segments');
+    expect(tmp.listSync().map((f) => p.basename(f.path)),
+        unorderedEquals(['seforim.db.zst', 'seforim.db.zst.resume']));
+  });
+
   test('sha256 שגוי → ניסיון נקי אחד; שגוי שוב → כשל ומחיקה', () async {
     var corrupted = 0;
     server.mutate = (start, body) {
@@ -587,6 +715,21 @@ void main() {
     await expectLater(download(downloader(), sha: _sha(server.data)),
         throwsA(isA<PatchDownloadException>()));
     expect(server.requests, hasLength(8));
+    expect(File(dest).existsSync(), isFalse);
+    expect(leftovers(), isEmpty);
+  });
+
+  test('sha256 שגוי פעמיים: dest נמחק אסינכרונית (#4070)', () async {
+    server.mutate = (start, body) {
+      if (start == size ~/ 2) body[10] ^= 0xFF;
+      return body;
+    };
+    final io = _NoSyncDestDelete(dest);
+    await IOOverrides.runWithIOOverrides(
+        () => expectLater(download(downloader(), sha: _sha(server.data)),
+            throwsA(isA<PatchDownloadException>())),
+        io);
+    expect(io.syncDeletes, 0);
     expect(File(dest).existsSync(), isFalse);
     expect(leftovers(), isEmpty);
   });

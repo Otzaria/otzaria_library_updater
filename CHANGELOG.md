@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `downloadToFile`: מחיקת שאריות הטווחים ומחיקת היעד בכשל אורך או sha256
+  אסינכרוניות. מחיקה סינכרונית של טווח בגודל של כמה GB תקעה את ה-UI של אוצריא
+  ל-17 שניות (Otzaria/otzaria#4070). `deleteSegmentFiles` נשאר סינכרוני.
 - `LibraryUpdatePlan.blockReason` (`LibraryUpdateBlockReason`): סיווג מובנה של
   תוכנית `blocked`. `appUpdateRequired` כשהעדכון דורש סכמה או פורמט patch
   שהצרכן אינו מכיר, אחרת `other`. הצרכן מבחין בין המקרים בלי לנתח את `reason`
