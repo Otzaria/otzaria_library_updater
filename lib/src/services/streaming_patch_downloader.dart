@@ -298,6 +298,7 @@ class StreamingPatchDownloader extends PatchDownloader {
         extractedPath,
         isCancelled,
         onVerifyProgress,
+        true,
       );
       _throwIfCancelled(isCancelled);
       if (hash == patchFile.uncompressedSha256.toLowerCase()) return true;

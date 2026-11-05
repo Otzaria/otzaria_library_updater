@@ -1,3 +1,6 @@
+@Timeout(Duration(minutes: 3))
+library;
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -59,6 +62,26 @@ Future<String> _isolatedDownload(String url, String dest) async {
   }
 }
 
+// `dart run` would rebuild native assets and fail replacing the loaded
+// sqlite3.dll; an AOT exe lacks the asset. `dart build cli` bundles both.
+late final String _workerExe;
+
+Future<String> _buildWorker(Directory out) async {
+  final result = await Process.run(Platform.resolvedExecutable, [
+    'build',
+    'cli',
+    '-t',
+    'test/support/destination_lock_worker.dart',
+    '-o',
+    out.path,
+  ]);
+  if (result.exitCode != 0) {
+    throw StateError('worker build failed: ${result.stdout}${result.stderr}');
+  }
+  final ext = Platform.isWindows ? '.exe' : '';
+  return '${out.path}/bundle/bin/destination_lock_worker$ext';
+}
+
 class _Worker {
   _Worker(this.process, this.result);
   final Process process;
@@ -66,12 +89,7 @@ class _Worker {
 }
 
 Future<_Worker> _processDownload(String url, String dest) async {
-  final process = await Process.start(Platform.resolvedExecutable, [
-    'run',
-    'test/support/destination_lock_worker.dart',
-    url,
-    dest,
-  ]);
+  final process = await Process.start(_workerExe, [url, dest]);
   final errors = process.stderr.transform(utf8.decoder).join();
   final output = process.stdout.transform(utf8.decoder).join();
   return _Worker(process, () async {
@@ -83,9 +101,17 @@ Future<_Worker> _processDownload(String url, String dest) async {
 }
 
 void main() {
+  late Directory workerDir;
   late Directory dir;
   late _BlockedServer server;
   late String dest;
+
+  setUpAll(() async {
+    workerDir = Directory.systemTemp.createTempSync('download-lock-worker');
+    _workerExe = await _buildWorker(workerDir);
+  });
+
+  tearDownAll(() => workerDir.deleteSync(recursive: true));
 
   setUp(() async {
     dir = Directory.systemTemp.createTempSync('download-lock-test');
@@ -99,25 +125,27 @@ void main() {
     dir.deleteSync(recursive: true);
   });
 
-  test('separate isolates exclude contenders and preserve the owner lock',
-      () async {
-    final first = _isolatedDownload(server.url, dest);
-    await server.waitFor(1);
-    // This also accepts the zero-byte sidecar left by the old implementation.
-    expect(File('$dest.lock').lengthSync(), 0);
-    final second = _isolatedDownload(server.url, dest);
-    final outcome = await Future.any([
-      second,
-      server.waitFor(2).then((_) => 'second HTTP request'),
-    ]);
-    server.release();
-    expect(await first, 'success');
-    expect(await second, 'locked');
-    expect(outcome, 'locked');
-    expect(server.count, 1);
-    expect(File(dest).readAsBytesSync(), List.filled(8, 65));
-    expect(File('$dest.lock').existsSync(), isTrue);
-  });
+  test(
+    'separate isolates exclude contenders and preserve the owner lock',
+    () async {
+      final first = _isolatedDownload(server.url, dest);
+      await server.waitFor(1);
+      // This also accepts the zero-byte sidecar left by the old implementation.
+      expect(File('$dest.lock').lengthSync(), 0);
+      final second = _isolatedDownload(server.url, dest);
+      final outcome = await Future.any([
+        second,
+        server.waitFor(2).then((_) => 'second HTTP request'),
+      ]);
+      server.release();
+      expect(await first, 'success');
+      expect(await second, 'locked');
+      expect(outcome, 'locked');
+      expect(server.count, 1);
+      expect(File(dest).readAsBytesSync(), List.filled(8, 65));
+      expect(File('$dest.lock').existsSync(), isTrue);
+    },
+  );
 
   test('failed contenders do not release another isolate lock', () async {
     final first = _isolatedDownload(server.url, dest);
@@ -125,10 +153,12 @@ void main() {
     final results = <String>[];
     for (var i = 0; i < 3; i++) {
       final next = _isolatedDownload(server.url, dest);
-      results.add(await Future.any([
-        next,
-        server.waitFor(2).then((_) => 'contender HTTP request'),
-      ]));
+      results.add(
+        await Future.any([
+          next,
+          server.waitFor(2).then((_) => 'contender HTTP request'),
+        ]),
+      );
       if (results.last != 'locked') break;
     }
     server.release();
@@ -140,23 +170,28 @@ void main() {
     expect(File('$dest.lock').lengthSync(), 0);
   });
 
-  test('separate processes exclude contenders and release after success',
-      () async {
-    final first = await _processDownload(server.url, dest);
-    await server.waitFor(1);
-    final second = await _processDownload(server.url, dest);
-    final outcome = await Future.any([
-      second.result,
-      server.waitFor(2).then((_) => 'second HTTP request'),
-    ]);
-    server.release();
-    expect(await first.result, 'success');
-    expect(await second.result, 'locked');
-    expect(outcome, 'locked');
-    expect(server.count, 1);
-    expect(await (await _processDownload(server.url, dest)).result, 'success');
-    expect(File('$dest.lock').existsSync(), isTrue);
-  });
+  test(
+    'separate processes exclude contenders and release after success',
+    () async {
+      final first = await _processDownload(server.url, dest);
+      await server.waitFor(1);
+      final second = await _processDownload(server.url, dest);
+      final outcome = await Future.any([
+        second.result,
+        server.waitFor(2).then((_) => 'second HTTP request'),
+      ]);
+      server.release();
+      expect(await first.result, 'success');
+      expect(await second.result, 'locked');
+      expect(outcome, 'locked');
+      expect(server.count, 1);
+      expect(
+        await (await _processDownload(server.url, dest)).result,
+        'success',
+      );
+      expect(File('$dest.lock').existsSync(), isTrue);
+    },
+  );
 
   test('an abruptly terminated owner leaves no stale lock', () async {
     final first = await _processDownload(server.url, dest);
@@ -168,7 +203,7 @@ void main() {
     server.release();
     expect(await (await _processDownload(server.url, dest)).result, 'success');
     expect(File(dest).readAsBytesSync(), List.filled(8, 65));
-  }, testOn: '!windows');
+  });
 
   test('a failed download closes the lock connection before retry', () async {
     final downloader = PatchDownloader(

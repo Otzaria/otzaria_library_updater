@@ -6,7 +6,7 @@ import 'dart:async';
 /// מתפצל לטווחים ב-`PatchDownloader`). המופע הוא סמפור משותף לכמה קוראים.
 class DownloadScheduler {
   DownloadScheduler({int maxConcurrent = defaultMaxConcurrent})
-      : maxConcurrent = maxConcurrent < 1 ? 1 : maxConcurrent;
+    : maxConcurrent = maxConcurrent < 1 ? 1 : maxConcurrent;
 
   /// החנק הוא לכל חיבור (~0.7MB/s), וארבעה מגיעים לתפוקה הכוללת (~2.1MB/s).
   static const int defaultMaxConcurrent = 4;
@@ -109,7 +109,12 @@ class ByteProgressAggregator {
 
   void _markExisting(int index, int bytes) {
     final value = bytes < 0 ? 0 : bytes;
-    final received = _received[index] > value ? value : _received[index];
+    // רק ירידה (תחילית שנזרקה) חותכת; עלייה מגיעה גם מחלק מאוחר בהורדה מפוצלת
+    // שבתי החלקים הקודמים כבר נספרו ב-received.
+    final shrinks = value < _existing[index];
+    final received = shrinks && _received[index] > value
+        ? value
+        : _received[index];
     if (_existing[index] == value && _received[index] == received) return;
     _existing[index] = value;
     _received[index] = received;

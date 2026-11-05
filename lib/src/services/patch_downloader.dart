@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
@@ -82,6 +83,9 @@ class PatchDownloader {
   final int segmentThresholdBytes;
 
   static const int defaultMaxConnections = 4;
+
+  /// תקרה לחיבורים להורדה אחת, גם כשהצרכן מבקש יותר.
+  static const int maxSegmentConnections = 8;
   static const int defaultSegmentThresholdBytes = 64 << 20;
 
   PatchDownloader({
@@ -92,9 +96,43 @@ class PatchDownloader {
     this.networkRetryDelays = defaultNetworkRetryDelays,
     this.maxConnections = defaultMaxConnections,
     this.segmentThresholdBytes = defaultSegmentThresholdBytes,
-  })  : _httpClient = httpClient ?? http.Client(),
-        _ownsClient = httpClient == null,
-        _decompress = decompress;
+  }) : _httpClient = httpClient ?? http.Client(),
+       _ownsClient = httpClient == null,
+       _decompress = decompress;
+
+  /// המקום הנוסף לצירוף הטווח הגדול שטרם צורף; תוכנית שמורה תקפה גוברת על
+  /// מספר חיבורים חדש. בלי תוכנית שמורה, החסם לפי תוכנית חדשה לאותו נכס.
+  int segmentAssemblyOverhead({
+    required String destPath,
+    required String url,
+    required int expectedSize,
+    String? expectedSha256,
+    String? resumeToken,
+    int? connections,
+  }) {
+    if (!isRemoteUrl(url) || expectedSize < segmentThresholdBytes) return 0;
+    final file = File(destPath);
+    if (file.existsSync() && file.lengthSync() >= expectedSize) return 0;
+    final plan = _readSegmentPlan(
+      destPath,
+      resumeToken,
+      url,
+      expectedSize,
+      expectedSha256?.toLowerCase(),
+    );
+    if (plan != null) {
+      var overhead = 0;
+      for (var i = plan.assembled; i < plan.count; i++) {
+        final length = plan.length(i);
+        if (length > overhead) overhead = length;
+      }
+      return overhead;
+    }
+    final effective = _effectiveConnections(connections);
+    if (effective < 2) return 0;
+    final fresh = _planSegments(0, expectedSize, null, effective);
+    return fresh == null ? 0 : fresh.length(fresh.count - 1);
+  }
 
   /// כשל רשת חולף: החיבור נסגר/אופס, או שהזרם נעצר מעבר ל-timeout.
   static bool isTransientNetworkError(Object error) =>
@@ -190,8 +228,15 @@ class PatchDownloader {
   /// קובץ מרוחק מ-[segmentThresholdBytes] ומעלה יורד בכמה טווחים מקבילים
   /// כשהשרת מכבד `Range` — ראו [_downloadSegmented].
   ///
-  /// [onExistingBytes] — כמה מהקובץ כבר על הדיסק ואינו עובר ברשת (0 כשנמחק).
+  /// [onExistingBytes] — כמה מהקובץ היה על הדיסק בתחילת הפעולה ואינו עובר
+  /// ברשת. נקרא שוב רק כשהבסיס יורד (0 כשהחלקי נמחק); בתים שהגיעו בריצה זו
+  /// אינם בסיס, גם אחרי ניסיון חוזר.
   /// [onVerifyProgress] — קריאת קובץ שכבר על הדיסק לצורך אימות.
+  /// [onAssembleProgress] — צירוף הטווחים אל היעד אחרי הורדה מפוצלת (בתים
+  /// שהועתקו, מתוך מה שיש להעתיק); בדיווח כל ~4MB גם בזמן עבודה ממושכת.
+  ///
+  /// [onProgress] שזורק מפיל את ההורדה (כך גם ביטול מכוון); קריאות אימות
+  /// וצירוף מה-worker נבלעות ונרשמות ל-stderr.
   ///
   /// הורדה שנייה לאותו [destPath] בזמן שהראשונה רצה נכשלת מיד ב-
   /// [PatchDownloadException], בלי לגעת בקבצים (`<destPath>.lock`).
@@ -204,11 +249,19 @@ class PatchDownloader {
     String? resumeToken,
     void Function(int downloaded, int? total)? onProgress,
     void Function(int verified, int total)? onVerifyProgress,
+    void Function(int done, int total)? onAssembleProgress,
     void Function(int bytes)? onExistingBytes,
+    int? connections,
     bool Function()? isCancelled,
   }) async {
     // ביטול בכניסה קודם לכל שינוי בדיסק ולכל בקשת רשת.
     _throwIfCancelled(isCancelled);
+    if (!isRemoteUrl(url)) {
+      // Opening the lock as SQLite must not touch a local source either.
+      await _ensureDistinctFiles(url, destPath);
+      await _ensureDistinctFiles(url, '$destPath.lock');
+      _throwIfCancelled(isCancelled);
+    }
     final lock = _DestinationLock.acquire(destPath);
     try {
       await _downloadToFileLocked(
@@ -219,7 +272,9 @@ class PatchDownloader {
         resumeToken: resumeToken,
         onProgress: onProgress,
         onVerifyProgress: onVerifyProgress,
+        onAssembleProgress: onAssembleProgress,
         onExistingBytes: onExistingBytes,
+        connections: connections,
         isCancelled: isCancelled,
       );
     } finally {
@@ -235,10 +290,13 @@ class PatchDownloader {
     String? resumeToken,
     void Function(int downloaded, int? total)? onProgress,
     void Function(int verified, int total)? onVerifyProgress,
+    void Function(int done, int total)? onAssembleProgress,
     void Function(int bytes)? onExistingBytes,
+    int? connections,
     bool Function()? isCancelled,
   }) async {
     final messages = LibraryUpdaterMessages.current;
+    final maxConn = _effectiveConnections(connections);
 
     if (!isRemoteUrl(url)) {
       await _copyLocalFile(
@@ -256,6 +314,12 @@ class PatchDownloader {
     final sidecarPath = resumeSidecarPath(destPath);
     // ביטול באמצע ה-hash של האימוץ אינו סיבה למחוק קובץ שלא נגענו בו.
     var adopting = false;
+    // בתים שהיו על הדיסק בתחילת הפעולה; בתים שהגיעו בה אינם "קיימים".
+    var baseline = 0;
+    void setBaseline(int bytes) {
+      baseline = bytes;
+      onExistingBytes?.call(bytes);
+    }
 
     try {
       String? storedValidator;
@@ -300,11 +364,21 @@ class PatchDownloader {
 
       var offset = await _lengthOrZero(file);
       final alreadyComplete = expectedSize != null && offset >= expectedSize;
-      final segmented = _segmentationApplies(expectedSize);
-      final resumedPlan = segmented && !alreadyComplete
-          ? _readSegmentPlan(destPath, resumeToken, url, expectedSize!,
-              expectedSha256?.toLowerCase())
+      // תוכנית חיה ממשיכה גם כשהתבקש חיבור אחד: מחיקתה מאבדת בתים תקינים.
+      final resumedPlan =
+          expectedSize != null &&
+              expectedSize >= segmentThresholdBytes &&
+              !alreadyComplete
+          ? _readSegmentPlan(
+              destPath,
+              resumeToken,
+              url,
+              expectedSize,
+              expectedSha256?.toLowerCase(),
+            )
           : null;
+      final segmented =
+          resumedPlan != null || _segmentationApplies(expectedSize, maxConn);
       if (resumedPlan == null) await _deleteSegmentLeftovers(destPath);
 
       // חלקי בלי validator אינו נאמן: אין If-Range שיכבול אותו לגרסת השרת.
@@ -313,11 +387,13 @@ class PatchDownloader {
           storedValidator == null &&
           resumedPlan == null) {
         await _deleteRequired(
-            destPath, messages.deletePartialWithoutValidatorFailed);
+          destPath,
+          messages.deletePartialWithoutValidatorFailed,
+        );
         offset = 0;
       }
 
-      if (offset > 0) onExistingBytes?.call(offset);
+      if (offset > 0) setBaseline(offset);
       if (alreadyComplete) {
         onProgress?.call(offset, offset);
         if (offset == expectedSize &&
@@ -333,14 +409,18 @@ class PatchDownloader {
           _throwIfCancelled(isCancelled);
           return;
         }
-        await _deleteRequired(destPath, messages.deletePartialBeforeRetryFailed);
+        await _deleteRequired(
+          destPath,
+          messages.deletePartialBeforeRetryFailed,
+        );
         _deleteQuietly(sidecarPath);
         storedValidator = null;
         offset = 0;
-        onExistingBytes?.call(0);
+        setBaseline(0);
       }
 
       if (segmented) {
+        final onDiskAtStart = offset;
         final result = await _downloadSegmented(
           url: url,
           destPath: destPath,
@@ -351,7 +431,9 @@ class PatchDownloader {
           validator: storedValidator,
           onProgress: onProgress,
           onVerifyProgress: onVerifyProgress,
-          onExistingBytes: onExistingBytes,
+          onAssembleProgress: onAssembleProgress,
+          onExistingBytes: setBaseline,
+          connections: maxConn,
           isCancelled: isCancelled,
         );
         if (result.done) {
@@ -360,7 +442,9 @@ class PatchDownloader {
         }
         storedValidator = result.validator;
         offset = await _lengthOrZero(file);
-        onExistingBytes?.call(offset);
+        // רק תחילית היעד מתחילת הפעולה שרדה; טווחים שנמחקו ובתים חדשים אינם בסיס.
+        final surviving = math.min(onDiskAtStart, math.min(offset, baseline));
+        if (surviving != baseline) setBaseline(surviving);
       }
 
       // אחרי קטיעה ה-hash מחושב פעם אחת על הקובץ המוגמר, לא על כל partial.
@@ -384,7 +468,7 @@ class PatchDownloader {
             resumeToken: resumeToken,
             onProgress: onProgress,
             onVerifyProgress: onVerifyProgress,
-            onExistingBytes: onExistingBytes,
+            onExistingBytes: setBaseline,
             isCancelled: isCancelled,
           );
         },
@@ -392,17 +476,23 @@ class PatchDownloader {
         onRetry: () async {
           retrying = true;
           if (_partialIsResumable(
-              destPath, sidecarPath, expectedSize, resumeToken)) {
+            destPath,
+            sidecarPath,
+            expectedSize,
+            resumeToken,
+          )) {
             storedValidator = _strongEtag(_readSidecar(sidecarPath)?.etag);
             offset = await file.length();
-            onExistingBytes?.call(offset);
+            if (offset < baseline) setBaseline(offset);
             return;
           }
           await _deleteRequired(
-              destPath, messages.deletePartialBeforeRetryFailed);
+            destPath,
+            messages.deletePartialBeforeRetryFailed,
+          );
           storedValidator = null;
           offset = 0;
-          onExistingBytes?.call(0);
+          setBaseline(0);
         },
       );
       final downloaded = outcome.downloaded;
@@ -416,9 +506,13 @@ class PatchDownloader {
       }
       if (expectedSha256 != null) {
         final expected = expectedSha256.toLowerCase();
-        final actual = outcome.digest?.toString() ??
+        final actual =
+            outcome.digest?.toString() ??
             await _hashFileSha256InIsolate(
-                destPath, isCancelled, onVerifyProgress);
+              destPath,
+              isCancelled,
+              onVerifyProgress,
+            );
         if (actual != expected) {
           await _deleteFileQuietlyAsync(destPath);
           _deleteQuietly(sidecarPath);
@@ -434,7 +528,11 @@ class PatchDownloader {
       // חלקי נשמר רק אם הוא ניתן-לחידוש; אחרת הריצה הבאה תמחק אותו ממילא.
       if (!adopting &&
           !_partialIsResumable(
-              destPath, sidecarPath, expectedSize, resumeToken)) {
+            destPath,
+            sidecarPath,
+            expectedSize,
+            resumeToken,
+          )) {
         await _deleteFileQuietlyAsync(destPath);
         await _deleteSegmentLeftovers(destPath);
         if (!file.existsSync()) _deleteQuietly(sidecarPath);
@@ -479,11 +577,17 @@ class PatchDownloader {
         _matchesVerifiedMark(sidecar?.verified, file, expected)) {
       return true;
     }
-    final actual =
-        await _hashFileSha256InIsolate(destPath, isCancelled, onVerifyProgress);
+    final actual = await _hashFileSha256InIsolate(
+      destPath,
+      isCancelled,
+      onVerifyProgress,
+    );
     if (actual != expected) return false;
     await recordVerified(
-        destPath: destPath, resumeToken: resumeToken, sha256: expected);
+      destPath: destPath,
+      resumeToken: resumeToken,
+      sha256: expected,
+    );
     return true;
   }
 
@@ -497,8 +601,12 @@ class PatchDownloader {
     final mark = _verifiedMarkFor(File(destPath), sha256.toLowerCase());
     if (mark == null) return;
     try {
-      await _writeSidecar(resumeSidecarPath(destPath), resumeToken, null,
-          verified: mark);
+      await _writeSidecar(
+        resumeSidecarPath(destPath),
+        resumeToken,
+        null,
+        verified: mark,
+      );
     } catch (_) {}
   }
 
@@ -508,11 +616,18 @@ class PatchDownloader {
 
   /// מוריד את [asset] אל [destPath]: קובץ יחיד דרך [downloadToFile] (עם
   /// ה-digest כ-sha256 צפוי), ונכס מפוצל דרך [downloadSplitToFile].
+  /// [onProgress]/[onExistingBytes] הם סכומים ואינם מתאימים למשבצת אחת של
+  /// מונה מאחד; לשם כך [onPartProgress]/[onPartExisting] (קובץ יחיד = חלק 0).
   Future<void> downloadReleaseAssetToFile({
     required ReleaseAsset asset,
     required String destPath,
     String? resumeToken,
     void Function(int downloaded, int? total)? onProgress,
+    void Function(int verified, int total)? onVerifyProgress,
+    void Function(int done, int total)? onAssembleProgress,
+    void Function(int bytes)? onExistingBytes,
+    void Function(int part, int downloaded, int? total)? onPartProgress,
+    void Function(int part, int bytes)? onPartExisting,
     bool Function()? isCancelled,
   }) {
     final split = asset.split;
@@ -522,6 +637,11 @@ class PatchDownloader {
         destPath: destPath,
         resumeToken: resumeToken,
         onProgress: onProgress,
+        onVerifyProgress: onVerifyProgress,
+        onAssembleProgress: onAssembleProgress,
+        onExistingBytes: onExistingBytes,
+        onPartProgress: onPartProgress,
+        onPartExisting: onPartExisting,
         isCancelled: isCancelled,
       );
     }
@@ -534,30 +654,148 @@ class PatchDownloader {
           ? digest.substring('sha256:'.length)
           : null,
       resumeToken: resumeToken,
-      onProgress: onProgress,
+      onProgress: onProgress == null && onPartProgress == null
+          ? null
+          : (downloaded, total) {
+              onPartProgress?.call(0, downloaded, total);
+              onProgress?.call(downloaded, total);
+            },
+      onVerifyProgress: onVerifyProgress,
+      onAssembleProgress: onAssembleProgress,
+      onExistingBytes: onExistingBytes == null && onPartExisting == null
+          ? null
+          : (bytes) {
+              onPartExisting?.call(0, bytes);
+              onExistingBytes?.call(bytes);
+            },
       isCancelled: isCancelled,
     );
   }
 
   /// מוריד כל חלק דרך [downloadToFile] (resume ו-sha256 לכל חלק), מחבר אל
   /// [destPath] ומאמת את השלם; [resumeToken] כובל גם את הארכיון המחובר.
+  /// [onVerifyProgress] — אימות החלקים והארכיון (מתוך [SplitAsset.size]);
+  /// [onAssembleProgress] — צירוף טווחי חלק גדול, ואחריו צירוף החלקים
+  /// לארכיון; כל שלב מתחיל מ-0. [onExistingBytes] — סכום הבסיסים של החלקים
+  /// שהגענו אליהם (חלק שירד בריצה קודמת אינו בתי רשת). מונה מאחד צריך את
+  /// [onPartProgress]/[onPartExisting] עם משבצת לכל חלק: בסכום, ירידת בסיס
+  /// של חלק מאוחר הייתה חותכת גם בתי רשת של חלקים קודמים.
+  /// נעילת `<destPath>.lock` כמו ב-[downloadToFile]; נעילות החלקים נפרדות.
   Future<void> downloadSplitToFile({
     required SplitAsset split,
     required String destPath,
     String? resumeToken,
     void Function(int downloaded, int? total)? onProgress,
+    void Function(int verified, int total)? onVerifyProgress,
+    void Function(int done, int total)? onAssembleProgress,
+    void Function(int bytes)? onExistingBytes,
+    void Function(int part, int downloaded, int? total)? onPartProgress,
+    void Function(int part, int bytes)? onPartExisting,
     bool Function()? isCancelled,
   }) async {
     _throwIfCancelled(isCancelled);
+    // A local part can be a stale destination/part/sidecar from an earlier
+    // run. Validate every source before cleanup or opening any lock file.
+    await _validateSplitLocalSources(split, destPath, isCancelled);
+    _throwIfCancelled(isCancelled);
+    final lock = _DestinationLock.acquire(destPath);
+    try {
+      await _downloadSplitToFileLocked(
+        split: split,
+        destPath: destPath,
+        resumeToken: resumeToken,
+        onProgress: onProgress,
+        onVerifyProgress: onVerifyProgress,
+        onAssembleProgress: onAssembleProgress,
+        onExistingBytes: onExistingBytes,
+        onPartProgress: onPartProgress,
+        onPartExisting: onPartExisting,
+        isCancelled: isCancelled,
+      );
+    } finally {
+      lock.release();
+    }
+  }
+
+  Future<void> _validateSplitLocalSources(
+    SplitAsset split,
+    String destPath,
+    bool Function()? isCancelled,
+  ) async {
+    final sources = split.parts
+        .map((part) => part.downloadUrl)
+        .where((url) => !isRemoteUrl(url))
+        .toSet();
+    if (sources.isEmpty) return;
+    final managed = <String>{
+      destPath,
+      '$destPath.lock',
+      '$destPath.resume',
+      '$destPath.joining',
+    };
+    for (var i = 0; i < split.parts.length; i++) {
+      final part = splitPartPath(destPath, i);
+      managed.addAll([
+        part,
+        '$part.lock',
+        '$part.resume',
+        '$part.segments',
+        '$part.segments.tmp',
+      ]);
+    }
+    final directory = Directory(p.dirname(destPath));
+    final pattern = RegExp(
+      '^${RegExp.escape(p.basename(destPath))}'
+      r'(?:\.part-\d+)?(?:\.(?:lock|resume|joining|segments(?:\.tmp)?|seg-\d+))?$',
+    );
+    if (await directory.exists()) {
+      await for (final entity in directory.list(followLinks: false)) {
+        _throwIfCancelled(isCancelled);
+        if (pattern.hasMatch(p.basename(entity.path))) {
+          managed.add(entity.path);
+        }
+      }
+    }
+    for (final source in sources) {
+      for (final target in managed) {
+        _throwIfCancelled(isCancelled);
+        await _ensureDistinctFiles(source, target);
+      }
+    }
+  }
+
+  Future<void> _downloadSplitToFileLocked({
+    required SplitAsset split,
+    required String destPath,
+    String? resumeToken,
+    void Function(int downloaded, int? total)? onProgress,
+    void Function(int verified, int total)? onVerifyProgress,
+    void Function(int done, int total)? onAssembleProgress,
+    void Function(int bytes)? onExistingBytes,
+    void Function(int part, int downloaded, int? total)? onPartProgress,
+    void Function(int part, int bytes)? onPartExisting,
+    bool Function()? isCancelled,
+  }) async {
     final sidecarPath = resumeSidecarPath(destPath);
-    final joinedToken =
-        resumeToken == null ? null : '$resumeToken|joined:${split.sha256}';
+    final joinedToken = resumeToken == null
+        ? null
+        : '$resumeToken|joined:${split.sha256}';
 
     if (joinedToken != null &&
         _readSidecar(sidecarPath)?.token == joinedToken &&
         await _lengthOrZero(File(destPath)) == split.size) {
+      onExistingBytes?.call(split.size);
       onProgress?.call(split.size, split.size);
-      if (await _hashFileSha256InIsolate(destPath, isCancelled) ==
+      for (var i = 0; i < split.parts.length; i++) {
+        final size = split.parts[i].size;
+        onPartExisting?.call(i, size);
+        onPartProgress?.call(i, size, size);
+      }
+      if (await _hashFileSha256InIsolate(
+            destPath,
+            isCancelled,
+            onVerifyProgress,
+          ) ==
           split.sha256) {
         _deleteSplitParts(destPath, from: 0);
         return;
@@ -571,6 +809,7 @@ class PatchDownloader {
     _deleteSplitParts(destPath, from: split.parts.length);
 
     var completed = 0;
+    final baselines = List<int>.filled(split.parts.length, 0);
     for (var i = 0; i < split.parts.length; i++) {
       final part = split.parts[i];
       final base = completed;
@@ -582,8 +821,21 @@ class PatchDownloader {
         resumeToken: resumeToken == null
             ? null
             : '$resumeToken|${part.name}|${part.sha256}',
-        onProgress: (downloaded, _) =>
-            onProgress?.call(base + downloaded, split.size),
+        onProgress: (downloaded, total) {
+          onPartProgress?.call(i, downloaded, total);
+          onProgress?.call(base + downloaded, split.size);
+        },
+        onVerifyProgress: onVerifyProgress == null
+            ? null
+            : (verified, _) => onVerifyProgress(base + verified, split.size),
+        onAssembleProgress: onAssembleProgress,
+        onExistingBytes: onExistingBytes == null && onPartExisting == null
+            ? null
+            : (bytes) {
+                baselines[i] = bytes;
+                onPartExisting?.call(i, bytes);
+                onExistingBytes?.call(baselines.fold(0, (a, b) => a + b));
+              },
         isCancelled: isCancelled,
       );
       completed += part.size;
@@ -595,6 +847,7 @@ class PatchDownloader {
       destPath,
       split.size,
       split.sha256,
+      onAssembleProgress,
     );
     if (joinedToken != null) {
       await _writeSidecar(sidecarPath, joinedToken, null);
@@ -606,7 +859,9 @@ class PatchDownloader {
     final dir = Directory(p.dirname(destPath));
     if (!dir.existsSync()) return;
     final pattern = RegExp(
-        '^${RegExp.escape(p.basename(destPath))}' r'\.part-(\d+)(\.resume)?$');
+      '^${RegExp.escape(p.basename(destPath))}'
+      r'\.part-(\d+)(\.resume)?$',
+    );
     try {
       for (final entity in dir.listSync()) {
         if (entity is! File) continue;
@@ -673,7 +928,7 @@ class PatchDownloader {
             );
           }
           final headers = <String, String>{
-            'Accept': 'application/octet-stream'
+            'Accept': 'application/octet-stream',
           };
           if (roundOffset > 0) {
             headers['Range'] = 'bytes=$roundOffset-';
@@ -739,10 +994,12 @@ class PatchDownloader {
 
           if (response.statusCode == 416) {
             // 416 מתקבל כשלמות רק כשה-total תואם ל-offset (ולצפוי).
-            final total =
-                _parseUnsatisfiedRangeTotal(response.headers['content-range']);
+            final total = _parseUnsatisfiedRangeTotal(
+              response.headers['content-range'],
+            );
             await _abandonBody(response);
-            final complete = roundOffset > 0 &&
+            final complete =
+                roundOffset > 0 &&
                 await _lengthOrZero(file) == roundOffset &&
                 total != null &&
                 total == roundOffset &&
@@ -752,8 +1009,13 @@ class PatchDownloader {
               // ה-digest המוחזר הוא של כל הקובץ — כאן התחילית חייבת להיגבב.
               if (computeHash && !prefixHashed && roundOffset > 0) {
                 prefixHashed = true;
-                await _hashPrefix(file, roundOffset, hashInput!, isCancelled,
-                    onVerifyProgress);
+                await _hashPrefix(
+                  file,
+                  roundOffset,
+                  hashInput!,
+                  isCancelled,
+                  onVerifyProgress,
+                );
               }
               hashInput?.close();
               _throwIfCancelled(isCancelled);
@@ -809,7 +1071,8 @@ class PatchDownloader {
             }
           }
 
-          final validRange = range != null &&
+          final validRange =
+              range != null &&
               range.start == roundOffset &&
               range.end >= range.start &&
               (range.total == null || range.end < range.total!) &&
@@ -827,8 +1090,13 @@ class PatchDownloader {
           if (computeHash && !prefixHashed && currentOffset > 0) {
             prefixHashed = true;
             try {
-              await _hashPrefix(file, currentOffset, hashInput!, isCancelled,
-                  onVerifyProgress);
+              await _hashPrefix(
+                file,
+                currentOffset,
+                hashInput!,
+                isCancelled,
+                onVerifyProgress,
+              );
             } catch (_) {
               await _abandonBody(response);
               hashInput?.close();
@@ -933,15 +1201,16 @@ class PatchDownloader {
     Future<void>? abortTrigger,
   }) async {
     final abort = Completer<void>();
-    final request = http.AbortableRequest(
-      'GET',
-      uri,
-      abortTrigger: abortTrigger == null
-          ? abort.future
-          : Future.any([abort.future, abortTrigger]),
-    )
-      ..followRedirects = followRedirects
-      ..headers.addAll(headers);
+    final request =
+        http.AbortableRequest(
+            'GET',
+            uri,
+            abortTrigger: abortTrigger == null
+                ? abort.future
+                : Future.any([abort.future, abortTrigger]),
+          )
+          ..followRedirects = followRedirects
+          ..headers.addAll(headers);
     final pending = _httpClient.send(request);
     try {
       return await pending.timeout(connectTimeout);
@@ -985,7 +1254,8 @@ class PatchDownloader {
       await _abandonBody(response);
       throw PatchDownloadException(messages.saveDownloadedFileFailed('$error'));
     }
-    final total = overallTotal ??
+    final total =
+        overallTotal ??
         (response.contentLength == null
             ? null
             : resumeOffset + response.contentLength!);
@@ -1052,8 +1322,12 @@ class PatchDownloader {
     var uri = Uri.parse(url);
     const maxHops = 6;
     for (var hop = 0; hop <= maxHops; hop++) {
-      final response = await _sendGet(uri, headers,
-          followRedirects: false, abortTrigger: abortTrigger);
+      final response = await _sendGet(
+        uri,
+        headers,
+        followRedirects: false,
+        abortTrigger: abortTrigger,
+      );
       if (_isRedirect(response.statusCode)) {
         final location = response.headers['location'];
         if (location == null) return response;
@@ -1096,8 +1370,10 @@ class PatchDownloader {
   /// מפענח את ה-total מ-`Content-Range: bytes */N` של 416.
   int? _parseUnsatisfiedRangeTotal(String? contentRange) {
     if (contentRange == null) return null;
-    final match = RegExp(r'^\s*bytes\s+\*/(\d+)\s*$', caseSensitive: false)
-        .firstMatch(contentRange.trim());
+    final match = RegExp(
+      r'^\s*bytes\s+\*/(\d+)\s*$',
+      caseSensitive: false,
+    ).firstMatch(contentRange.trim());
     if (match == null) return null;
     return int.tryParse(match.group(1)!);
   }
@@ -1128,14 +1404,16 @@ class PatchDownloader {
 
   /// קובץ הצד: טוקן, ETag חזק (אופציונלי), סימון אימות (אופציונלי).
   ({String token, String? etag, String? verified})? _readSidecar(
-      String sidecarPath) {
+    String sidecarPath,
+  ) {
     try {
       final f = File(sidecarPath);
       if (!f.existsSync()) return null;
       final lines = f.readAsStringSync().split('\n');
       final etag = lines.length > 1 && lines[1].isNotEmpty ? lines[1] : null;
-      final verified =
-          lines.length > 2 && lines[2].isNotEmpty ? lines[2] : null;
+      final verified = lines.length > 2 && lines[2].isNotEmpty
+          ? lines[2]
+          : null;
       return (token: lines.first, etag: etag, verified: verified);
     } catch (_) {
       return null;
@@ -1144,8 +1422,12 @@ class PatchDownloader {
 
   /// בלי ETag ובלי סימון נכתב הטוקן לבדו — וכך גם נמחק סימון של תוכן משתנה.
   /// אסינכרוני: ב-Windows ה-isolate של ה-UI רץ על ה-thread של הפלטפורמה (#3780).
-  Future<void> _writeSidecar(String sidecarPath, String token, String? etag,
-      {String? verified}) async {
+  Future<void> _writeSidecar(
+    String sidecarPath,
+    String token,
+    String? etag, {
+    String? verified,
+  }) async {
     try {
       final lines = <String>[
         token,
@@ -1155,8 +1437,10 @@ class PatchDownloader {
       await File(sidecarPath).writeAsString(lines.join('\n'), flush: true);
     } catch (error) {
       throw PatchDownloadException(
-        LibraryUpdaterMessages.current
-            .writeResumeSidecarFailed(sidecarPath, '$error'),
+        LibraryUpdaterMessages.current.writeResumeSidecarFailed(
+          sidecarPath,
+          '$error',
+        ),
       );
     }
   }
@@ -1187,8 +1471,11 @@ class PatchDownloader {
     final expected = expectedSha256.toLowerCase();
     final file = File(destPath);
     if (_matchesVerifiedMark(storedVerified, file, expected)) return true;
-    final actual =
-        await _hashFileSha256InIsolate(destPath, isCancelled, onVerifyProgress);
+    final actual = await _hashFileSha256InIsolate(
+      destPath,
+      isCancelled,
+      onVerifyProgress,
+    );
     if (actual != expected) return false;
     if (resumeToken != null) {
       await _markVerified(sidecarPath, resumeToken, expected, file);
@@ -1198,7 +1485,11 @@ class PatchDownloader {
 
   /// flush לפני הסימון, כדי שזמן-השינוי שנרשם יהיה הסופי.
   Future<void> _markVerified(
-      String sidecarPath, String token, String digest, File file) async {
+    String sidecarPath,
+    String token,
+    String digest,
+    File file,
+  ) async {
     try {
       final handle = await file.open(mode: FileMode.append);
       try {
@@ -1212,8 +1503,12 @@ class PatchDownloader {
     final mark = _verifiedMarkFor(file, digest);
     if (mark == null) return;
     try {
-      await _writeSidecar(sidecarPath, token, _readSidecar(sidecarPath)?.etag,
-          verified: mark);
+      await _writeSidecar(
+        sidecarPath,
+        token,
+        _readSidecar(sidecarPath)?.etag,
+        verified: mark,
+      );
     } catch (_) {}
   }
 
@@ -1237,7 +1532,10 @@ class PatchDownloader {
     final expected = expectedSha256.toLowerCase();
     if (!_matchesVerifiedMark(storedVerified, file, expected)) {
       final actual = await _hashFileSha256InIsolate(
-          file.path, isCancelled, onVerifyProgress);
+        file.path,
+        isCancelled,
+        onVerifyProgress,
+      );
       if (actual != expected) return null;
     }
     final mark = _verifiedMarkFor(file, expected);
@@ -1288,10 +1586,9 @@ class PatchDownloader {
     bool Function()? isCancelled,
   }) async {
     final messages = LibraryUpdaterMessages.current;
-    final response = await _sendGet(
-      Uri.parse(url),
-      const {'Accept': 'application/octet-stream'},
-    );
+    final response = await _sendGet(Uri.parse(url), const {
+      'Accept': 'application/octet-stream',
+    });
     if (response.statusCode != 200) {
       await _abandonBody(response);
       throw PatchDownloadException(
@@ -1330,8 +1627,11 @@ class PatchDownloader {
   }) {
     if (actual != expected) {
       throw PatchDownloadException(
-        LibraryUpdaterMessages.current
-            .checksumMismatchDetailed(label, '$expected', '$actual'),
+        LibraryUpdaterMessages.current.checksumMismatchDetailed(
+          label,
+          '$expected',
+          '$actual',
+        ),
       );
     }
   }
@@ -1376,7 +1676,7 @@ class PatchDownloader {
     bool Function()? isCancelled,
     FutureOr<void> Function()? onRetry,
   }) async {
-    for (var attempt = 0;; attempt++) {
+    for (var attempt = 0; ; attempt++) {
       try {
         return await run();
       } catch (e) {
@@ -1530,8 +1830,10 @@ class PatchDownloader {
 /// Validate before truncating/removing either path. The identity check includes
 /// hard links and symlinks; lexical checks also protect a missing destination.
 Future<void> _ensureDistinctFiles(String sourcePath, String destPath) async {
-  var identical = p.equals(p.normalize(p.absolute(sourcePath)),
-      p.normalize(p.absolute(destPath)));
+  var identical = p.equals(
+    p.normalize(p.absolute(sourcePath)),
+    p.normalize(p.absolute(destPath)),
+  );
   if (!identical &&
       await File(sourcePath).exists() &&
       await File(destPath).exists()) {
@@ -1539,7 +1841,8 @@ Future<void> _ensureDistinctFiles(String sourcePath, String destPath) async {
     // Resolve both targets first, then also check identity for hard links.
     final source = await File(sourcePath).resolveSymbolicLinks();
     final destination = await File(destPath).resolveSymbolicLinks();
-    identical = p.equals(source, destination) ||
+    identical =
+        p.equals(source, destination) ||
         await FileSystemEntity.identical(source, destination);
   }
   if (identical) {
@@ -1553,25 +1856,37 @@ Future<String> _hashFileSha256InIsolate(
   String path, [
   bool Function()? isCancelled,
   void Function(int verified, int total)? onProgress,
-]) =>
-    _runCancellableWorker(_hashFileWork(path), isCancelled, onProgress);
+  bool propagateProgressErrors = false,
+]) => _runCancellableWorker(
+  _hashFileWork(path),
+  isCancelled,
+  onProgress,
+  null,
+  propagateProgressErrors,
+);
 
 /// נבנה בפונקציה נפרדת כדי שה-closure ילכוד רק את [path].
 _WorkerBody<String> _hashFileWork(String path) =>
-    (isCancelled, onProgress) => _hashFileSha256(path, isCancelled, onProgress);
+    (isCancelled, onProgress, _) =>
+        _hashFileSha256(path, isCancelled, onProgress);
 
-typedef _WorkerBody<T> = Future<T> Function(
-  bool Function()? isCancelled,
-  void Function(int done, int total)? onProgress,
-);
+typedef _WorkerBody<T> =
+    Future<T> Function(
+      bool Function()? isCancelled,
+      void Function(int done, int total)? onProgress,
+      void Function(int done, int total)? onAssemble,
+    );
 
 /// מריץ את [work] ב-isolate נפרד; ביטול נדגם כל 100ms ונמסר בהודעה.
+/// [onProgress] — אימות (גיבוב), [onAssemble] — צירוף/העתקה.
 Future<T> _runCancellableWorker<T>(
   _WorkerBody<T> work,
   bool Function()? isCancelled,
-  void Function(int done, int total)? onProgress,
-) async {
-  if (isCancelled == null && onProgress == null) {
+  void Function(int done, int total)? onProgress, [
+  void Function(int done, int total)? onAssemble,
+  bool propagateProgressErrors = false,
+]) async {
+  if (isCancelled == null && onProgress == null && onAssemble == null) {
     return _workerValue(await _runWorker(work, null));
   }
   if (isCancelled != null && isCancelled()) {
@@ -1589,17 +1904,24 @@ Future<T> _runCancellableWorker<T>(
     cancelled = true;
     workerCancel?.send(null);
   }
+
   final subscription = control.listen((message) {
     if (message == null) {
       workerDone.complete();
     } else if (message is SendPort) {
       workerCancel = message;
       if (cancelled) workerCancel!.send(null);
-    } else if (message is List && onProgress != null && callbackError == null) {
+    } else if (message is List && callbackError == null) {
+      final report = message.length > 2 ? onAssemble : onProgress;
       try {
-        onProgress(message[0] as int, message[1] as int);
+        report?.call(message[0] as int, message[1] as int);
       } catch (error, stack) {
-        cancelForCallbackError(error, stack);
+        if (propagateProgressErrors) {
+          cancelForCallbackError(error, stack);
+        } else {
+          // Legacy download observers never abort an otherwise valid transfer.
+          stderr.writeln('progress callback failed: $error');
+        }
       }
     }
   });
@@ -1638,25 +1960,27 @@ Future<T> _runCancellableWorker<T>(
 
 /// נפרד מ-[_runCancellableWorker] כדי שה-closure לא ילכוד את ה-ReceivePort.
 Future<(T?, Object?, StackTrace?)> _runWorker<T>(
-        _WorkerBody<T> work, SendPort? control) =>
-    Isolate.run(() async {
-      final cancel = control == null ? null : ReceivePort();
-      var cancelled = false;
-      cancel?.listen((_) => cancelled = true);
-      if (cancel != null) control!.send(cancel.sendPort);
-      try {
-        final result = await work(
-          control == null ? null : () => cancelled,
-          control == null ? null : (done, total) => control.send([done, total]),
-        );
-        return (result, null, null);
-      } catch (error, stack) {
-        return (null, error, stack);
-      } finally {
-        cancel?.close();
-        control?.send(null);
-      }
-    });
+  _WorkerBody<T> work,
+  SendPort? control,
+) => Isolate.run(() async {
+  final cancel = control == null ? null : ReceivePort();
+  var cancelled = false;
+  cancel?.listen((_) => cancelled = true);
+  if (cancel != null) control!.send(cancel.sendPort);
+  try {
+    final result = await work(
+      control == null ? null : () => cancelled,
+      control == null ? null : (done, total) => control.send([done, total]),
+      control == null ? null : (done, total) => control.send([done, total, 1]),
+    );
+    return (result, null, null);
+  } catch (error, stack) {
+    return (null, error, stack);
+  } finally {
+    cancel?.close();
+    control?.send(null);
+  }
+});
 
 T _workerValue<T>((T?, Object?, StackTrace?) outcome) {
   final error = outcome.$2;
@@ -1680,9 +2004,11 @@ Future<String> _hashFileSha256(
     file = await File(path).open();
     var verified = 0;
     var lastReported = 0;
-    for (var read = await file.readInto(buffer);
-        read > 0;
-        read = await file.readInto(buffer)) {
+    for (
+      var read = await file.readInto(buffer);
+      read > 0;
+      read = await file.readInto(buffer)
+    ) {
       if (isCancelled != null && isCancelled()) {
         throw const PatchDownloadCancelled();
       }
@@ -1704,38 +2030,83 @@ Future<String> _hashFileSha256(
 
 /// top-level כדי שה-closure של `Isolate.run` לא ילכוד את ה-PatchDownloader.
 /// המלל הפעיל עובר ל-isolate, אחרת הודעת כשל הייתה חוזרת בעברית.
-Future<void> _joinPartsInIsolate(List<String> partPaths, String destPath,
-    int expectedSize, String expectedSha256) {
+Future<void> _joinPartsInIsolate(
+  List<String> partPaths,
+  String destPath,
+  int expectedSize,
+  String expectedSha256, [
+  void Function(int done, int total)? onAssemble,
+]) => _runCancellableWorker(
+  _joinWork(partPaths, destPath, expectedSize, expectedSha256),
+  null,
+  null,
+  onAssemble,
+);
+
+_WorkerBody<void> _joinWork(
+  List<String> partPaths,
+  String destPath,
+  int expectedSize,
+  String expectedSha256,
+) {
   final messages = LibraryUpdaterMessages.current;
-  return Isolate.run(() async {
+  return (_, _, onAssemble) async {
     LibraryUpdaterMessages.current = messages;
-    await _joinParts(partPaths, destPath, expectedSize, expectedSha256);
-  });
+    await _joinParts(
+      partPaths,
+      destPath,
+      expectedSize,
+      expectedSha256,
+      onAssemble,
+    );
+  };
 }
 
 /// מצרף לקובץ זמני, מוחק כל חלק אחרי צירופו, ומעביר ל-[destPath] רק אחרי
 /// אימות. אינו נעצר בביטול: חיבור שנקטע היה מאבד חלקים שכבר צורפו.
-Future<void> _joinParts(List<String> partPaths, String destPath,
-    int expectedSize, String expectedSha256) async {
+Future<void> _joinParts(
+  List<String> partPaths,
+  String destPath,
+  int expectedSize,
+  String expectedSha256, [
+  void Function(int done, int total)? onAssemble,
+]) async {
   final messages = LibraryUpdaterMessages.current;
   final tempPath = '$destPath.joining';
   final digestSink = Sha256DigestCollector();
   final hasher = FastSha256.start(digestSink);
   var written = 0;
+  var lastReported = 0;
   try {
+    // writeOnly אינו קוצץ: זנב של צירוף שנקטע היה נשאר אחרי הסוף.
+    _deleteFileQuietly(tempPath);
     final output = File(tempPath).openSync(mode: FileMode.writeOnly);
     try {
       for (final partPath in partPaths) {
         final input = File(partPath).openSync();
         try {
-          for (var chunk = input.readSync(1 << 20);
-              chunk.isNotEmpty;
-              chunk = input.readSync(1 << 20)) {
+          for (
+            var chunk = input.readSync(1 << 20);
+            chunk.isNotEmpty;
+            chunk = input.readSync(1 << 20)
+          ) {
+            if (chunk.length > expectedSize - written) {
+              throw PatchDownloadException(
+                messages.joinedArchiveSizeMismatch(
+                  written + chunk.length,
+                  expectedSize,
+                ),
+              );
+            }
             hasher.add(chunk);
             // writeFromSync מחזיק את ה-buffer עד סוף הכתיבה, וה-GC של כל
             // ה-isolates (גם של ה-UI) ממתין לו בדיסק עמוס.
             await output.writeFrom(chunk);
             written += chunk.length;
+            if (onAssemble != null && written - lastReported >= (4 << 20)) {
+              lastReported = written;
+              onAssemble(written, expectedSize);
+            }
           }
         } finally {
           input.closeSync();
@@ -1743,10 +2114,13 @@ Future<void> _joinParts(List<String> partPaths, String destPath,
         _deleteFileQuietly(partPath);
         _deleteFileQuietly(PatchDownloader.resumeSidecarPath(partPath));
       }
+      // writeOnly אינו מובטח לקצץ, ו-.joining ישן שלא נמחק השאיר זנב.
+      output.truncateSync(written);
       output.flushSync();
     } finally {
       output.closeSync();
     }
+    onAssemble?.call(written, expectedSize);
     hasher.close();
     if (written != expectedSize) {
       throw PatchDownloadException(
@@ -1790,11 +2164,13 @@ class _DestinationLock {
         db?.close();
       } catch (_) {}
       if (error is sqlite3.SqliteException &&
-          error.resultCode == sqlite3.SqlError.SQLITE_BUSY) {
-        throw PatchDownloadException(messages.downloadAlreadyInProgress);
+          (error.resultCode == sqlite3.SqlError.SQLITE_BUSY ||
+              error.resultCode == sqlite3.SqlError.SQLITE_LOCKED)) {
+        throw PatchDownloadException(messages.destinationBusy(destPath));
       }
       throw PatchDownloadException(
-          messages.writeResumeSidecarFailed(path, '$error'));
+        messages.writeResumeSidecarFailed(path, '$error'),
+      );
     }
   }
 

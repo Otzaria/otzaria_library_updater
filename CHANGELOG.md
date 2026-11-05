@@ -22,6 +22,16 @@
 - Local file copies reject source/destination aliases before deletion, enforce
   the input length while writing, verify the final length, and check cancellation
   after the last chunk. Existing in-memory APIs and DB/patch schemas are retained.
+- Preserve the APIs and resume fixes consumed by Offline from
+  `Yehuda-Zakesh/otzaria_library_updater@cd744641`: per-asset connections,
+  separate assembly progress, per-part progress/baselines, split destination
+  locks, reuse of stored segment plans, and exact remaining assembly space.
+  Upstream asynchronous sidecar/state writes remain asynchronous. Legacy
+  download observers retain their non-fatal progress-error behavior; streaming
+  extraction observers stop the worker and propagate errors after teardown.
+- Split downloads reject local sources that alias managed outputs, parts,
+  sidecars or locks before cleanup. Assembly checks the byte budget before
+  writing and rejects truncated segment files before recording completion.
 
 - `LibraryUpdatePlan.blockReason` (`LibraryUpdateBlockReason`): סיווג מובנה של
   תוכנית `blocked`. `appUpdateRequired` כשהעדכון דורש סכמה או פורמט patch

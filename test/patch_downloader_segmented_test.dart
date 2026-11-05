@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
+import 'package:seforim_library_updater/src/services/download_scheduler.dart';
 import 'package:seforim_library_updater/src/services/patch_downloader.dart';
 import 'package:test/test.dart';
 
@@ -25,6 +26,9 @@ class _AssetServer {
 
   /// משנה את הגוף לפני השליחה (תוכן פגום).
   Uint8List Function(int start, Uint8List body)? mutate;
+
+  /// בקשות טווח שמתחילות כאן מקבלות 200 מלא (אחרי השהיה קצרה).
+  bool Function(int start)? fullBodyFor;
 
   final List<_Request> requests = [];
   int active = 0;
@@ -78,12 +82,17 @@ class _AssetServer {
     final ifRange = request.headers.value('if-range');
     var start = 0;
     var end = data.length - 1;
-    final match =
-        range == null ? null : RegExp(r'bytes=(\d+)-(\d*)').firstMatch(range);
-    final partial =
+    final match = range == null
+        ? null
+        : RegExp(r'bytes=(\d+)-(\d*)').firstMatch(range);
+    var partial =
         match != null && honorRange && (ifRange == null || ifRange == etag);
+    if (partial && fullBodyFor?.call(int.parse(match.group(1)!)) == true) {
+      partial = false;
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+    }
     if (partial) {
-      start = int.parse(match.group(1)!);
+      start = int.parse(match!.group(1)!);
       if (match.group(2)!.isNotEmpty) {
         end = int.parse(match.group(2)!).clamp(0, data.length - 1);
       }
@@ -117,8 +126,9 @@ class _AssetServer {
     try {
       const chunk = 64 << 10;
       for (var offset = 0; offset < body.length; offset += chunk) {
-        final next =
-            offset + chunk < body.length ? offset + chunk : body.length;
+        final next = offset + chunk < body.length
+            ? offset + chunk
+            : body.length;
         response.add(body.sublist(offset, next));
         await response.flush();
         if (chunkDelay > Duration.zero) await Future<void>.delayed(chunkDelay);
@@ -190,17 +200,23 @@ class _AsyncWritesFile implements File {
   @override
   void deleteSync({bool recursive = false}) => _real.deleteSync();
   @override
-  Future<File> writeAsString(String contents,
-      {FileMode mode = FileMode.write,
-      Encoding encoding = utf8,
-      bool flush = false}) {
+  Future<File> writeAsString(
+    String contents, {
+    FileMode mode = FileMode.write,
+    Encoding encoding = utf8,
+    bool flush = false,
+  }) {
     _owner.writes.add((
       name: p.basename(path),
       content: contents,
       requests: _owner.requestsSoFar(),
     ));
-    return _real.writeAsString(contents,
-        mode: mode, encoding: encoding, flush: flush);
+    return _real.writeAsString(
+      contents,
+      mode: mode,
+      encoding: encoding,
+      flush: flush,
+    );
   }
 
   @override
@@ -323,7 +339,8 @@ class _NoSyncDeleteFile implements File {
 }
 
 Uint8List _data(int length, [int seed = 0]) => Uint8List.fromList(
-    List.generate(length, (i) => (i * 31 + i ~/ 251 + seed) & 0xff));
+  List.generate(length, (i) => (i * 31 + i ~/ 251 + seed) & 0xff),
+);
 
 String _sha(List<int> bytes) => sha256.convert(bytes).toString();
 
@@ -341,46 +358,47 @@ void main() {
       Duration(milliseconds: 10),
     ],
     int maxConnections = 4,
-  }) =>
-      PatchDownloader(
-        decompress: (_) async => null,
-        httpClient: client,
-        networkRetryDelays: retries,
-        stallTimeout: const Duration(seconds: 10),
-        maxConnections: maxConnections,
-        segmentThresholdBytes: threshold,
-      );
+  }) => PatchDownloader(
+    decompress: (_) async => null,
+    httpClient: client,
+    networkRetryDelays: retries,
+    stallTimeout: const Duration(seconds: 10),
+    maxConnections: maxConnections,
+    segmentThresholdBytes: threshold,
+  );
 
   Future<void> download(
     PatchDownloader d, {
     String? sha,
     String? token = 'asset-1',
     void Function(int, int?)? onProgress,
+    void Function(int)? onExistingBytes,
+    int? connections,
     bool Function()? isCancelled,
-  }) =>
-      d.downloadToFile(
-        url: server.url,
-        destPath: dest,
-        expectedSize: server.data.length,
-        expectedSha256: sha,
-        resumeToken: token,
-        onProgress: onProgress,
-        isCancelled: isCancelled,
-      );
+  }) => d.downloadToFile(
+    onExistingBytes: onExistingBytes,
+    connections: connections,
+    url: server.url,
+    destPath: dest,
+    expectedSize: server.data.length,
+    expectedSha256: sha,
+    resumeToken: token,
+    onProgress: onProgress,
+    isCancelled: isCancelled,
+  );
 
   List<String> leftovers() => [
-        for (final f in tmp.listSync())
-          if (RegExp(r'\.(segments|seg-\d+)$').hasMatch(f.path))
-            p.basename(f.path),
-      ];
+    for (final f in tmp.listSync())
+      if (RegExp(r'\.(segments|seg-\d+)$').hasMatch(f.path)) p.basename(f.path),
+  ];
 
   int bytesOnDisk() => [
-        for (final f in tmp.listSync())
-          if (f is File &&
-              !f.path.endsWith('.resume') &&
-              !f.path.endsWith('.segments'))
-            f.lengthSync(),
-      ].fold(0, (a, b) => a + b);
+    for (final f in tmp.listSync())
+      if (f is File &&
+          !f.path.endsWith('.resume') &&
+          !f.path.endsWith('.segments'))
+        f.lengthSync(),
+  ].fold(0, (a, b) => a + b);
 
   setUp(() async {
     tmp = Directory.systemTemp.createTempSync('segmented_test');
@@ -396,37 +414,46 @@ void main() {
     tmp.deleteSync(recursive: true);
   });
 
-  test('206: ארבעה טווחים במקביל, קובץ תקין, בלי שאריות ובלי בית כפול',
-      () async {
-    server.chunkDelay = const Duration(milliseconds: 2);
-    final progress = <(int, int?)>[];
-    await download(downloader(),
-        sha: _sha(server.data), onProgress: (d, t) => progress.add((d, t)));
+  test(
+    '206: ארבעה טווחים במקביל, קובץ תקין, בלי שאריות ובלי בית כפול',
+    () async {
+      server.chunkDelay = const Duration(milliseconds: 2);
+      final progress = <(int, int?)>[];
+      await download(
+        downloader(),
+        sha: _sha(server.data),
+        onProgress: (d, t) => progress.add((d, t)),
+      );
 
-    expect(File(dest).readAsBytesSync(), server.data);
-    expect(leftovers(), isEmpty);
-    expect(server.requests, hasLength(4));
-    expect(server.requests.every((r) => r.status == 206), isTrue);
-    // הבדיקה המקדימה היא טווח 1, לא תחילת הקובץ.
-    expect(server.requests.first.start, size ~/ 4);
-    expect(server.requests.map((r) => r.start).toSet(),
-        {0, size ~/ 4, size ~/ 2, 3 * size ~/ 4});
-    expect(server.maxActive, 4);
-    expect(client.received, size);
+      expect(File(dest).readAsBytesSync(), server.data);
+      expect(leftovers(), isEmpty);
+      expect(server.requests, hasLength(4));
+      expect(server.requests.every((r) => r.status == 206), isTrue);
+      // הבדיקה המקדימה היא טווח 1, לא תחילת הקובץ.
+      expect(server.requests.first.start, size ~/ 4);
+      expect(server.requests.map((r) => r.start).toSet(), {
+        0,
+        size ~/ 4,
+        size ~/ 2,
+        3 * size ~/ 4,
+      });
+      expect(server.maxActive, 4);
+      expect(client.received, size);
 
-    // המד מסכם את כל הטווחים, מונוטוני, מוגבל בקצב ומסתיים ב-100%.
-    expect(progress.last, (size, size));
-    expect(progress.every((e) => e.$2 == size), isTrue);
-    for (var i = 1; i < progress.length; i++) {
-      expect(progress[i].$1, greaterThanOrEqualTo(progress[i - 1].$1));
-    }
-    expect(progress.length, lessThan(size ~/ (64 << 10)));
-    // סימון האימות נשמר, כמו במסלול החיבור היחיד.
-    final sidecar = File('$dest.resume').readAsStringSync().split('\n');
-    expect(sidecar[0], 'asset-1');
-    expect(sidecar[1], '"v1"');
-    expect(sidecar[2], startsWith(_sha(server.data)));
-  });
+      // המד מסכם את כל הטווחים, מונוטוני, מוגבל בקצב ומסתיים ב-100%.
+      expect(progress.last, (size, size));
+      expect(progress.every((e) => e.$2 == size), isTrue);
+      for (var i = 1; i < progress.length; i++) {
+        expect(progress[i].$1, greaterThanOrEqualTo(progress[i - 1].$1));
+      }
+      expect(progress.length, lessThan(size ~/ (64 << 10)));
+      // סימון האימות נשמר, כמו במסלול החיבור היחיד.
+      final sidecar = File('$dest.resume').readAsStringSync().split('\n');
+      expect(sidecar[0], 'asset-1');
+      expect(sidecar[1], '"v1"');
+      expect(sidecar[2], startsWith(_sha(server.data)));
+    },
+  );
 
   test('שרת שמתעלם מ-Range (200) → חיבור אחד, הגוף לא יורד פי ארבעה', () async {
     server.data = _data(16 << 20);
@@ -453,11 +480,62 @@ void main() {
     expect(File(dest).readAsBytesSync(), server.data);
     expect(server.requests, hasLength(8));
     final quarter = size ~/ 4;
-    expect(
-      server.requests.skip(4).map((r) => r.start).toSet(),
-      {for (var i = 0; i < 4; i++) i * quarter + quarter ~/ 2},
-    );
+    expect(server.requests.skip(4).map((r) => r.start).toSet(), {
+      for (var i = 0; i < 4; i++) i * quarter + quarter ~/ 2,
+    });
     expect(client.received, size);
+  });
+
+  test(
+    'הצירוף מדווח onAssembleProgress לאורך העבודה, והאימות על הקובץ כולו',
+    () async {
+      server.data = _data(16 << 20);
+      final assembled = <(int, int)>[];
+      final verified = <(int, int)>[];
+      await downloader().downloadToFile(
+        url: server.url,
+        destPath: dest,
+        expectedSize: server.data.length,
+        expectedSha256: _sha(server.data),
+        resumeToken: 'asset-1',
+        onAssembleProgress: (d, t) => assembled.add((d, t)),
+        onVerifyProgress: (d, t) => verified.add((d, t)),
+      );
+
+      final toCopy = server.data.length - server.data.length ~/ 4;
+      expect(assembled.length, greaterThan(2));
+      expect(assembled.every((e) => e.$2 == toCopy), isTrue);
+      expect(assembled.last, (toCopy, toCopy));
+      for (var i = 1; i < assembled.length; i++) {
+        expect(assembled[i].$1, greaterThanOrEqualTo(assembled[i - 1].$1));
+      }
+      expect(verified.last.$1, server.data.length);
+      expect(File(dest).readAsBytesSync(), server.data);
+    },
+  );
+
+  test('נפילה לחיבור יחיד אחרי שטווח 0 כבר כתב: המד אינו יורד', () async {
+    server.fullBodyFor = (start) => start >= size ~/ 2;
+    final emits = <(int, int?)>[];
+    final aggregator = ByteProgressAggregator(
+      totalBytes: size,
+      onProgress: (d, t) => emits.add((d, t)),
+    );
+    final slot = aggregator.slot();
+    await download(
+      downloader(),
+      sha: _sha(server.data),
+      onProgress: slot.report,
+      onExistingBytes: slot.markExisting,
+    );
+
+    expect(File(dest).readAsBytesSync(), server.data);
+    expect(server.requests.any((r) => r.status == 200), isTrue);
+    for (var i = 0; i < emits.length; i++) {
+      expect(emits[i].$2, size, reason: '$emits');
+      if (i > 0) expect(emits[i].$1, greaterThanOrEqualTo(emits[i - 1].$1));
+    }
+    expect(emits.last, (size, size));
   });
 
   test('ניסיון שהביא בתים מאפס את המונה; רק רצף בלי בתים מפיל', () async {
@@ -466,8 +544,10 @@ void main() {
       final left = end - start + 1;
       return left > (256 << 10) ? 256 << 10 : null;
     };
-    await download(downloader(retries: const [Duration(milliseconds: 5)]),
-        sha: _sha(server.data));
+    await download(
+      downloader(retries: const [Duration(milliseconds: 5)]),
+      sha: _sha(server.data),
+    );
     expect(File(dest).readAsBytesSync(), server.data);
 
     File(dest).deleteSync();
@@ -477,8 +557,10 @@ void main() {
     // טווח 2 נקטע תמיד לפני הבית הראשון: נכשל אחרי 1+1 ניסיונות.
     server.cutAfter = (start, end, _) => start == size ~/ 2 ? 0 : null;
     await expectLater(
-      download(downloader(retries: const [Duration(milliseconds: 5)]),
-          sha: _sha(server.data)),
+      download(
+        downloader(retries: const [Duration(milliseconds: 5)]),
+        sha: _sha(server.data),
+      ),
       throwsA(isA<PatchNetworkException>()),
     );
     expect(server.requests.where((r) => r.start == size ~/ 2), hasLength(2));
@@ -487,8 +569,10 @@ void main() {
 
   test('ETag שהתחלף → If-Range מקבל 200, כל הטווחים מתחילים מאפס', () async {
     server.cutAfter = (start, end, _) => (end - start + 1) ~/ 2;
-    await expectLater(download(downloader(retries: const [])),
-        throwsA(isA<PatchNetworkException>()));
+    await expectLater(
+      download(downloader(retries: const [])),
+      throwsA(isA<PatchNetworkException>()),
+    );
     expect(File('$dest.segments').existsSync(), isTrue);
 
     server.cutAfter = null;
@@ -552,33 +636,37 @@ void main() {
       if (assembled < 4) ...List.filled(1000, 0xEE),
     ]);
     for (var i = assembled; i < 4; i++) {
-      File('$dest.seg-$i')
-          .writeAsBytesSync(server.data.sublist(bounds[i], bounds[i + 1]));
+      File(
+        '$dest.seg-$i',
+      ).writeAsBytesSync(server.data.sublist(bounds[i], bounds[i + 1]));
     }
     File('$dest.resume').writeAsStringSync('asset-1\n"v1"');
-    File('$dest.segments').writeAsStringSync(jsonEncode({
-      'v': 1,
-      'token': 'asset-1',
-      'url': server.url,
-      'size': size,
-      'sha256': _sha(server.data),
-      'etag': '"v1"',
-      'bounds': bounds,
-      'assembled': assembled,
-    }));
+    File('$dest.segments').writeAsStringSync(
+      jsonEncode({
+        'v': 1,
+        'token': 'asset-1',
+        'url': server.url,
+        'size': size,
+        'sha256': _sha(server.data),
+        'etag': '"v1"',
+        'bounds': bounds,
+        'assembled': assembled,
+      }),
+    );
   }
 
   for (final assembled in [1, 2, 3, 4]) {
     test(
-        'חידוש checkpoint בצירוף (assembled: $assembled): קובץ תקין, בלי הורדה',
-        () async {
-      writeCompleteSegments(assembled);
-      await download(downloader(), sha: _sha(server.data));
+      'חידוש checkpoint בצירוף (assembled: $assembled): קובץ תקין, בלי הורדה',
+      () async {
+        writeCompleteSegments(assembled);
+        await download(downloader(), sha: _sha(server.data));
 
-      expect(File(dest).readAsBytesSync(), server.data);
-      expect(server.requests, isEmpty);
-      expect(leftovers(), isEmpty);
-    });
+        expect(File(dest).readAsBytesSync(), server.data);
+        expect(server.requests, isEmpty);
+        expect(leftovers(), isEmpty);
+      },
+    );
   }
 
   test('ביטול בהתקדמות הצירוף משאיר מצב שניתן לחידוש בלי הורדה', () async {
@@ -612,15 +700,19 @@ void main() {
     expect(assembled, inInclusiveRange(1, 4));
     final prefix = File(dest).readAsBytesSync();
     expect(prefix.length, greaterThanOrEqualTo(bounds[assembled]));
-    expect(prefix.sublist(0, bounds[assembled]),
-        server.data.sublist(0, bounds[assembled]));
+    expect(
+      prefix.sublist(0, bounds[assembled]),
+      server.data.sublist(0, bounds[assembled]),
+    );
     for (var i = 1; i < 4; i++) {
       final segment = File('$dest.seg-$i');
       if (i < assembled) {
         expect(segment.existsSync(), isFalse);
       } else {
-        expect(segment.readAsBytesSync(),
-            server.data.sublist(bounds[i], bounds[i + 1]));
+        expect(
+          segment.readAsBytesSync(),
+          server.data.sublist(bounds[i], bounds[i + 1]),
+        );
       }
     }
     expect(File('$dest.resume').readAsStringSync(), 'asset-1\n"v1"');
@@ -637,8 +729,10 @@ void main() {
     // dest לקריאה בלבד: הגיבוב קורא אותו, והפתיחה לכתיבה נכשלת.
     await Process.run('attrib', ['+r', dest]);
     try {
-      await expectLater(download(downloader(), sha: _sha(server.data)),
-          throwsA(isA<PatchDownloadException>()));
+      await expectLater(
+        download(downloader(), sha: _sha(server.data)),
+        throwsA(isA<PatchDownloadException>()),
+      );
     } finally {
       await Process.run('attrib', ['-r', dest]);
     }
@@ -650,8 +744,10 @@ void main() {
     server.chunkDelay = const Duration(milliseconds: 5);
     final first = download(downloader(), sha: _sha(server.data));
     await Future<void>.delayed(const Duration(milliseconds: 50));
-    await expectLater(download(downloader(), sha: _sha(server.data)),
-        throwsA(isA<PatchDownloadException>()));
+    await expectLater(
+      download(downloader(), sha: _sha(server.data)),
+      throwsA(isA<PatchDownloadException>()),
+    );
     await first;
     expect(File(dest).readAsBytesSync(), server.data);
     // The zero-byte lock sidecar persists so a subsequent owner cannot hold a
@@ -672,9 +768,14 @@ void main() {
     await download(downloader(), sha: _sha(server.data));
     expect(File(dest).readAsBytesSync(), server.data);
     expect(
-        tmp.listSync().map((f) => p.basename(f.path)),
-        isNot(anyOf(contains('seforim.db.zst.seg-2'),
-            contains('seforim.db.zst.segments.tmp'))));
+      tmp.listSync().map((f) => p.basename(f.path)),
+      isNot(
+        anyOf(
+          contains('seforim.db.zst.seg-2'),
+          contains('seforim.db.zst.segments.tmp'),
+        ),
+      ),
+    );
   });
 
   test('שאריות הטווחים נמחקות אסינכרונית, קובץ המצב אחרון (#4070)',
@@ -712,8 +813,10 @@ void main() {
       if (start == size ~/ 2) body[10] ^= 0xFF;
       return body;
     };
-    await expectLater(download(downloader(), sha: _sha(server.data)),
-        throwsA(isA<PatchDownloadException>()));
+    await expectLater(
+      download(downloader(), sha: _sha(server.data)),
+      throwsA(isA<PatchDownloadException>()),
+    );
     expect(server.requests, hasLength(8));
     expect(File(dest).existsSync(), isFalse);
     expect(leftovers(), isEmpty);
@@ -738,10 +841,12 @@ void main() {
     server.chunkDelay = const Duration(milliseconds: 20);
     var cancel = false;
     await expectLater(
-      download(downloader(),
-          sha: _sha(server.data),
-          onProgress: (d, _) => cancel = cancel || d >= 1 << 20,
-          isCancelled: () => cancel),
+      download(
+        downloader(),
+        sha: _sha(server.data),
+        onProgress: (d, _) => cancel = cancel || d >= 1 << 20,
+        isCancelled: () => cancel,
+      ),
       throwsA(isA<PatchDownloadCancelled>()),
     );
     final requestsAtCancel = server.requests.length;
@@ -776,37 +881,102 @@ void main() {
     expect(server.requests.single.range, isNull);
   });
 
-  test('קובצי המצב נכתבים אסינכרונית, ה-ETag נשמר לפני שאר הטווחים (#3780)',
-      () async {
-    final io = _AsyncStateWritesOnly(() => server.requests.length);
-    await IOOverrides.runWithIOOverrides(
-        () => download(downloader(), sha: _sha(server.data)), io);
+  test(
+    'קובצי המצב נכתבים אסינכרונית, ה-ETag נשמר לפני שאר הטווחים (#3780)',
+    () async {
+      final io = _AsyncStateWritesOnly(() => server.requests.length);
+      await IOOverrides.runWithIOOverrides(
+        () => download(downloader(), sha: _sha(server.data)),
+        io,
+      );
 
-    expect(File(dest).readAsBytesSync(), server.data);
-    expect(leftovers(), isEmpty);
-    final sidecar = [
-      for (final w in io.writes)
-        if (w.name.endsWith('.resume')) w,
-    ];
-    // לפני הבדיקה המקדימה בלי ETag; אחריה עם ETag, לפני שאר שלושת הטווחים.
-    expect(sidecar[0], (name: 'seforim.db.zst.resume', content: 'asset-1',
-        requests: 0));
-    expect(sidecar[1].content, 'asset-1\n"v1"');
-    expect(sidecar[1].requests, 1);
-    expect(sidecar.last.content, startsWith('asset-1\n"v1"\n'));
-    final state = [
-      for (final w in io.writes)
-        if (w.name.endsWith('.segments.tmp')) jsonDecode(w.content) as Map,
-    ];
-    expect(state.first['etag'], isNull);
-    expect(state[1]['etag'], '"v1"');
-  });
+      expect(File(dest).readAsBytesSync(), server.data);
+      expect(leftovers(), isEmpty);
+      final sidecar = [
+        for (final w in io.writes)
+          if (w.name.endsWith('.resume')) w,
+      ];
+      // לפני הבדיקה המקדימה בלי ETag; אחריה עם ETag, לפני שאר שלושת הטווחים.
+      expect(sidecar[0], (
+        name: 'seforim.db.zst.resume',
+        content: 'asset-1',
+        requests: 0,
+      ));
+      expect(sidecar[1].content, 'asset-1\n"v1"');
+      expect(sidecar[1].requests, 1);
+      expect(sidecar.last.content, startsWith('asset-1\n"v1"\n'));
+      final state = [
+        for (final w in io.writes)
+          if (w.name.endsWith('.segments.tmp')) jsonDecode(w.content) as Map,
+      ];
+      expect(state.first['etag'], isNull);
+      expect(state[1]['etag'], '"v1"');
+    },
+  );
 
   test('בלי resumeToken: פיצול בתוך הריצה, בלי מצב שנשמר לדיסק', () async {
     server.cutAfter = (start, end, i) => i < 2 ? (end - start + 1) ~/ 2 : null;
     await download(downloader(), sha: _sha(server.data), token: null);
     expect(File(dest).readAsBytesSync(), server.data);
     expect(File('$dest.resume').existsSync(), isFalse);
+    expect(leftovers(), isEmpty);
+  });
+
+  test('connections מפורש מעל התקרה נחתך ל-maxSegmentConnections', () async {
+    await download(downloader(), sha: _sha(server.data), connections: 100);
+    expect(File(dest).readAsBytesSync(), server.data);
+    expect(server.requests, hasLength(PatchDownloader.maxSegmentConnections));
+    expect(leftovers(), isEmpty);
+  });
+
+  test('maxConnections בבנאי נחתך לאותה תקרה גם בלי override', () async {
+    await download(downloader(maxConnections: 100), sha: _sha(server.data));
+    expect(File(dest).readAsBytesSync(), server.data);
+    expect(server.requests, hasLength(PatchDownloader.maxSegmentConnections));
+    expect(leftovers(), isEmpty);
+  });
+
+  test('תוכנית חיה וחיבור אחד: ממשיכה לפי התוכנית, לא נמחקת', () async {
+    server.cutAfter = (start, end, _) => (end - start + 1) ~/ 3;
+    await expectLater(
+      download(downloader(retries: const []), sha: _sha(server.data)),
+      throwsA(isA<PatchNetworkException>()),
+    );
+    final bounds =
+        (jsonDecode(File('$dest.segments').readAsStringSync()) as Map)['bounds']
+            as List;
+    final kept = [
+      for (var i = 0; i < 4; i++)
+        if (File(i == 0 ? dest : '$dest.seg-$i') case final f
+            when f.existsSync())
+          f.lengthSync()
+        else
+          0,
+    ];
+    final keptTotal = kept.fold<int>(0, (a, b) => a + b);
+    expect(keptTotal, greaterThan(0));
+
+    server.cutAfter = null;
+    await server.settle();
+    server.requests.clear();
+    client.received = 0;
+    await download(downloader(), sha: _sha(server.data), connections: 1);
+
+    expect(File(dest).readAsBytesSync(), server.data);
+    expect(server.requests.map((r) => r.start).toSet(), {
+      for (var i = 0; i < 4; i++)
+        if (kept[i] < (bounds[i + 1] as int) - (bounds[i] as int))
+          (bounds[i] as int) + kept[i],
+    });
+    expect(client.received, size - keptTotal);
+    expect(leftovers(), isEmpty);
+  });
+
+  test('תוכנית חיה שלמה וחיבור אחד: מורכבת בלי הורדה', () async {
+    writeCompleteSegments(1);
+    await download(downloader(), sha: _sha(server.data), connections: 1);
+    expect(File(dest).readAsBytesSync(), server.data);
+    expect(server.requests, isEmpty);
     expect(leftovers(), isEmpty);
   });
 }

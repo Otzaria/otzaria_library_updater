@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -22,8 +23,11 @@ import 'local_mirror_library_release_client.dart';
 import 'patch_downloader.dart';
 
 /// נתיב יחסי עם `/`, כדי שמראה שנוצרה ב-Windows תיקרא גם ב-macOS.
-String mirrorRelativePath(String path,
-    {required String from, p.Context? context}) {
+String mirrorRelativePath(
+  String path, {
+  required String from,
+  p.Context? context,
+}) {
   final ctx = context ?? p.context;
   return p.posix.joinAll(ctx.split(ctx.relative(path, from: from)));
 }
@@ -69,19 +73,22 @@ class LibraryMirrorExporter {
     int? Function(String path)? freeBytesFor,
     int maxConnections = PatchDownloader.defaultMaxConnections,
     int segmentThresholdBytes = PatchDownloader.defaultSegmentThresholdBytes,
-  })  : _scheduler = scheduler ?? DownloadScheduler(),
-        _freeBytesFor = freeBytesFor ?? DiskSpaceProbe.freeBytesFor,
-        _client = client ?? GithubLibraryReleaseClient(),
-        _ownsClient = client == null,
-        _httpClient = httpClient ?? http.Client(),
-        _ownsHttpClient = httpClient == null {
+    this.connectionsForAsset,
+  }) : _scheduler = scheduler ?? DownloadScheduler(),
+       _freeBytesFor = freeBytesFor ?? DiskSpaceProbe.freeBytesFor,
+       _client = client ?? GithubLibraryReleaseClient(),
+       _ownsClient = client == null,
+       _httpClient = httpClient ?? http.Client(),
+       _ownsHttpClient = httpClient == null {
     _downloader = PatchDownloader(
       httpClient: _httpClient,
       // הייצוא רק מוריד לדיסק ואינו מחלץ דבר — `downloadAndExtract` לא נקרא
       // כאן, ולכן אין למי לספק פונקציית חילוץ.
       decompress: _neverDecompress,
-      maxConnections:
-          _connectionsPerFile(maxConnections, _scheduler.maxConcurrent),
+      maxConnections: _connectionsPerFile(
+        maxConnections,
+        _scheduler.maxConcurrent,
+      ),
       segmentThresholdBytes: segmentThresholdBytes,
     );
   }
@@ -96,6 +103,20 @@ class LibraryMirrorExporter {
     if (requested < 1) return 1;
     return requested < cap ? requested : cap;
   }
+
+  /// נקרא פעם אחת לכל נכס גדול ומחליף את [connectionsPerFile] להורדה הזו
+  /// בלבד (קטן מ-1 → 1, מעל [PatchDownloader.maxSegmentConnections] נחתך).
+  /// `resumeToken` הוא הטוקן ש-`.segments` של הנכס שומר, להשוואה מדויקת.
+  /// נקרא גם בבדיקת המקום, לפני שתיקיית היעד נוצרה. זורק → הייצוא נכשל.
+  final FutureOr<int> Function(
+    String destPath,
+    int size,
+    String? sha256,
+    String? resumeToken,
+  )?
+  connectionsForAsset;
+
+  final Map<String, int> _connectionsAtPlanning = {};
 
   /// כמה חיבורים פותח קובץ גדול אחד בייצוא הזה.
   int get connectionsPerFile => _downloader.maxConnections;
@@ -179,8 +200,9 @@ class LibraryMirrorExporter {
       // נגזרים מ-[eligible]: במצב אישי `relevant` מסנן releases בלי קובצי
       // עדכון, וגרסה שיצאה עם מסד מלא בלבד הייתה נעלמת.
       latestEligible = _latestVersionOf(eligible);
-      personalCarrier =
-          personal ? _newestFullDbCarrier(eligible, latestEligible) : null;
+      personalCarrier = personal
+          ? _newestFullDbCarrier(eligible, latestEligible)
+          : null;
       final unresolved = {
         ...relevant,
         ?personalCarrier,
@@ -245,22 +267,26 @@ class LibraryMirrorExporter {
         if (!_schemaAppliable(manifest)) {
           final schema = _unsupportedSchemaOf(manifest);
           if (schema > blockingSchema) blockingSchema = schema;
-          onWarning?.call(strings.exportSkippingUnappliablePatch(
-            release.tag,
-            manifest.patchFiles.first.file,
-            schema,
-          ));
+          onWarning?.call(
+            strings.exportSkippingUnappliablePatch(
+              release.tag,
+              manifest.patchFiles.first.file,
+              schema,
+            ),
+          );
           continue;
         }
         // הציר השני: הסכמה מוכרת אבל פורמט ה-`patch.db` אינו.
         if (!_patchFormatAppliable(manifest)) {
           final format = manifest.patchFormatVersion!;
           if (format > blockingFormat) blockingFormat = format;
-          onWarning?.call(strings.exportSkippingUnsupportedPatchFormat(
-            release.tag,
-            manifest.patchFiles.first.file,
-            format,
-          ));
+          onWarning?.call(
+            strings.exportSkippingUnsupportedPatchFormat(
+              release.tag,
+              manifest.patchFiles.first.file,
+              format,
+            ),
+          );
           continue;
         }
         // הציר השלישי: דחיסה שאיננו יודעים לחלץ. ה-manifest נשמר (והגרסה
@@ -269,7 +295,8 @@ class LibraryMirrorExporter {
           final unknown = manifest.patchFiles
               .map((f) => f.compression)
               .firstWhere(
-                  (c) => !PatchFileEntry.supportedCompressions.contains(c));
+                (c) => !PatchFileEntry.supportedCompressions.contains(c),
+              );
           onWarning?.call(strings.unsupportedPatchCompression(unknown));
           continue;
         }
@@ -284,10 +311,9 @@ class LibraryMirrorExporter {
             complete = false;
             // קובץ שעוד עולה או שהוסר: ה-edge ייעלם באופליין, ולכן אומרים זאת
             // במקום להיעלם בשקט.
-            onWarning?.call(strings.exportPatchAssetMissing(
-              release.tag,
-              patchFile.file,
-            ));
+            onWarning?.call(
+              strings.exportPatchAssetMissing(release.tag, patchFile.file),
+            );
           }
         }
         // רק edge שכל קבציו יורדים נבנה באופליין; edge חסר היה משאיר את המסד
@@ -312,16 +338,20 @@ class LibraryMirrorExporter {
       if (personal) {
         if (personalCarrier == null) {
           onWarning?.call(
-              strings.exportPersonalNoFullDbEither(fromVersion, latestVersion));
+            strings.exportPersonalNoFullDbEither(fromVersion, latestVersion),
+          );
         }
       } else if (blockingSchema > 0) {
-        onStage?.call(strings.exportFullDbRequiredBySchema(
-            blockingSchema, latestVersion));
+        onStage?.call(
+          strings.exportFullDbRequiredBySchema(blockingSchema, latestVersion),
+        );
       } else {
-        onStage?.call(strings.exportFullDbRequiredByPatchFormat(
-          blockingFormat,
-          latestVersion,
-        ));
+        onStage?.call(
+          strings.exportFullDbRequiredByPatchFormat(
+            blockingFormat,
+            latestVersion,
+          ),
+        );
       }
     }
 
@@ -359,10 +389,12 @@ class LibraryMirrorExporter {
         carrier: fullDbCarrier,
       );
       if (dropped > 0) {
-        onStage?.call(strings.exportSkippingPatchesFullDbWins(
-          dropped,
-          LibraryUpdateDiscovery.releaseVersionOf(fullDbCarrier),
-        ));
+        onStage?.call(
+          strings.exportSkippingPatchesFullDbWins(
+            dropped,
+            LibraryUpdateDiscovery.releaseVersionOf(fullDbCarrier),
+          ),
+        );
       }
     }
 
@@ -392,8 +424,10 @@ class LibraryMirrorExporter {
         entry.key: entry.value.values.toList(growable: false),
     };
 
-    final totalAssets =
-        plannedByRelease.values.fold<int>(0, (n, l) => n + l.length);
+    final totalAssets = plannedByRelease.values.fold<int>(
+      0,
+      (n, l) => n + l.length,
+    );
 
     final schemaMarkers = <LibraryRelease, ReleaseAsset>{};
     for (final release in plannedByRelease.keys) {
@@ -405,8 +439,9 @@ class LibraryMirrorExporter {
         assetsRootPath: assetsRoot.path,
         destDir: destDir,
       );
-      onWarning
-          ?.call(strings.exportFullDbSchemaUnsupported(release.tag, schema));
+      onWarning?.call(
+        strings.exportFullDbSchemaUnsupported(release.tag, schema),
+      );
     }
 
     // DB מפוצל: המניפסט הוא מקור ה-sha256 של כל חלק ושל הקובץ המורכב.
@@ -415,8 +450,11 @@ class LibraryMirrorExporter {
       for (final asset in entry.value) {
         final split = asset.split;
         if (split == null) continue;
-        final dest =
-            p.join(assetsRoot.path, _safeDirName(entry.key.tag), asset.name);
+        final dest = p.join(
+          assetsRoot.path,
+          _safeDirName(entry.key.tag),
+          asset.name,
+        );
         splits.add((
           release: entry.key,
           asset: asset,
@@ -457,7 +495,7 @@ class LibraryMirrorExporter {
 
     // המקום נבדק לפי מה שנשאר להוריד, אחרי אימות המפוצלים (מורכב פגום נמחק);
     // ה-prune רץ רק בסוף, ולכן בדרך יש על הכונן שני עותקים של המסד.
-    _ensureSpaceForPlan(destDir, assetsRoot, plannedByRelease);
+    await _ensureSpaceForPlan(destDir, assetsRoot, plannedByRelease);
 
     // מדווחים את היעד עוד לפני הנכס הראשון: אחרת מד ההתקדמות אינו יודע לכמה
     // נכסים לחכות עד שהראשון (המסד המלא, ~1GB) מסתיים.
@@ -467,8 +505,9 @@ class LibraryMirrorExporter {
     // מסד מפוצל הם ג'ובים נפרדים, ולכן יורדים במקביל זה לזה.
     final jobs = <_DownloadJob>[];
     for (final entry in plannedByRelease.entries) {
-      final tagDir =
-          Directory(p.join(assetsRoot.path, _safeDirName(entry.key.tag)));
+      final tagDir = Directory(
+        p.join(assetsRoot.path, _safeDirName(entry.key.tag)),
+      );
       await tagDir.create(recursive: true);
       for (final asset in entry.value) {
         if (asset.split == null) {
@@ -527,9 +566,20 @@ class LibraryMirrorExporter {
         () async {
           _throwIfCancelled(isCancelled);
           onStage?.call(
-              strings.exportDownloading(job.release.tag, job.asset.name));
+            strings.exportDownloading(job.release.tag, job.asset.name),
+          );
           final progress = slots[index];
+          final connections =
+              _connectionsAtPlanning.remove(job.dest) ??
+              await connectionsForAsset?.call(
+                job.dest,
+                job.asset.size,
+                job.sha256,
+                job.resumeToken,
+              );
+          _throwIfCancelled(isCancelled);
           await _downloader.downloadToFile(
+            connections: connections,
             url: job.asset.downloadUrl,
             destPath: job.dest,
             // ה-manifests נכתבים ע"י GitHub ללא `size` אמין בכל המקרים; `size`
@@ -618,11 +668,9 @@ class LibraryMirrorExporter {
         ),
     ];
     for (final entry in schemaMarkers.entries) {
-      await File(p.join(
-        assetsRoot.path,
-        _safeDirName(entry.key.tag),
-        entry.value.name,
-      )).writeAsBytes(const [], flush: true);
+      await File(
+        p.join(assetsRoot.path, _safeDirName(entry.key.tag), entry.value.name),
+      ).writeAsBytes(const [], flush: true);
     }
 
     onStage?.call(
@@ -632,8 +680,10 @@ class LibraryMirrorExporter {
     );
     // כתיבה אטומית: שליפת הכונן באמצע כתיבה ישירה הייתה משאירה JSON פגום,
     // והמחשב הלא-מקוון היה רואה מראה שבורה.
-    final manifestPath =
-        p.join(destDir, LocalMirrorLibraryReleaseClient.manifestFileName);
+    final manifestPath = p.join(
+      destDir,
+      LocalMirrorLibraryReleaseClient.manifestFileName,
+    );
     final manifestTmp = File('$manifestPath.tmp');
     await manifestTmp.writeAsString(
       jsonEncode({
@@ -647,10 +697,7 @@ class LibraryMirrorExporter {
 
     await _pruneStaleAssets(assetsRoot, {
       for (final entry in plannedByRelease.entries)
-        entry.key: [
-          ...entry.value,
-          ?schemaMarkers[entry.key],
-        ],
+        entry.key: [...entry.value, ?schemaMarkers[entry.key]],
     });
 
     onStage?.call(strings.exportDone);
@@ -659,11 +706,12 @@ class LibraryMirrorExporter {
 
   /// זורק כשידוע בוודאות שאין מקום להורדה שנותרה. מדידה שנכשלה אינה חוסמת —
   /// ראו [DiskSpaceProbe]. נכס שכבר על הדיסק נספר לפי מה שחסר בו בלבד.
-  void _ensureSpaceForPlan(
+  Future<void> _ensureSpaceForPlan(
     String destDir,
     Directory assetsRoot,
     Map<LibraryRelease, List<ReleaseAsset>> planned,
-  ) {
+  ) async {
+    _connectionsAtPlanning.clear();
     var needed = 0;
     for (final entry in planned.entries) {
       final tagDir = p.join(assetsRoot.path, _safeDirName(entry.key.tag));
@@ -676,7 +724,13 @@ class LibraryMirrorExporter {
         needed += missing;
         final split = asset.split;
         if (split == null) {
-          needed += _segmentAssemblyOverhead(asset.size);
+          needed += await _segmentAssemblyOverhead(
+            existing.path,
+            asset.downloadUrl,
+            asset.size,
+            _sha256FromDigest(asset.digest),
+            asset.id?.toString(),
+          );
         } else {
           final partsDir = splitPartsDir(existing.path);
           for (final part in split.parts) {
@@ -684,7 +738,15 @@ class LibraryMirrorExporter {
             final partHave = file.existsSync() ? file.lengthSync() : 0;
             if (part.size > partHave) {
               needed +=
-                  part.size - partHave + _segmentAssemblyOverhead(part.size);
+                  part.size -
+                  partHave +
+                  await _segmentAssemblyOverhead(
+                    file.path,
+                    part.downloadUrl,
+                    part.size,
+                    part.sha256,
+                    'part:${part.sha256}',
+                  );
             }
           }
         }
@@ -693,18 +755,38 @@ class LibraryMirrorExporter {
     if (needed == 0) return;
     final free = _freeBytesFor(destDir);
     if (free == null || !DiskSpaceProbe.lacksSpace(free, needed)) return;
-    throw StateError(LibraryUpdaterMessages.current.mirrorNotEnoughDiskSpace(
-      destDir,
-      DiskSpaceProbe.formatBytes(needed),
-      DiskSpaceProbe.formatBytes(free),
-    ));
+    throw StateError(
+      LibraryUpdaterMessages.current.mirrorNotEnoughDiskSpace(
+        destDir,
+        DiskSpaceProbe.formatBytes(needed),
+        DiskSpaceProbe.formatBytes(free),
+      ),
+    );
   }
 
   /// קובץ שיורד בטווחים מחזיק בזמן הצירוף עותק נוסף של הטווח הגדול ביותר.
-  int _segmentAssemblyOverhead(int size) {
-    final connections = _downloader.maxConnections;
-    if (connections < 2 || size < _downloader.segmentThresholdBytes) return 0;
-    return (size + connections - 1) ~/ connections;
+  Future<int> _segmentAssemblyOverhead(
+    String dest,
+    String url,
+    int size,
+    String? sha256,
+    String? resumeToken,
+  ) async {
+    if (size < _downloader.segmentThresholdBytes) return 0;
+    var connections = _downloader.maxConnections;
+    final callback = connectionsForAsset;
+    if (callback != null) {
+      connections = await callback(dest, size, sha256, resumeToken);
+      _connectionsAtPlanning[dest] = connections;
+    }
+    return _downloader.segmentAssemblyOverhead(
+      destPath: dest,
+      url: url,
+      expectedSize: size,
+      expectedSha256: sha256,
+      resumeToken: resumeToken,
+      connections: connections,
+    );
   }
 
   /// כמה מהנכס כבר יושב על הדיסק שלם, כלומר לא יעבור ברשת. התנאי זהה לזה
@@ -739,8 +821,12 @@ class LibraryMirrorExporter {
         }
       }
     }
-    throw StateError(LibraryUpdaterMessages.current
-        .exportManifestFetchFailed(manifestAsset.name, '$lastError'));
+    throw StateError(
+      LibraryUpdaterMessages.current.exportManifestFetchFailed(
+        manifestAsset.name,
+        '$lastError',
+      ),
+    );
   }
 
   Future<Map<ReleaseAsset, _ManifestFetch>> _prefetchDeltaManifests(
@@ -755,17 +841,17 @@ class LibraryMirrorExporter {
         () async {
           _throwIfCancelled(isCancelled);
           try {
-            final manifest =
-                await _fetchWithRetry(asset, _client.fetchManifest);
+            final manifest = await _fetchWithRetry(
+              asset,
+              _client.fetchManifest,
+            );
             return (manifest: manifest, error: null, stack: null);
           } catch (error, stack) {
             return (manifest: null, error: error, stack: stack);
           }
         },
     ]);
-    return {
-      for (final (index, asset) in assets.indexed) asset: fetched[index],
-    };
+    return {for (final (index, asset) in assets.indexed) asset: fetched[index]};
   }
 
   DeltaManifest? _manifestOrNull(
@@ -775,8 +861,12 @@ class LibraryMirrorExporter {
   }) {
     final error = fetched.error;
     if (error is FormatException) {
-      onWarning?.call(LibraryUpdaterMessages.current
-          .exportManifestUnreadable(manifestAsset.name, error.message));
+      onWarning?.call(
+        LibraryUpdaterMessages.current.exportManifestUnreadable(
+          manifestAsset.name,
+          error.message,
+        ),
+      );
       return null;
     }
     if (error != null) Error.throwWithStackTrace(error, fetched.stack!);
@@ -838,11 +928,17 @@ class LibraryMirrorExporter {
   /// לעומת ~1.1GB של המסד המלא — ומי שרחוק יותר נופל להורדה המלאה, שקיימת
   /// במראה תמיד.
   List<LibraryRelease> recentReleases(List<LibraryRelease> eligible) {
-    final withDbContent = eligible
-        .where((r) => _hasDbContent(r) || _unsupportedFullDbSchema(r) != null)
-        .toList()
-      ..sort((a, b) => LibraryUpdateDiscovery.releaseVersionOf(b)
-          .compareTo(LibraryUpdateDiscovery.releaseVersionOf(a)));
+    final withDbContent =
+        eligible
+            .where(
+              (r) => _hasDbContent(r) || _unsupportedFullDbSchema(r) != null,
+            )
+            .toList()
+          ..sort(
+            (a, b) => LibraryUpdateDiscovery.releaseVersionOf(
+              b,
+            ).compareTo(LibraryUpdateDiscovery.releaseVersionOf(a)),
+          );
     if (withDbContent.isEmpty) return const [];
 
     final kept = <LibraryRelease>{
@@ -871,10 +967,12 @@ class LibraryMirrorExporter {
     int fromVersion,
   ) {
     return eligible
-        .where((r) =>
-            (r.deltaManifestAssets.isNotEmpty ||
-                _unsupportedFullDbSchema(r) != null) &&
-            LibraryUpdateDiscovery.releaseVersionOf(r) > fromVersion)
+        .where(
+          (r) =>
+              (r.deltaManifestAssets.isNotEmpty ||
+                  _unsupportedFullDbSchema(r) != null) &&
+              LibraryUpdateDiscovery.releaseVersionOf(r) > fromVersion,
+        )
         .toList(growable: false);
   }
 
@@ -893,9 +991,11 @@ class LibraryMirrorExporter {
     required String assetsRootPath,
     required String destDir,
   }) {
-    final advertised = release.assets.firstWhere((a) =>
-        (a.isFullDbArchive || a.isSplitFullDbManifest) &&
-        a.advertisedFullDbSchemaVersion == schema);
+    final advertised = release.assets.firstWhere(
+      (a) =>
+          (a.isFullDbArchive || a.isSplitFullDbManifest) &&
+          a.advertisedFullDbSchemaVersion == schema,
+    );
     final name = advertised.splitArchiveName ?? advertised.name;
     return ReleaseAsset(
       name: name,
@@ -927,8 +1027,11 @@ class LibraryMirrorExporter {
     void Function(String stage)? onStage,
   ) {
     final carriers = releases.where((r) => _fullDb(r) != null).toList()
-      ..sort((a, b) => LibraryUpdateDiscovery.releaseVersionOf(b)
-          .compareTo(LibraryUpdateDiscovery.releaseVersionOf(a)));
+      ..sort(
+        (a, b) => LibraryUpdateDiscovery.releaseVersionOf(
+          b,
+        ).compareTo(LibraryUpdateDiscovery.releaseVersionOf(a)),
+      );
     if (carriers.isEmpty) return null;
 
     final newest = carriers.first;
@@ -946,8 +1049,12 @@ class LibraryMirrorExporter {
       // אותה גרסה ב-tag אחר = פרסום מחדש עם תיקון; המסד הישן אינו התוכן הנכון.
       if (version == latest && candidate.tag != newest.tag) continue;
       if (!_reaches(edges, version, latest)) continue;
-      onStage?.call(LibraryUpdaterMessages.current
-          .exportReusingFullDb(version, candidate.tag));
+      onStage?.call(
+        LibraryUpdaterMessages.current.exportReusingFullDb(
+          version,
+          candidate.tag,
+        ),
+      );
       return candidate;
     }
     return newest;
@@ -969,8 +1076,8 @@ class LibraryMirrorExporter {
   /// הסכמה שבגללה ה-patch נפסל — היעד קודם, כי הוא החדשה מהשתיים.
   int _unsupportedSchemaOf(DeltaManifest manifest) =>
       isSupportedSchemaVersion(manifest.toSchemaVersion)
-          ? manifest.fromSchemaVersion
-          : manifest.toSchemaVersion;
+      ? manifest.fromSchemaVersion
+      : manifest.toSchemaVersion;
 
   /// מוציא מהתוכנית קשתות שאין בהן תועלת מול המסד המלא, ומחזיר כמה נכסים
   /// הוסרו. 0 = לא נגענו בכלום.
@@ -1038,20 +1145,24 @@ class LibraryMirrorExporter {
         if (needed.remove(name) != null) files++;
       }
       dropped += files;
-      onStage?.call(strings.exportFullDbInsteadOfSlowPatches(
-        files,
-        ApplyTimeEstimate.minutesOf(stepSeconds),
-        ApplyTimeEstimate.minutesOf(fullSeconds),
-        edge.to,
-      ));
+      onStage?.call(
+        strings.exportFullDbInsteadOfSlowPatches(
+          files,
+          ApplyTimeEstimate.minutesOf(stepSeconds),
+          ApplyTimeEstimate.minutesOf(fullSeconds),
+          edge.to,
+        ),
+      );
     }
     if (dropped == 0) return 0;
 
     edges
       ..clear()
-      ..addAll(mirroredEdges
-          .where((e) => _plannedEdgeBytes(e, neededByRelease) != null)
-          .map((e) => (from: e.from, to: e.to)));
+      ..addAll(
+        mirroredEdges
+            .where((e) => _plannedEdgeBytes(e, neededByRelease) != null)
+            .map((e) => (from: e.from, to: e.to)),
+      );
     return dropped;
   }
 
@@ -1079,7 +1190,7 @@ class LibraryMirrorExporter {
   /// דרישה: המסד המלא חייב להגיע **לבדו** ל-latest, אחרת מחיקת הקשתות
   /// הייתה עוצרת את המראה מתחת לגרסה האחרונה.
   ({LibraryRelease carrier, double? routeSeconds, int fromVersion})?
-      _fullDbBeatsPatches(
+  _fullDbBeatsPatches(
     List<LibraryRelease> candidates,
     Map<LibraryRelease, Map<String, ReleaseAsset>> neededByRelease,
     List<MirroredEdge> mirroredEdges, {
@@ -1117,11 +1228,8 @@ class LibraryMirrorExporter {
   /// מחליף את התוכנית ל**מסד מלא בלבד** ומכריז על כך. `routeSeconds` ריק
   /// פירושו "אין מסלול קובצי עדכון כלל", ואז אין זמן לדווח עליו.
   void _switchToFullDbOnly(
-    ({
-      LibraryRelease carrier,
-      double? routeSeconds,
-      int fromVersion
-    }) decision, {
+    ({LibraryRelease carrier, double? routeSeconds, int fromVersion})
+    decision, {
     required Map<LibraryRelease, Map<String, ReleaseAsset>> neededByRelease,
     required void Function(String stage)? onStage,
   }) {
@@ -1130,15 +1238,18 @@ class LibraryMirrorExporter {
     final version = LibraryUpdateDiscovery.releaseVersionOf(carrier);
     final route = decision.routeSeconds;
     final files = _keepOnlyFullDb(neededByRelease, carrier);
-    onStage?.call(route == null
-        ? strings.exportPersonalNeedsFullDb(decision.fromVersion, version)
-        : strings.exportFullDbInsteadOfSlowPatches(
-            files,
-            ApplyTimeEstimate.minutesOf(route),
-            ApplyTimeEstimate.minutesOf(
-                applyTime.fullRouteSeconds(_fullDb(carrier)!.size)),
-            version,
-          ));
+    onStage?.call(
+      route == null
+          ? strings.exportPersonalNeedsFullDb(decision.fromVersion, version)
+          : strings.exportFullDbInsteadOfSlowPatches(
+              files,
+              ApplyTimeEstimate.minutesOf(route),
+              ApplyTimeEstimate.minutesOf(
+                applyTime.fullRouteSeconds(_fullDb(carrier)!.size),
+              ),
+              version,
+            ),
+    );
   }
 
   /// הגרסה הגבוהה ביותר מבין [releases], 0 כשאין אף אחת.
@@ -1281,11 +1392,9 @@ class LibraryMirrorExporter {
   bool _isCompleteOnDisk(String assetsRootPath, LibraryRelease release) {
     final asset = _fullDb(release);
     if (asset == null || asset.size <= 0) return false;
-    final file = File(p.join(
-      assetsRootPath,
-      _safeDirName(release.tag),
-      asset.name,
-    ));
+    final file = File(
+      p.join(assetsRootPath, _safeDirName(release.tag), asset.name),
+    );
     return file.existsSync() && file.lengthSync() == asset.size;
   }
 
@@ -1348,8 +1457,9 @@ class LibraryMirrorExporter {
       final manifestAsset = _fullDb(release)!;
       final problem = outcome.problem;
       if (problem != null) {
-        onWarning
-            ?.call(messages.exportSplitFullDbSkipped(release.tag, problem));
+        onWarning?.call(
+          messages.exportSplitFullDbSkipped(release.tag, problem),
+        );
       }
       replaced[release] = LibraryRelease(
         tag: release.tag,
@@ -1385,8 +1495,9 @@ class LibraryMirrorExporter {
       for (final part in manifest.parts) {
         final partHasher = Sha256Stream();
         try {
-          await for (final chunk
-              in File(p.join(split.partsDir, part.name)).openRead()) {
+          await for (final chunk in File(
+            p.join(split.partsDir, part.name),
+          ).openRead()) {
             _throwIfCancelled(isCancelled);
             hasher.add(chunk);
             partHasher.add(chunk);
@@ -1395,8 +1506,13 @@ class LibraryMirrorExporter {
             final percent = (written * 100 ~/ manifest.size).clamp(0, 100);
             if (percent != lastPercent) {
               lastPercent = percent;
-              onStage?.call(strings.exportAssembling(
-                  split.release.tag, split.asset.name, percent));
+              onStage?.call(
+                strings.exportAssembling(
+                  split.release.tag,
+                  split.asset.name,
+                  percent,
+                ),
+              );
             }
           }
           if (partHasher.close() != part.sha256) corruptParts.add(part.name);
@@ -1414,8 +1530,12 @@ class LibraryMirrorExporter {
           _deleteQuietly(path);
           _deleteQuietly(PatchDownloader.resumeSidecarPath(path));
         }
-        throw StateError(strings.exportSplitPartCorrupted(
-            split.asset.name, corruptParts.join(', ')));
+        throw StateError(
+          strings.exportSplitPartCorrupted(
+            split.asset.name,
+            corruptParts.join(', '),
+          ),
+        );
       }
       if (hasher.close() != manifest.sha256) {
         await _deleteDirQuietly(split.partsDir);
@@ -1426,8 +1546,12 @@ class LibraryMirrorExporter {
       try {
         await tmp.rename(split.dest);
       } on FileSystemException catch (e) {
-        throw StateError(strings.exportAssembledReplaceFailed(
-            split.dest, e.osError?.message ?? e.message));
+        throw StateError(
+          strings.exportAssembledReplaceFailed(
+            split.dest,
+            e.osError?.message ?? e.message,
+          ),
+        );
       }
       await _downloader.recordVerified(
         destPath: split.dest,
@@ -1445,9 +1569,9 @@ class LibraryMirrorExporter {
   }
 
   String _splitKey(SplitAsset manifest) => [
-        manifest.sha256,
-        for (final part in manifest.parts) part.sha256,
-      ].join(':');
+    manifest.sha256,
+    for (final part in manifest.parts) part.sha256,
+  ].join(':');
 
   Set<String> _readRejectedSplits(String destDir) {
     final file = File(p.join(destDir, rejectedSplitsFileName));
@@ -1460,10 +1584,7 @@ class LibraryMirrorExporter {
     }
   }
 
-  Future<void> _rejectSplit(
-    String destDir,
-    SplitAsset manifest,
-  ) async {
+  Future<void> _rejectSplit(String destDir, SplitAsset manifest) async {
     _rejectedSplits.add(_splitKey(manifest));
     final path = p.join(destDir, rejectedSplitsFileName);
     final tmp = File('$path.tmp');
@@ -1531,8 +1652,8 @@ class LibraryMirrorExporter {
 /// ולכן אם מישהו יקרא בעתיד ל-`downloadAndExtract` מכאן — מוטב שייכשל בקול
 /// מלהחזיר `null` שיתפרש כ"חילוץ נכשל".
 Future<Uint8List?> _neverDecompress(Uint8List _) => throw UnsupportedError(
-      LibraryUpdaterMessages.current.exporterDoesNotExtract,
-    );
+  LibraryUpdaterMessages.current.exporterDoesNotExtract,
+);
 
 /// הורדה אחת בתוכנית. חלק של מסד מפוצל אינו נספר כנכס — ההרכבה שלו כן.
 typedef _DownloadJob = ({

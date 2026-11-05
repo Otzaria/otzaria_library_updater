@@ -34,7 +34,9 @@ String _segmentStatePath(String destPath) => '$destPath.segments';
 
 /// כתיבה דרך קובץ זמני: קובץ מצב קטוע היה נקרא כתוכנית אחרת.
 Future<void> _writeSegmentStateFile(
-    String statePath, Map<String, Object?> state) async {
+  String statePath,
+  Map<String, Object?> state,
+) async {
   final temp = File('$statePath.tmp');
   await temp.writeAsString(jsonEncode(state), flush: true);
   await temp.rename(statePath);
@@ -75,8 +77,18 @@ Future<void> _deleteSegmentLeftovers(String destPath) async {
 }
 
 extension _SegmentedDownload on PatchDownloader {
-  bool _segmentationApplies(int? expectedSize) =>
-      maxConnections > 1 &&
+  /// [override] מחליף את [maxConnections] להורדה אחת; מתחת ל-1 → 1, ומעל
+  /// [PatchDownloader.maxSegmentConnections] נחתך.
+  int _effectiveConnections(int? override) {
+    final requested = override ?? maxConnections;
+    if (requested < 1) return 1;
+    return requested > PatchDownloader.maxSegmentConnections
+        ? PatchDownloader.maxSegmentConnections
+        : requested;
+  }
+
+  bool _segmentationApplies(int? expectedSize, int connections) =>
+      connections > 1 &&
       expectedSize != null &&
       expectedSize >= segmentThresholdBytes;
 
@@ -93,8 +105,13 @@ extension _SegmentedDownload on PatchDownloader {
 
   /// התוכנית השמורה, רק כשהיא כבולה לאותו נכס ([resumeToken], כתובת, גודל,
   /// sha256) והקבצים על הדיסק עקביים איתה.
-  _SegmentPlan? _readSegmentPlan(String destPath, String? resumeToken,
-      String url, int size, String? sha256) {
+  _SegmentPlan? _readSegmentPlan(
+    String destPath,
+    String? resumeToken,
+    String url,
+    int size,
+    String? sha256,
+  ) {
     if (resumeToken == null) return null;
     try {
       final stateFile = File(_segmentStatePath(destPath));
@@ -136,8 +153,14 @@ extension _SegmentedDownload on PatchDownloader {
     }
   }
 
-  Future<void> _writeSegmentState(String destPath, String? resumeToken,
-      String url, int size, String? sha256, _SegmentPlan plan) async {
+  Future<void> _writeSegmentState(
+    String destPath,
+    String? resumeToken,
+    String url,
+    int size,
+    String? sha256,
+    _SegmentPlan plan,
+  ) async {
     if (resumeToken == null) return;
     final statePath = _segmentStatePath(destPath);
     try {
@@ -146,34 +169,48 @@ extension _SegmentedDownload on PatchDownloader {
         _segmentStateJson(resumeToken, url, size, sha256, plan),
       );
     } catch (error) {
-      throw PatchDownloadException(LibraryUpdaterMessages.current
-          .writeResumeSidecarFailed(statePath, '$error'));
+      throw PatchDownloadException(
+        LibraryUpdaterMessages.current.writeResumeSidecarFailed(
+          statePath,
+          '$error',
+        ),
+      );
     }
   }
 
-  Map<String, Object?> _segmentStateJson(String resumeToken, String url,
-          int size, String? sha256, _SegmentPlan plan) =>
-      {
-        'v': 1,
-        'token': resumeToken,
-        'url': url,
-        'size': size,
-        'sha256': sha256,
-        'etag': plan.etag,
-        'bounds': plan.bounds,
-        'assembled': plan.assembled,
-      };
+  Map<String, Object?> _segmentStateJson(
+    String resumeToken,
+    String url,
+    int size,
+    String? sha256,
+    _SegmentPlan plan,
+  ) => {
+    'v': 1,
+    'token': resumeToken,
+    'url': url,
+    'size': size,
+    'sha256': sha256,
+    'etag': plan.etag,
+    'bounds': plan.bounds,
+    'assembled': plan.assembled,
+  };
 
   /// [have] בתים כבר ב-dest; היתרה מתחלקת שווה. null כשהיתרה קטנה מהסף.
-  _SegmentPlan? _planSegments(int have, int size, String? validator) {
+  _SegmentPlan? _planSegments(
+    int have,
+    int size,
+    String? validator,
+    int connections,
+  ) {
     final remaining = size - have;
     if (remaining < segmentThresholdBytes || remaining < 2) return null;
-    final count = maxConnections < remaining ? maxConnections : remaining;
+    final count = connections < remaining ? connections : remaining;
     final per = remaining ~/ count;
-    return _SegmentPlan(
-      [0, for (var k = 1; k < count; k++) have + per * k, size],
-      etag: validator,
-    );
+    return _SegmentPlan([
+      0,
+      for (var k = 1; k < count; k++) have + per * k,
+      size,
+    ], etag: validator);
   }
 
   /// הורדה בכמה חיבורים של קובץ שגודלו [size]. השרת נבדק בבקשה הראשונה:
@@ -193,7 +230,9 @@ extension _SegmentedDownload on PatchDownloader {
     String? validator,
     void Function(int downloaded, int? total)? onProgress,
     void Function(int verified, int total)? onVerifyProgress,
+    void Function(int done, int total)? onAssembleProgress,
     void Function(int bytes)? onExistingBytes,
+    required int connections,
     bool Function()? isCancelled,
   }) async {
     final file = File(destPath);
@@ -215,7 +254,15 @@ extension _SegmentedDownload on PatchDownloader {
 
     while (true) {
       final current =
-          plan ?? _planSegments(await _lengthOrZero(file), size, validator);
+          plan ??
+          (connections < 2
+              ? null
+              : _planSegments(
+                  await _lengthOrZero(file),
+                  size,
+                  validator,
+                  connections,
+                ));
       if (current == null) return (done: false, validator: validator);
       plan = current;
       // תחילית שירדה בלי ETag אינה כבולה ל-ETag שהבדיקה תביא עכשיו.
@@ -261,6 +308,7 @@ extension _SegmentedDownload on PatchDownloader {
         hash: sha256 != null,
         isCancelled: isCancelled,
         onProgress: onVerifyProgress,
+        onAssemble: onAssembleProgress,
       );
       if (sha256 == null || digest == sha256) {
         await _deleteSegmentLeftovers(destPath);
@@ -274,7 +322,8 @@ extension _SegmentedDownload on PatchDownloader {
         await _deleteSegmentLeftovers(destPath);
         _deleteQuietly(sidecarPath);
         throw PatchDownloadException(
-            LibraryUpdaterMessages.current.fullDbHashMismatch);
+          LibraryUpdaterMessages.current.fullDbHashMismatch,
+        );
       }
       cleanRetryUsed = true;
       await discardAll();
@@ -318,8 +367,11 @@ extension _SegmentedDownload on PatchDownloader {
     Future<void> persist() async {
       await _writeSegmentState(destPath, resumeToken, url, size, sha256, plan);
       if (resumeToken != null) {
-        await _writeSidecar(PatchDownloader.resumeSidecarPath(destPath),
-            resumeToken, plan.etag);
+        await _writeSidecar(
+          PatchDownloader.resumeSidecarPath(destPath),
+          resumeToken,
+          plan.etag,
+        );
       }
     }
 
@@ -358,16 +410,18 @@ extension _SegmentedDownload on PatchDownloader {
       // כתיבה ממתינה ולא IOSink — ראו _consumeBody.
       final RandomAccessFile output;
       try {
-        output = await File(_segmentPath(destPath, index))
-            .open(mode: FileMode.append);
+        output = await File(
+          _segmentPath(destPath, index),
+        ).open(mode: FileMode.append);
       } catch (_) {
         await _abandonBody(opened.response);
         rethrow;
       }
       var received = 0;
       try {
-        await for (final chunk
-            in opened.response.stream.timeout(stallTimeout)) {
+        await for (final chunk in opened.response.stream.timeout(
+          stallTimeout,
+        )) {
           if (stopped()) break;
           if (received + chunk.length > opened.length) {
             throw const _SegmentFallback();
@@ -401,10 +455,18 @@ extension _SegmentedDownload on PatchDownloader {
           }
           final before = present[index];
           try {
-            final opened = pending ??
+            final opened =
+                pending ??
                 await _openSegment(
-                    url, plan, index, present[index], size, sha256, stop.future,
-                    probe: false);
+                  url,
+                  plan,
+                  index,
+                  present[index],
+                  size,
+                  sha256,
+                  stop.future,
+                  probe: false,
+                );
             pending = null;
             await consume(index, opened);
           } catch (error) {
@@ -416,7 +478,9 @@ extension _SegmentedDownload on PatchDownloader {
               throw PatchNetworkException(error);
             }
             await _waitBeforeRetry(
-                networkRetryDelays[idleAttempts], stoppedOrCancelled);
+              networkRetryDelays[idleAttempts],
+              stoppedOrCancelled,
+            );
             idleAttempts++;
           }
         }
@@ -428,14 +492,23 @@ extension _SegmentedDownload on PatchDownloader {
     }
 
     try {
-      final probeIndex =
-          incomplete.firstWhere((i) => i > 0, orElse: () => incomplete.first);
+      final probeIndex = incomplete.firstWhere(
+        (i) => i > 0,
+        orElse: () => incomplete.first,
+      );
       final _OpenedSegment probe;
       try {
         probe = await _withNetworkRetry(
-          () => _openSegment(url, plan, probeIndex, present[probeIndex], size,
-              sha256, stop.future,
-              probe: true),
+          () => _openSegment(
+            url,
+            plan,
+            probeIndex,
+            present[probeIndex],
+            size,
+            sha256,
+            stop.future,
+            probe: true,
+          ),
           isCancelled: isCancelled,
         );
       } on _SegmentFallback catch (outcome) {
@@ -481,15 +554,11 @@ extension _SegmentedDownload on PatchDownloader {
     final start = plan.bounds[index] + have;
     final end = plan.bounds[index + 1] - 1;
     final knownEtag = plan.etag;
-    final response = await _sendWithManualRedirects(
-      url,
-      {
-        'Accept': 'application/octet-stream',
-        'Range': 'bytes=$start-$end',
-        'If-Range': ?knownEtag,
-      },
-      abortTrigger: abortTrigger,
-    );
+    final response = await _sendWithManualRedirects(url, {
+      'Accept': 'application/octet-stream',
+      'Range': 'bytes=$start-$end',
+      'If-Range': ?knownEtag,
+    }, abortTrigger: abortTrigger);
     final etag = _strongEtag(response.headers['etag']);
     final etagChanged = knownEtag != null && etag != null && etag != knownEtag;
 
@@ -500,15 +569,20 @@ extension _SegmentedDownload on PatchDownloader {
     }
     if (response.statusCode != 206) {
       await _abandonBody(response);
-      throw PatchDownloadException(LibraryUpdaterMessages.current
-          .downloadHttpError(response.statusCode, url));
+      throw PatchDownloadException(
+        LibraryUpdaterMessages.current.downloadHttpError(
+          response.statusCode,
+          url,
+        ),
+      );
     }
     if (etagChanged) {
       await _abandonBody(response);
       throw const _SegmentRestart();
     }
     final range = _parseContentRange(response.headers['content-range']);
-    final valid = range != null &&
+    final valid =
+        range != null &&
         range.start == start &&
         range.end >= start &&
         range.end <= end &&
@@ -536,12 +610,13 @@ Future<String?> _assembleSegmentsInIsolate({
   required bool hash,
   bool Function()? isCancelled,
   void Function(int done, int total)? onProgress,
-}) =>
-    _runCancellableWorker(
-      _assembleWork(destPath, bounds, assembled, statePath, state, hash),
-      isCancelled,
-      onProgress,
-    );
+  void Function(int done, int total)? onAssemble,
+}) => _runCancellableWorker(
+  _assembleWork(destPath, bounds, assembled, statePath, state, hash),
+  isCancelled,
+  onProgress,
+  onAssemble,
+);
 
 /// המלל הפעיל עובר ל-isolate, אחרת הודעת כשל הייתה חוזרת בעברית.
 _WorkerBody<String?> _assembleWork(
@@ -553,14 +628,24 @@ _WorkerBody<String?> _assembleWork(
   bool hash,
 ) {
   final messages = LibraryUpdaterMessages.current;
-  return (isCancelled, onProgress) async {
+  return (isCancelled, onProgress, onAssemble) async {
     LibraryUpdaterMessages.current = messages;
     try {
-      return await _assembleSegments(destPath, bounds, assembled, statePath,
-          state, hash, isCancelled, onProgress);
+      return await _assembleSegments(
+        destPath,
+        bounds,
+        assembled,
+        statePath,
+        state,
+        hash,
+        isCancelled,
+        onProgress,
+        onAssemble,
+      );
     } on FileSystemException catch (error) {
       throw PatchDownloadException(
-          LibraryUpdaterMessages.current.saveDownloadedFileFailed('$error'));
+        LibraryUpdaterMessages.current.saveDownloadedFileFailed('$error'),
+      );
     }
   };
 }
@@ -577,15 +662,21 @@ Future<String?> _assembleSegments(
   bool hash,
   bool Function()? isCancelled,
   void Function(int done, int total)? onProgress,
+  void Function(int done, int total)? onAssemble,
 ) async {
   const chunkSize = 1 << 20;
   const reportEvery = 4 << 20;
+  const flushEvery = 16 << 20;
   final total = bounds.last;
+  final prefix = bounds[assembled];
   final digestSink = hash ? Sha256DigestCollector() : null;
   final hasher = digestSink == null ? null : FastSha256.start(digestSink);
   var done = 0;
   var lastReported = 0;
-  Future<void> advance(List<int> chunk) async {
+  var copied = 0;
+  var lastCopyReported = 0;
+  var lastFlushed = 0;
+  Future<void> advance(List<int> chunk, {bool copying = false}) async {
     await Future<void>.delayed(Duration.zero);
     if (isCancelled != null && isCancelled()) {
       throw const PatchDownloadCancelled();
@@ -596,10 +687,16 @@ Future<String?> _assembleSegments(
       lastReported = done;
       onProgress(done, total);
     }
+    if (copying) {
+      copied += chunk.length;
+      if (onAssemble != null && copied - lastCopyReported >= reportEvery) {
+        lastCopyReported = copied;
+        onAssemble(copied, total - prefix);
+      }
+    }
   }
 
   try {
-    final prefix = bounds[assembled];
     if (hasher != null) {
       final input = File(destPath).openSync();
       try {
@@ -623,22 +720,47 @@ Future<String?> _assembleSegments(
       for (var i = assembled; i < bounds.length - 1; i++) {
         final segmentPath = _segmentPath(destPath, i);
         final input = File(segmentPath).openSync();
+        final expected = bounds[i + 1] - bounds[i];
+        var read = 0;
         try {
-          for (var chunk = input.readSync(chunkSize);
-              chunk.isNotEmpty;
-              chunk = input.readSync(chunkSize)) {
-            await advance(chunk);
+          for (
+            var chunk = input.readSync(chunkSize);
+            chunk.isNotEmpty;
+            chunk = input.readSync(chunkSize)
+          ) {
+            if (chunk.length > expected - read) {
+              throw PatchDownloadException(
+                LibraryUpdaterMessages.current.fullDbSizeMismatch(
+                  read + chunk.length,
+                  expected,
+                ),
+              );
+            }
+            await advance(chunk, copying: true);
             // writeFromSync מחזיק את ה-buffer עד סוף הכתיבה, וה-GC של כל
             // ה-isolates (גם של ה-UI) ממתין לו בדיסק עמוס.
             await output.writeFrom(chunk);
+            read += chunk.length;
+            // flush מחזורי: flush יחיד של טווח שלם משתיק את הדיווח דקות ב-USB.
+            if (copied - lastFlushed >= flushEvery) {
+              lastFlushed = copied;
+              output.flushSync();
+            }
+          }
+          if (read != expected) {
+            throw PatchDownloadException(
+              LibraryUpdaterMessages.current.fullDbSizeMismatch(read, expected),
+            );
           }
         } finally {
           input.closeSync();
         }
         output.flushSync();
         if (statePath != null) {
-          await _writeSegmentStateFile(
-              statePath, {...state, 'assembled': i + 1});
+          await _writeSegmentStateFile(statePath, {
+            ...state,
+            'assembled': i + 1,
+          });
         }
         _deleteFileQuietly(segmentPath);
       }
@@ -646,6 +768,8 @@ Future<String?> _assembleSegments(
       output.closeSync();
     }
     onProgress?.call(done, total);
+    // אין מה לצרף (הכול כבר ביעד): (0,0) היה מדווח שלב ריק.
+    if (total > prefix) onAssemble?.call(copied, total - prefix);
     hasher?.close();
     return digestSink?.value.toString();
   } finally {
