@@ -346,6 +346,30 @@ void main() {
     expect(File(partialPath()).existsSync(), isFalse);
   });
 
+  test('reused cache respects cancellation from final download progress',
+      () async {
+    await staging.create();
+    await File(outputPath()).writeAsBytes(bytes);
+    await File(compressedPath()).writeAsBytes(bytes);
+    var cancelled = false;
+    final downloader = StreamingPatchDownloader(
+      httpClient: client(requested: () => fail('cache should be reused')),
+      extractor: _copyExtractor,
+    );
+    await expectLater(
+      downloader.downloadAndExtract(
+        patchFile: entry(),
+        downloadUrl: 'https://example.test/patch',
+        destDir: staging,
+        isCancelled: () => cancelled,
+        onProgress: (_, _) => cancelled = true,
+      ),
+      throwsA(isA<PatchDownloadCancelled>()),
+    );
+    expect(await File(outputPath()).readAsBytes(), bytes);
+    expect(await File(compressedPath()).readAsBytes(), bytes);
+  });
+
   test(
     'cancellation from final verification callback precedes publication',
     () async {

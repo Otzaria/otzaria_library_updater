@@ -208,6 +208,7 @@ class StreamingPatchDownloader extends PatchDownloader {
     )) {
       _throwIfCancelled(isCancelled);
       onProgress?.call(patchFile.size, patchFile.size);
+      _throwIfCancelled(isCancelled);
       await _deleteCompressed(compressedPath);
       return extractedPath;
     }
