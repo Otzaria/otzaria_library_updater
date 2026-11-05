@@ -292,6 +292,8 @@ class StreamingPatchDownloader extends PatchDownloader {
     final extracted = File(extractedPath);
     if (!await extracted.exists()) return false;
     if (await extracted.length() == patchFile.uncompressedSize) {
+      onVerifyProgress?.call(0, patchFile.uncompressedSize);
+      _throwIfCancelled(isCancelled);
       final hash = await _hashFileSha256InIsolate(
         extractedPath,
         isCancelled,
