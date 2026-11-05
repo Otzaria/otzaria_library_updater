@@ -15,6 +15,63 @@
 אין תלות ב‑Flutter. חילוץ zstd **מוזרק** על‑ידי הצרכן (ל‑`PatchDownloader.decompress`),
 כדי שהחבילה תישאר אגנוסטית לפלטפורמה.
 
+## Streaming extraction (0.9.0)
+
+Hosts with a native streaming decoder should use
+`StreamingPatchDownloader(extractor: extractFile)` for remote and local delta
+assets. The existing `PatchDownloader(decompress: ...)` API remains available
+for compatibility. `downloadToFile` is already streamed in both classes.
+
+The shared `FileExtractor` contract is:
+
+```dart
+Future<FileExtractionResult> extractFile(
+  String sourcePath,
+  String outputPath, {
+  required int maxOutputBytes,
+  bool Function()? isCancelled,
+  void Function(int bytesWritten)? onProgress,
+});
+```
+
+The decoder must reject an output chunk **before writing past the limit**, await
+each write, and use bounded input/output buffers and a bounded native decoding
+window. Check cancellation between output chunks, including inside a single
+highly compressed input chunk. Return `FileExtractionResult(bytesWritten: ...,
+sha256: ...)` only after the complete compressed stream has been validated, the
+output has been flushed and all handles have closed. Compute SHA-256 while
+writing (the exported `Sha256Stream` provides an incremental implementation).
+The host owns platform library loading and must run CPU-heavy decoding/hashing
+outside its UI isolate.
+
+Cancellation must throw `PatchDownloadCancelled`. Invalid compressed data must
+throw `FormatException` or `PatchDownloadException`. Use a different type for
+resource failures (for example `StateError`); such failures preserve the verified
+archive for retry. The downloader removes incomplete output on every failure,
+checks the reported digest and the actual output length, and only then renames
+the output into its reusable cache path. A fresh extraction does not re-read the
+output to hash it. Reusing an old cache file always verifies its hash from disk.
+
+`onExtractionProgress(written, total)` distinguishes extraction from compressed
+download progress. For existing callers supplying only `onVerifyProgress`, that
+callback receives progress of the streamed output hash as well. Final callbacks
+and cancellation checks run before publication. A process crash can leave an
+`.extracting` file; it is never reused and is removed before retrying.
+
+For complete archives without a declared output size, hosts can use the
+configurable `kDefaultMaxExtractedBytes` ceiling (64 GiB). A patch always uses
+its exact manifest size. This is an output/disk limit, separate from the native
+decoder's memory/window limit.
+
+Consumers can protect a complete install/rollback pipeline with
+`withFileOperationLock(dbPath, () async { ... })`. Create the parent directory
+first, and use a shared key for any pipeline sharing staging paths. Hold the
+lock until all worker futures and cleanup have completed. The lock is fail-fast,
+non-reentrant, and works across isolates/processes; never delete its `.lock`
+sidecar or nest `downloadToFile` for that same destination. A separate archive
+path is safe. Database replacement and DB-level verification remain the host's
+responsibility; the shared downloader only publishes verified patch files.
+
 נדרש Dart ‏3.10 ומעלה לצריכת החבילה, בהתאם לדרישה של `sqlite3` שכבר הייתה
 תלות בחבילה. להרצת כלי הפיתוח והבדיקות העדכניים נדרש Dart ‏3.11 ומעלה.
 גרסאות `sqlite3` ו־`ffi` המינימליות מיושרות לגרסאות שבאוצריא; העדכון אינו

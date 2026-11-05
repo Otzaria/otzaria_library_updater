@@ -18,6 +18,7 @@ import '../models/library_release.dart';
 import '../models/split_asset.dart';
 
 part 'patch_downloader_segmented.dart';
+part 'streaming_patch_downloader.dart';
 
 /// נזרק כשהורדה או אימות נכשלים. הקבצים הפגומים נמחקים לפני הזריקה.
 class PatchDownloadException implements Exception {
@@ -1461,9 +1462,11 @@ class PatchDownloader {
   }) async {
     final messages = LibraryUpdaterMessages.current;
     final source = File(url);
+    _throwIfCancelled(isCancelled);
     if (!await source.exists()) {
       throw PatchDownloadException(messages.localSourceNotFound(url));
     }
+    await _ensureDistinctFiles(url, destPath);
     final size = await source.length();
     if (expectedSize != null && size != expectedSize) {
       throw PatchDownloadException(
@@ -1479,10 +1482,23 @@ class PatchDownloader {
       var copied = 0;
       await for (final chunk in source.openRead()) {
         _throwIfCancelled(isCancelled);
+        // A local mirror may change after the initial stat. Enforce the input
+        // limit while copying, not only before/after the write.
+        if (copied + chunk.length > (expectedSize ?? size)) {
+          throw PatchDownloadException(
+            messages.localFileTooLarge(expectedSize ?? size, url),
+          );
+        }
         await output.writeFrom(chunk);
         input?.add(chunk);
         copied += chunk.length;
         onProgress?.call(copied, size);
+      }
+      _throwIfCancelled(isCancelled);
+      if (copied != (expectedSize ?? size)) {
+        throw PatchDownloadException(
+          messages.localFileSizeMismatch(expectedSize ?? size, copied, url),
+        );
       }
       final closing = output;
       output = null;
@@ -1511,6 +1527,26 @@ class PatchDownloader {
   }
 }
 
+/// Validate before truncating/removing either path. The identity check includes
+/// hard links and symlinks; lexical checks also protect a missing destination.
+Future<void> _ensureDistinctFiles(String sourcePath, String destPath) async {
+  var identical = p.equals(p.normalize(p.absolute(sourcePath)),
+      p.normalize(p.absolute(destPath)));
+  if (!identical &&
+      await File(sourcePath).exists() &&
+      await File(destPath).exists()) {
+    // FileSystemEntity.identical compares link entities on some platforms.
+    // Resolve both targets first, then also check identity for hard links.
+    final source = await File(sourcePath).resolveSymbolicLinks();
+    final destination = await File(destPath).resolveSymbolicLinks();
+    identical = p.equals(source, destination) ||
+        await FileSystemEntity.identical(source, destination);
+  }
+  if (identical) {
+    throw ArgumentError('Source and destination must be different files');
+  }
+}
+
 /// sha256 של קובץ ב-isolate נפרד. ביטול ([isCancelled] נדגם כל 100ms) והתקדמות
 /// עוברים כהודעות; ביטול נזרק כ-[PatchDownloadCancelled].
 Future<String> _hashFileSha256InIsolate(
@@ -1536,31 +1572,58 @@ Future<T> _runCancellableWorker<T>(
   void Function(int done, int total)? onProgress,
 ) async {
   if (isCancelled == null && onProgress == null) {
-    return _runWorker(work, null);
+    return _workerValue(await _runWorker(work, null));
   }
   if (isCancelled != null && isCancelled()) {
     throw const PatchDownloadCancelled();
   }
   final control = ReceivePort();
+  final workerDone = Completer<void>();
   SendPort? workerCancel;
   var cancelled = false;
-  control.listen((message) {
-    if (message is SendPort) {
+  Object? callbackError;
+  StackTrace? callbackStack;
+  void cancelForCallbackError(Object error, StackTrace stack) {
+    callbackError ??= error;
+    callbackStack ??= stack;
+    cancelled = true;
+    workerCancel?.send(null);
+  }
+  final subscription = control.listen((message) {
+    if (message == null) {
+      workerDone.complete();
+    } else if (message is SendPort) {
       workerCancel = message;
       if (cancelled) workerCancel!.send(null);
-    } else if (message is List && onProgress != null) {
-      onProgress(message[0] as int, message[1] as int);
+    } else if (message is List && onProgress != null && callbackError == null) {
+      try {
+        onProgress(message[0] as int, message[1] as int);
+      } catch (error, stack) {
+        cancelForCallbackError(error, stack);
+      }
     }
   });
   final poll = isCancelled == null
       ? null
       : Timer.periodic(const Duration(milliseconds: 100), (_) {
-          if (cancelled || !isCancelled()) return;
-          cancelled = true;
-          workerCancel?.send(null);
+          if (cancelled) return;
+          try {
+            if (!isCancelled()) return;
+            cancelled = true;
+            workerCancel?.send(null);
+          } catch (error, stack) {
+            cancelForCallbackError(error, stack);
+          }
         });
   try {
-    final result = await _runWorker(work, control.sendPort);
+    final outcome = await _runWorker(work, control.sendPort);
+    // The sentinel follows all progress on the same port. Isolate.run's result
+    // uses a different port and alone does not guarantee those callbacks ran.
+    await workerDone.future;
+    if (callbackError != null) {
+      Error.throwWithStackTrace(callbackError!, callbackStack!);
+    }
+    final result = _workerValue(outcome);
     // עבודה קצרה יכולה להסתיים לפני הדגימה הבאה של הביטול.
     if (cancelled || (isCancelled?.call() ?? false)) {
       throw const PatchDownloadCancelled();
@@ -1568,27 +1631,38 @@ Future<T> _runCancellableWorker<T>(
     return result;
   } finally {
     poll?.cancel();
+    await subscription.cancel();
     control.close();
   }
 }
 
 /// נפרד מ-[_runCancellableWorker] כדי שה-closure לא ילכוד את ה-ReceivePort.
-Future<T> _runWorker<T>(_WorkerBody<T> work, SendPort? control) =>
+Future<(T?, Object?, StackTrace?)> _runWorker<T>(
+        _WorkerBody<T> work, SendPort? control) =>
     Isolate.run(() async {
-      if (control == null) return work(null, null);
-      final cancel = ReceivePort();
+      final cancel = control == null ? null : ReceivePort();
       var cancelled = false;
-      cancel.listen((_) => cancelled = true);
-      control.send(cancel.sendPort);
+      cancel?.listen((_) => cancelled = true);
+      if (cancel != null) control!.send(cancel.sendPort);
       try {
-        return await work(
-          () => cancelled,
-          (done, total) => control.send([done, total]),
+        final result = await work(
+          control == null ? null : () => cancelled,
+          control == null ? null : (done, total) => control.send([done, total]),
         );
+        return (result, null, null);
+      } catch (error, stack) {
+        return (null, error, stack);
       } finally {
-        cancel.close();
+        cancel?.close();
+        control?.send(null);
       }
     });
+
+T _workerValue<T>((T?, Object?, StackTrace?) outcome) {
+  final error = outcome.$2;
+  if (error != null) Error.throwWithStackTrace(error, outcome.$3!);
+  return outcome.$1 as T;
+}
 
 /// sha256 של קובץ בזרימה; רץ רק בתוך worker. התקדמות מדווחת כל ~4MB.
 Future<String> _hashFileSha256(

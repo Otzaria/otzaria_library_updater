@@ -87,6 +87,12 @@ export 'src/services/patch_applier.dart'
 export 'src/services/patch_downloader.dart'
     show
         PatchDownloader,
+        StreamingPatchDownloader,
+        FileExtractor,
+        FileExtractionResult,
+        kDefaultMaxExtractedBytes,
+        extractedPatchFileName,
+        withFileOperationLock,
         PatchDownloadException,
         PatchDownloadCancelled,
         PatchNetworkException;

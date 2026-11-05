@@ -5,6 +5,24 @@
 - `downloadToFile`: מחיקת שאריות הטווחים ומחיקת היעד בכשל אורך או sha256
   אסינכרוניות. מחיקה סינכרונית של טווח בגודל של כמה GB תקעה את ה-UI של אוצריא
   ל-17 שניות (Otzaria/otzaria#4070). `deleteSegmentFiles` נשאר סינכרוני.
+- 0.9.0: `StreamingPatchDownloader` and the injectable `FileExtractor` contract
+  share bounded file-to-file patch extraction between online and offline hosts.
+  The decoder receives an exact output limit, cancellation and byte progress,
+  and returns a digest computed while writing. Compressed input is still
+  verified independently by `downloadToFile`; output size/digest are checked
+  before a same-directory rename publishes a reusable patch.
+- Extraction failures remove `.extracting` output. Cancellation and resource
+  failures preserve verified/resumable input; `FormatException` and
+  `PatchDownloadException` discard invalid compressed input. Reuse validates
+  existing extracted files, while a fresh extraction needs no second hash pass.
+  Whole-operation locks include decoding, verification and cleanup.
+- `withFileOperationLock` exposes the downloader's fail-fast SQLite lock for a
+  consumer's complete update/install/rollback operation, across isolates and
+  processes. Lock sidecars are persistent and must not be removed.
+- Local file copies reject source/destination aliases before deletion, enforce
+  the input length while writing, verify the final length, and check cancellation
+  after the last chunk. Existing in-memory APIs and DB/patch schemas are retained.
+
 - `LibraryUpdatePlan.blockReason` (`LibraryUpdateBlockReason`): סיווג מובנה של
   תוכנית `blocked`. `appUpdateRequired` כשהעדכון דורש סכמה או פורמט patch
   שהצרכן אינו מכיר, אחרת `other`. הצרכן מבחין בין המקרים בלי לנתח את `reason`
