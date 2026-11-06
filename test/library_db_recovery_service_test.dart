@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:path/path.dart' as p;
 import 'package:sqlite3/sqlite3.dart' as sqlite3;
 import 'package:test/test.dart';
 import 'package:seforim_library_updater/src/services/library_db_recovery_service.dart';
@@ -36,7 +37,11 @@ void main() {
     final dbInode = _inode(dbPath);
 
     await service.beginApply(
-        dbPath: dbPath, fromVersion: 1, toVersion: 2, timestamp: 't');
+      dbPath: dbPath,
+      fromVersion: 1,
+      toVersion: 2,
+      timestamp: 't',
+    );
 
     final backup = service.backupPathFor(dbPath);
     // ה-DB הוזז: אינו במקומו, והגיבוי הוא אותו קובץ (inode) ולא עותק.
@@ -53,7 +58,11 @@ void main() {
     Directory(service.markerPathFor(dbPath)).createSync();
     await expectLater(
       service.beginApply(
-          dbPath: dbPath, fromVersion: 1, toVersion: 2, timestamp: 't'),
+        dbPath: dbPath,
+        fromVersion: 1,
+        toVersion: 2,
+        timestamp: 't',
+      ),
       throwsA(isA<FileSystemException>()),
     );
     expect(File(dbPath).readAsStringSync(), 'ORIGINAL');
@@ -66,7 +75,11 @@ void main() {
     File('${backupDir.path}/blocker').writeAsStringSync('x');
     await expectLater(
       service.beginApply(
-          dbPath: dbPath, fromVersion: 1, toVersion: 2, timestamp: 't'),
+        dbPath: dbPath,
+        fromVersion: 1,
+        toVersion: 2,
+        timestamp: 't',
+      ),
       throwsA(isA<FileSystemException>()),
     );
     expect(File(dbPath).readAsStringSync(), 'ORIGINAL');
@@ -82,7 +95,11 @@ void main() {
     File('${walDir.path}/blocker').writeAsStringSync('x');
     await expectLater(
       service.beginApply(
-          dbPath: dbPath, fromVersion: 1, toVersion: 2, timestamp: 't'),
+        dbPath: dbPath,
+        fromVersion: 1,
+        toVersion: 2,
+        timestamp: 't',
+      ),
       throwsA(isA<FileSystemException>()),
     );
     expect(File(dbPath).existsSync(), isFalse);
@@ -104,7 +121,11 @@ void main() {
     File(dbPath).deleteSync();
     await expectLater(
       service.beginApply(
-          dbPath: dbPath, fromVersion: 1, toVersion: 2, timestamp: 't'),
+        dbPath: dbPath,
+        fromVersion: 1,
+        toVersion: 2,
+        timestamp: 't',
+      ),
       throwsA(isA<FileSystemException>()),
     );
     expect(File(service.backupPathFor(dbPath)).readAsStringSync(), 'ONLY-COPY');
@@ -113,57 +134,74 @@ void main() {
     expect(File(dbPath).readAsStringSync(), 'ONLY-COPY');
   });
 
-  test('beginApply מזיז את ה-sidecars עם ה-DB, ו-rollback מחזיר אותם',
-      () async {
-    File('$dbPath-journal').writeAsStringSync('J');
-    File('$dbPath-wal').writeAsStringSync('W');
-    await service.beginApply(
-        dbPath: dbPath, fromVersion: 1, toVersion: 2, timestamp: 't');
-    final backup = service.backupPathFor(dbPath);
-    expect(File('$dbPath-journal').existsSync(), isFalse);
-    expect(File('$dbPath-wal').existsSync(), isFalse);
-    expect(File('$backup-journal').readAsStringSync(), 'J');
-    expect(File('$backup-wal').readAsStringSync(), 'W');
+  test(
+    'beginApply מזיז את ה-sidecars עם ה-DB, ו-rollback מחזיר אותם',
+    () async {
+      File('$dbPath-journal').writeAsStringSync('J');
+      File('$dbPath-wal').writeAsStringSync('W');
+      await service.beginApply(
+        dbPath: dbPath,
+        fromVersion: 1,
+        toVersion: 2,
+        timestamp: 't',
+      );
+      final backup = service.backupPathFor(dbPath);
+      expect(File('$dbPath-journal').existsSync(), isFalse);
+      expect(File('$dbPath-wal').existsSync(), isFalse);
+      expect(File('$backup-journal').readAsStringSync(), 'J');
+      expect(File('$backup-wal').readAsStringSync(), 'W');
 
-    await service.rollback(dbPath);
-    expect(File('$dbPath-journal').readAsStringSync(), 'J');
-    expect(File('$dbPath-wal').readAsStringSync(), 'W');
-    expect(File('$backup-journal').existsSync(), isFalse);
-    expect(File('$backup-wal').existsSync(), isFalse);
-  });
+      await service.rollback(dbPath);
+      expect(File('$dbPath-journal').readAsStringSync(), 'J');
+      expect(File('$dbPath-wal').readAsStringSync(), 'W');
+      expect(File('$backup-journal').existsSync(), isFalse);
+      expect(File('$backup-wal').existsSync(), isFalse);
+    },
+  );
 
-  test('hot journal של ה-DB המגובה מגולגל עליו אחרי שחזור, לא על DB אחר',
-      () async {
-    final crashed = _makeHotJournalDb(tmp.path);
-    await service.beginApply(
-        dbPath: crashed, fromVersion: 1, toVersion: 2, timestamp: 't');
-    // ה-DB החדש נכנס למקום; אסור שה-journal הישן יישאר לצדו.
-    File(crashed).writeAsStringSync('NEW-DB');
-    expect(File('$crashed-journal').existsSync(), isFalse);
+  test(
+    'hot journal של ה-DB המגובה מגולגל עליו אחרי שחזור, לא על DB אחר',
+    () async {
+      final crashed = _makeHotJournalDb(tmp.path);
+      await service.beginApply(
+        dbPath: crashed,
+        fromVersion: 1,
+        toVersion: 2,
+        timestamp: 't',
+      );
+      // ה-DB החדש נכנס למקום; אסור שה-journal הישן יישאר לצדו.
+      File(crashed).writeAsStringSync('NEW-DB');
+      expect(File('$crashed-journal').existsSync(), isFalse);
 
-    final result = await service.recoverIfNeeded(crashed);
-    expect(result.action, RecoveryAction.restored);
-    expect(File('$crashed-journal').existsSync(), isTrue);
-    expect(service.checkDbHealthAfterCrash(crashed), isTrue);
-    final db = sqlite3.sqlite3.open(crashed, mode: sqlite3.OpenMode.readOnly);
-    expect(db.select("SELECT count(*) c FROM t WHERE v='A'").first['c'], 20000);
-    db.close();
-  });
+      final result = await service.recoverIfNeeded(crashed);
+      expect(result.action, RecoveryAction.restored);
+      expect(File('$crashed-journal').existsSync(), isTrue);
+      expect(service.checkDbHealthAfterCrash(crashed), isTrue);
+      final db = sqlite3.sqlite3.open(crashed, mode: sqlite3.OpenMode.readOnly);
+      expect(
+        db.select("SELECT count(*) c FROM t WHERE v='A'").first['c'],
+        20000,
+      );
+      db.close();
+    },
+  );
 
-  test('beginApply(createBackup: false) כותב סימון בלבד — בלי העתקת ה-DB',
-      () async {
-    await service.beginApply(
-      dbPath: dbPath,
-      fromVersion: 1,
-      toVersion: 2,
-      timestamp: 't',
-      createBackup: false,
-    );
-    expect(File(service.markerPathFor(dbPath)).existsSync(), isTrue);
-    expect(File(service.backupPathFor(dbPath)).existsSync(), isFalse);
-    expect(File('$dbPath.backup.tmp').existsSync(), isFalse);
-    expect(File(dbPath).readAsStringSync(), 'ORIGINAL'); // ה-DB נשאר במקומו
-  });
+  test(
+    'beginApply(createBackup: false) כותב סימון בלבד — בלי העתקת ה-DB',
+    () async {
+      await service.beginApply(
+        dbPath: dbPath,
+        fromVersion: 1,
+        toVersion: 2,
+        timestamp: 't',
+        createBackup: false,
+      );
+      expect(File(service.markerPathFor(dbPath)).existsSync(), isTrue);
+      expect(File(service.backupPathFor(dbPath)).existsSync(), isFalse);
+      expect(File('$dbPath.backup.tmp').existsSync(), isFalse);
+      expect(File(dbPath).readAsStringSync(), 'ORIGINAL'); // ה-DB נשאר במקומו
+    },
+  );
 
   test('rollback ללא גיבוי (מסלול דלתא) מנקה סימון בלי לגעת ב-DB', () async {
     await service.beginApply(
@@ -180,7 +218,11 @@ void main() {
 
   test('finishSuccess מנקה גיבוי וסימון', () async {
     await service.beginApply(
-        dbPath: dbPath, fromVersion: 1, toVersion: 2, timestamp: 't');
+      dbPath: dbPath,
+      fromVersion: 1,
+      toVersion: 2,
+      timestamp: 't',
+    );
     service.finishSuccess(dbPath);
     expect(File(service.backupPathFor(dbPath)).existsSync(), isFalse);
     expect(File(service.markerPathFor(dbPath)).existsSync(), isFalse);
@@ -188,7 +230,11 @@ void main() {
 
   test('rollback משחזר את ה-DB מהגיבוי', () async {
     await service.beginApply(
-        dbPath: dbPath, fromVersion: 1, toVersion: 2, timestamp: 't');
+      dbPath: dbPath,
+      fromVersion: 1,
+      toVersion: 2,
+      timestamp: 't',
+    );
     File(dbPath).writeAsStringSync('CORRUPTED-HALF-WRITE');
     await service.rollback(dbPath);
     expect(File(dbPath).readAsStringSync(), 'ORIGINAL');
@@ -200,12 +246,17 @@ void main() {
     test('מגלגל hot journal (קריסה באמצע apply) ומחזיר true', () {
       final crashed = _makeHotJournalDb(tmp.path);
       // רגרסיה: פתיחת readOnly על hot journal נכשלת ב-"readonly database".
-      expect(
-        () => sqlite3.sqlite3
-            .open(crashed, mode: sqlite3.OpenMode.readOnly)
-            .select('PRAGMA quick_check'),
-        throwsA(isA<sqlite3.SqliteException>()),
-      );
+      expect(() {
+        final readOnly = sqlite3.sqlite3.open(
+          crashed,
+          mode: sqlite3.OpenMode.readOnly,
+        );
+        try {
+          readOnly.select('PRAGMA quick_check');
+        } finally {
+          readOnly.close();
+        }
+      }, throwsA(isA<sqlite3.SqliteException>()));
       // ה-RW של השירות מגלגל את ה-journal ומאמת תקינות.
       expect(service.checkDbHealthAfterCrash(crashed), isTrue);
       expect(File('$crashed-journal').existsSync(), isFalse);
@@ -221,7 +272,11 @@ void main() {
   group('recoverIfNeeded', () {
     test('marker+backup → שחזור (סימולציית קריסה)', () async {
       await service.beginApply(
-          dbPath: dbPath, fromVersion: 1, toVersion: 2, timestamp: 't');
+        dbPath: dbPath,
+        fromVersion: 1,
+        toVersion: 2,
+        timestamp: 't',
+      );
       File(dbPath).writeAsStringSync('HALF-APPLIED'); // קריסה באמצע
       final result = await service.recoverIfNeeded(dbPath);
       expect(result.action, RecoveryAction.restored);
@@ -234,7 +289,11 @@ void main() {
       final big = List<int>.generate(1 << 20, (i) => i & 0xff);
       File(dbPath).writeAsBytesSync(big);
       await service.beginApply(
-          dbPath: dbPath, fromVersion: 1, toVersion: 2, timestamp: 't');
+        dbPath: dbPath,
+        fromVersion: 1,
+        toVersion: 2,
+        timestamp: 't',
+      );
       final backupInode = _inode(service.backupPathFor(dbPath));
       // קריסה אחרי מחיקת ה-DB הישן ולפני הכנסת החדש: ה-DB חסר לגמרי.
       expect(File(dbPath).existsSync(), isFalse);
@@ -268,30 +327,46 @@ void main() {
       expect(File(service.backupPathFor(dbPath)).existsSync(), isFalse);
     });
 
-    test('שארית backup.tmp (קריסה לפני rename) נמחקת ולא משוחזרת ממנה',
-        () async {
-      // backup.tmp יתום מדמה קריסה באמצע יצירת גיבוי — אסור לשחזר ממנו.
-      File('$dbPath.backup.tmp').writeAsStringSync('PARTIAL');
-      final result = await service.recoverIfNeeded(dbPath);
-      expect(result.action, RecoveryAction.none);
-      expect(File('$dbPath.backup.tmp').existsSync(), isFalse);
-      expect(File(dbPath).readAsStringSync(), 'ORIGINAL'); // ה-DB לא נגוע
-    });
+    test(
+      'שארית backup.tmp (קריסה לפני rename) נמחקת ולא משוחזרת ממנה',
+      () async {
+        // backup.tmp יתום מדמה קריסה באמצע יצירת גיבוי — אסור לשחזר ממנו.
+        File('$dbPath.backup.tmp').writeAsStringSync('PARTIAL');
+        final result = await service.recoverIfNeeded(dbPath);
+        expect(result.action, RecoveryAction.none);
+        expect(File('$dbPath.backup.tmp').existsSync(), isFalse);
+        expect(File(dbPath).readAsStringSync(), 'ORIGINAL'); // ה-DB לא נגוע
+      },
+    );
   });
 }
 
 /// מזהה הקובץ במערכת הקבצים: rename משמר אותו, copy יוצר חדש.
-int _inode(String path) {
+String _inode(String path) {
+  if (Platform.isWindows) {
+    final result = Process.runSync('fsutil', ['file', 'queryfileid', path]);
+    if (result.exitCode != 0) {
+      throw StateError(
+        'file ID query failed: ${result.stdout}${result.stderr}',
+      );
+    }
+    return RegExp(
+      r'0x[0-9a-fA-F]+',
+    ).firstMatch(result.stdout as String)!.group(0)!;
+  }
   final args = Platform.isMacOS ? ['-f', '%i', path] : ['-c', '%i', path];
   final result = Process.runSync('stat', args);
-  return int.parse((result.stdout as String).trim());
+  if (result.exitCode != 0) {
+    throw StateError('inode query failed: ${result.stdout}${result.stderr}');
+  }
+  return (result.stdout as String).trim();
 }
 
 /// סך הבייטים של כל הקבצים בתיקייה, מלבד [except].
 int _bytesExcept(Directory dir, String except) => dir
     .listSync()
     .whereType<File>()
-    .where((f) => f.path != except)
+    .where((f) => !p.equals(f.path, except))
     .fold(0, (sum, f) => sum + f.lengthSync());
 
 /// בונה DB עם hot journal אמיתי (מדמה קריסה באמצע transaction) ומחזיר את נתיבו.

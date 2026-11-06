@@ -252,5 +252,20 @@ void main() {
       expect(lastReceived, 1000);
       expect(lastTotal, 1000);
     });
+
+    test('בסיס שעולה באמצע (חלק מאוחר) אינו חותך בתים שכבר נספרו', () {
+      var lastReceived = -1;
+      final aggregator = ByteProgressAggregator(
+        totalBytes: 100,
+        onProgress: (received, _) => lastReceived = received,
+      );
+      final slot = aggregator.slot();
+      slot.markExisting(0);
+      slot.report(40, 100); // חלק ראשון ירד בריצה
+      slot.markExisting(10); // לחלק השני יש בסיס
+      slot.report(60, 100);
+
+      expect(lastReceived, 50);
+    });
   });
 }

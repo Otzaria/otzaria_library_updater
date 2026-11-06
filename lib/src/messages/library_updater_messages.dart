@@ -130,6 +130,7 @@ abstract class LibraryUpdaterMessages {
   String tooManyRedirects(String url);
   String writeResumeSidecarFailed(String path, String error);
   String get downloadAlreadyInProgress;
+  String destinationBusy(String path) => '$downloadAlreadyInProgress ($path)';
   String checksumMismatchDetailed(String label, String expected, String actual);
   String checksumMismatch(String label);
   String localFileNotFound(String path);
@@ -237,8 +238,7 @@ class HebrewLibraryUpdaterMessages extends LibraryUpdaterMessages {
     String fileName,
     String mirrorDir,
     String error,
-  ) =>
-      'קובץ $fileName בתיקייה $mirrorDir פגום: $error';
+  ) => 'קובץ $fileName בתיקייה $mirrorDir פגום: $error';
   @override
   String mirrorManifestUnexpectedShape(String fileName, String mirrorDir) =>
       'קובץ $fileName בתיקייה $mirrorDir אינו בפורמט הצפוי.';
@@ -485,8 +485,7 @@ class HebrewLibraryUpdaterMessages extends LibraryUpdaterMessages {
     String label,
     String expected,
     String actual,
-  ) =>
-      '$label אינו תואם: צפוי $expected, התקבל $actual';
+  ) => '$label אינו תואם: צפוי $expected, התקבל $actual';
   @override
   String checksumMismatch(String label) => '$label אינו תואם';
   @override

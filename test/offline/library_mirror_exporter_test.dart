@@ -34,8 +34,7 @@ ReleaseSpec release(
   bool prerelease = false,
   bool draft = false,
   List<String> assets = const [],
-}) =>
-    (tag: tag, prerelease: prerelease, draft: draft, assets: assets);
+}) => (tag: tag, prerelease: prerelease, draft: draft, assets: assets);
 
 Map<String, dynamic> manifestBody(
   int from,
@@ -45,31 +44,30 @@ Map<String, dynamic> manifestBody(
   int? patchFormat,
   bool fullRebase = false,
   String compression = 'zstd',
-}) =>
+}) => {
+  if (fullRebase) 'fullRebase': true,
+  'fromVersion': from,
+  'toVersion': to,
+  'fromSchemaVersion': fromSchema,
+  'toSchemaVersion': toSchema,
+  // מסכמה 4 ומעלה היצרן כותב את השדה תמיד — ראו `DeltaManifest.fromJson`.
+  if (toSchema >= 4 || patchFormat != null)
+    'patchFormatVersion': patchFormat ?? kSupportedPatchFormatVersion,
+  'fromContentHash': 'h$from',
+  'toContentHash': 'h$to',
+  'patchFiles': [
     {
-      if (fullRebase) 'fullRebase': true,
-      'fromVersion': from,
-      'toVersion': to,
-      'fromSchemaVersion': fromSchema,
-      'toSchemaVersion': toSchema,
-      // מסכמה 4 ומעלה היצרן כותב את השדה תמיד — ראו `DeltaManifest.fromJson`.
-      if (toSchema >= 4 || patchFormat != null)
-        'patchFormatVersion': patchFormat ?? kSupportedPatchFormatVersion,
-      'fromContentHash': 'h$from',
-      'toContentHash': 'h$to',
-      'patchFiles': [
-        {
-          'file': 'patch-v$from-v$to.db.zst',
-          'compression': compression,
-          // הייצוא קורא מכאן רק את שם הקובץ; ה-hash/size מאומתים מול מטא-דאטה
-          // של ה-asset, לא מול ה-manifest.
-          'sha256': 'unused',
-          'size': 1,
-          'uncompressedSha256': 'u',
-          'uncompressedSize': 99,
-        }
-      ],
-    };
+      'file': 'patch-v$from-v$to.db.zst',
+      'compression': compression,
+      // הייצוא קורא מכאן רק את שם הקובץ; ה-hash/size מאומתים מול מטא-דאטה
+      // של ה-asset, לא מול ה-manifest.
+      'sha256': 'unused',
+      'size': 1,
+      'uncompressedSha256': 'u',
+      'uncompressedSize': 99,
+    },
+  ],
+};
 
 void main() {
   late Directory tmp;
@@ -99,10 +97,11 @@ void main() {
     Map<int, String> compressionByVersion = const {},
     Future<void> Function(String assetName)? beforeAsset,
     http.StreamedResponse? Function(http.BaseRequest request, Uint8List body)?
-        respond,
+    respond,
     int? Function(String path)? freeBytesFor,
     int maxConnections = PatchDownloader.defaultMaxConnections,
     int segmentThresholdBytes = PatchDownloader.defaultSegmentThresholdBytes,
+    FutureOr<int> Function(String, int, String?, String?)? connectionsForAsset,
   }) {
     Uint8List bodyFor(String name) {
       if (!name.endsWith('.manifest.json')) {
@@ -116,36 +115,44 @@ void main() {
       final match = RegExp(r'patch-v(\d+)-v(\d+)').firstMatch(name)!;
       final from = int.parse(match.group(1)!);
       final to = int.parse(match.group(2)!);
-      return Uint8List.fromList(utf8.encode(jsonEncode({
-        ...manifestBody(
-          from,
-          to,
-          fromSchema: schemaByVersion[from] ?? 2,
-          toSchema: schemaByVersion[to] ?? 2,
-          patchFormat: patchFormat,
-          fullRebase: fullRebase,
-          compression: compressionByVersion[to] ?? 'zstd',
+      return Uint8List.fromList(
+        utf8.encode(
+          jsonEncode({
+            ...manifestBody(
+              from,
+              to,
+              fromSchema: schemaByVersion[from] ?? 2,
+              toSchema: schemaByVersion[to] ?? 2,
+              patchFormat: patchFormat,
+              fullRebase: fullRebase,
+              compression: compressionByVersion[to] ?? 'zstd',
+            ),
+            ...?manifestOverrides[name],
+          }),
         ),
-        ...?manifestOverrides[name],
-      })));
+      );
     }
 
     final releasesJson = releases
-        .map((r) => {
-              'tag_name': r.tag,
-              'prerelease': r.prerelease,
-              'draft': r.draft,
-              'published_at': '2026-06-27T21:00:00Z',
-              'assets': r.assets
-                  .map((name) => {
-                        'name': name,
-                        'browser_download_url': 'https://x/${r.tag}/$name',
-                        'size': bodyFor(name).length,
-                        'id': name.hashCode.abs(),
-                        'digest': 'sha256:${sha256.convert(bodyFor(name))}',
-                      })
-                  .toList(),
-            })
+        .map(
+          (r) => {
+            'tag_name': r.tag,
+            'prerelease': r.prerelease,
+            'draft': r.draft,
+            'published_at': '2026-06-27T21:00:00Z',
+            'assets': r.assets
+                .map(
+                  (name) => {
+                    'name': name,
+                    'browser_download_url': 'https://x/${r.tag}/$name',
+                    'size': bodyFor(name).length,
+                    'id': name.hashCode.abs(),
+                    'digest': 'sha256:${sha256.convert(bodyFor(name))}',
+                  },
+                )
+                .toList(),
+          },
+        )
         .toList();
 
     final fetched = <String>[];
@@ -154,11 +161,15 @@ void main() {
       Uint8List body;
       if (url.contains('api.github.com')) {
         // עמוד יחיד — פחות מ-per_page עוצר את ה-pagination.
-        body = Uint8List.fromList(utf8.encode(jsonEncode(
-          request.url.queryParameters['page'] == '1'
-              ? releasesJson
-              : <Object>[],
-        )));
+        body = Uint8List.fromList(
+          utf8.encode(
+            jsonEncode(
+              request.url.queryParameters['page'] == '1'
+                  ? releasesJson
+                  : <Object>[],
+            ),
+          ),
+        );
       } else {
         final name = url.split('/').last;
         fetched.add(name);
@@ -187,6 +198,7 @@ void main() {
         freeBytesFor: freeBytesFor,
         maxConnections: maxConnections,
         segmentThresholdBytes: segmentThresholdBytes,
+        connectionsForAsset: connectionsForAsset,
       ),
       fetched: fetched,
     );
@@ -196,12 +208,15 @@ void main() {
     test('מסד סכמה 6 מחליף עדכון full-rebase (אישי: $personal)', () async {
       final built = buildExporter(
         [
-          release('v31-20261004170255', assets: [
-            'seforim-schema6.db.zst',
-            'seforim.db.buildstate.zst',
-            'patch-v29-v31.db.zst',
-            'patch-v29-v31.db.zst.manifest.json',
-          ]),
+          release(
+            'v31-20261004170255',
+            assets: [
+              'seforim-schema6.db.zst',
+              'seforim.db.buildstate.zst',
+              'patch-v29-v31.db.zst',
+              'patch-v29-v31.db.zst.manifest.json',
+            ],
+          ),
         ],
         schemaByVersion: {29: 5, 31: 6},
         patchFormat: 999,
@@ -233,28 +248,34 @@ void main() {
   }
 
   List<String> mirroredTags(String dir) {
-    final decoded = jsonDecode(
-      File('$dir${Platform.pathSeparator}'
-              '${LocalMirrorLibraryReleaseClient.manifestFileName}')
-          .readAsStringSync(),
-    ) as Map<String, dynamic>;
+    final decoded =
+        jsonDecode(
+              File(
+                '$dir${Platform.pathSeparator}'
+                '${LocalMirrorLibraryReleaseClient.manifestFileName}',
+              ).readAsStringSync(),
+            )
+            as Map<String, dynamic>;
     return (decoded['releases'] as List)
         .map((r) => (r as Map<String, dynamic>)['tag'] as String)
         .toList();
   }
 
-  bool assetOnDisk(String dir, String tag, String name) =>
-      File([dir, 'assets', tag, name].join(Platform.pathSeparator))
-          .existsSync();
+  bool assetOnDisk(String dir, String tag, String name) => File(
+    [dir, 'assets', tag, name].join(Platform.pathSeparator),
+  ).existsSync();
 
   /// שמות הנכסים שנרשמו ל-[tag] ב-`releases.json` — מה שהמחשב הלא-מקוון
   /// באמת רואה, להבדיל ממה שיושב על הדיסק.
   List<String> mirroredAssetNames(String dir, String tag) {
-    final decoded = jsonDecode(
-      File('$dir${Platform.pathSeparator}'
-              '${LocalMirrorLibraryReleaseClient.manifestFileName}')
-          .readAsStringSync(),
-    ) as Map<String, dynamic>;
+    final decoded =
+        jsonDecode(
+              File(
+                '$dir${Platform.pathSeparator}'
+                '${LocalMirrorLibraryReleaseClient.manifestFileName}',
+              ).readAsStringSync(),
+            )
+            as Map<String, dynamic>;
     final release = (decoded['releases'] as List)
         .cast<Map<String, dynamic>>()
         .firstWhere((r) => r['tag'] == tag);
@@ -268,15 +289,18 @@ void main() {
     // הורדה מלאה — ההבדל היחיד הוא שהעומק חסום, כי המראה יושבת על כונן נייד.
     test('ה-releases האחרונים בעומק ברירת המחדל מיוצאים כולם', () async {
       final built = buildExporter([
-        release('v3', assets: [
-          'seforim.db.zst',
-          'patch-v2-v3.db.zst',
-          'patch-v2-v3.db.zst.manifest.json',
-        ]),
-        release('v2', assets: [
-          'patch-v1-v2.db.zst',
-          'patch-v1-v2.db.zst.manifest.json',
-        ]),
+        release(
+          'v3',
+          assets: [
+            'seforim.db.zst',
+            'patch-v2-v3.db.zst',
+            'patch-v2-v3.db.zst.manifest.json',
+          ],
+        ),
+        release(
+          'v2',
+          assets: ['patch-v1-v2.db.zst', 'patch-v1-v2.db.zst.manifest.json'],
+        ),
       ]);
       await built.exporter.export(destDir: destDir);
 
@@ -287,22 +311,25 @@ void main() {
 
     // מעבר לעומק — ההיסטוריה נחתכת, אחרת המראה מגיעה לכמה ג'יגה-בייט.
     test('מה שמעבר לעומק אינו מיוצא כלל', () async {
-      final built = buildExporter(
-        [
-          release('v3', assets: [
+      final built = buildExporter([
+        release(
+          'v3',
+          assets: [
             'seforim.db.zst',
             'patch-v2-v3.db.zst',
             'patch-v2-v3.db.zst.manifest.json',
-          ]),
-          release('v2', assets: [
+          ],
+        ),
+        release(
+          'v2',
+          assets: [
             'seforim.db.zst',
             'patch-v1-v2.db.zst',
             'patch-v1-v2.db.zst.manifest.json',
-          ]),
-          release('v1', assets: ['seforim.db.zst']),
-        ],
-        historyDepth: 1,
-      );
+          ],
+        ),
+        release('v1', assets: ['seforim.db.zst']),
+      ], historyDepth: 1);
       await built.exporter.export(destDir: destDir);
 
       expect(mirroredTags(destDir), ['v3']);
@@ -310,8 +337,9 @@ void main() {
       expect(assetOnDisk(destDir, 'v3', 'patch-v2-v3.db.zst'), isTrue);
       // ההיסטוריה כלל לא ירדה — גם לא ה-manifests שלה.
       expect(
-        Directory([destDir, 'assets', 'v2'].join(Platform.pathSeparator))
-            .existsSync(),
+        Directory(
+          [destDir, 'assets', 'v2'].join(Platform.pathSeparator),
+        ).existsSync(),
         isFalse,
       );
       expect(built.fetched, isNot(contains('patch-v1-v2.db.zst')));
@@ -320,17 +348,14 @@ void main() {
     // מסלול ההורדה המלאה חייב להיות זמין תמיד, גם כשה-release האחרון הוא
     // patch-only — אחרת מחשב שנמצא כמה גרסאות מאחור נתקע.
     test('release אחרון בלי DB מלא → נשמר גם האחרון שכן נושא אותו', () async {
-      final built = buildExporter(
-        [
-          release('v4', assets: [
-            'patch-v3-v4.db.zst',
-            'patch-v3-v4.db.zst.manifest.json',
-          ]),
-          release('v3', assets: ['seforim.db.zst']),
-          release('v2', assets: ['seforim.db.zst']),
-        ],
-        historyDepth: 1,
-      );
+      final built = buildExporter([
+        release(
+          'v4',
+          assets: ['patch-v3-v4.db.zst', 'patch-v3-v4.db.zst.manifest.json'],
+        ),
+        release('v3', assets: ['seforim.db.zst']),
+        release('v2', assets: ['seforim.db.zst']),
+      ], historyDepth: 1);
       await built.exporter.export(destDir: destDir);
 
       expect(mirroredTags(destDir), containsAll(<String>['v4', 'v3']));
@@ -340,17 +365,17 @@ void main() {
     });
 
     test('כשה-release האחרון נושא DB מלא — הוא נשמר פעם אחת בלבד', () async {
-      final built = buildExporter(
-        [
-          release('v3', assets: [
+      final built = buildExporter([
+        release(
+          'v3',
+          assets: [
             'seforim.db.zst',
             'patch-v2-v3.db.zst',
             'patch-v2-v3.db.zst.manifest.json',
-          ]),
-          release('v2', assets: ['seforim.db.zst']),
-        ],
-        historyDepth: 1,
-      );
+          ],
+        ),
+        release('v2', assets: ['seforim.db.zst']),
+      ], historyDepth: 1);
       await built.exporter.export(destDir: destDir);
       expect(mirroredTags(destDir), ['v3']);
     });
@@ -360,26 +385,29 @@ void main() {
     // היה הופך הורדה של ~1.6GB להורדה של ~7.5GB.
     test('ה-DB המלא יורד רק מה-release הגבוה, לא מכל אחד בחלון', () async {
       final built = buildExporter([
-        release('v3', assets: [
-          'seforim.db.zst',
-          'patch-v2-v3.db.zst',
-          'patch-v2-v3.db.zst.manifest.json',
-        ]),
-        release('v2', assets: [
-          'seforim.db.zst',
-          'patch-v1-v2.db.zst',
-          'patch-v1-v2.db.zst.manifest.json',
-        ]),
+        release(
+          'v3',
+          assets: [
+            'seforim.db.zst',
+            'patch-v2-v3.db.zst',
+            'patch-v2-v3.db.zst.manifest.json',
+          ],
+        ),
+        release(
+          'v2',
+          assets: [
+            'seforim.db.zst',
+            'patch-v1-v2.db.zst',
+            'patch-v1-v2.db.zst.manifest.json',
+          ],
+        ),
         release('v1', assets: ['seforim.db.zst']),
       ]);
       await built.exporter.export(destDir: destDir);
 
       // שלושתם במראה — בשביל ה-patches — אך ה-DB המלא ירד פעם אחת בדיוק.
       expect(mirroredTags(destDir), containsAll(<String>['v3', 'v2', 'v1']));
-      expect(
-        built.fetched.where((n) => n == 'seforim.db.zst').length,
-        1,
-      );
+      expect(built.fetched.where((n) => n == 'seforim.db.zst').length, 1);
       expect(assetOnDisk(destDir, 'v3', 'seforim.db.zst'), isTrue);
       expect(assetOnDisk(destDir, 'v2', 'seforim.db.zst'), isFalse);
       expect(assetOnDisk(destDir, 'v1', 'seforim.db.zst'), isFalse);
@@ -401,24 +429,33 @@ void main() {
     group('מסד מלא שכבר במראה מנצח מסד מלא חדש', () {
       test('release חדש עם DB מלא → רק ה-patch יורד, הישן נשאר', () async {
         await buildExporter([
-          release('v3', assets: [
-            'seforim.db.zst',
-            'patch-v2-v3.db.zst',
-            'patch-v2-v3.db.zst.manifest.json',
-          ]),
+          release(
+            'v3',
+            assets: [
+              'seforim.db.zst',
+              'patch-v2-v3.db.zst',
+              'patch-v2-v3.db.zst.manifest.json',
+            ],
+          ),
         ]).exporter.export(destDir: destDir);
 
         final second = buildExporter([
-          release('v4', assets: [
-            'seforim.db.zst',
-            'patch-v3-v4.db.zst',
-            'patch-v3-v4.db.zst.manifest.json',
-          ]),
-          release('v3', assets: [
-            'seforim.db.zst',
-            'patch-v2-v3.db.zst',
-            'patch-v2-v3.db.zst.manifest.json',
-          ]),
+          release(
+            'v4',
+            assets: [
+              'seforim.db.zst',
+              'patch-v3-v4.db.zst',
+              'patch-v3-v4.db.zst.manifest.json',
+            ],
+          ),
+          release(
+            'v3',
+            assets: [
+              'seforim.db.zst',
+              'patch-v2-v3.db.zst',
+              'patch-v2-v3.db.zst.manifest.json',
+            ],
+          ),
         ]);
         await second.exporter.export(destDir: destDir);
 
@@ -461,10 +498,10 @@ void main() {
         ]).exporter.export(destDir: destDir);
 
         final second = buildExporter([
-          release('v4', assets: [
-            'seforim.db.zst',
-            'patch-v3-v4.db.zst.manifest.json',
-          ]),
+          release(
+            'v4',
+            assets: ['seforim.db.zst', 'patch-v3-v4.db.zst.manifest.json'],
+          ),
           release('v3', assets: ['seforim.db.zst']),
         ]);
         await second.exporter.export(destDir: destDir);
@@ -475,23 +512,32 @@ void main() {
       // התקנה על מחשב ריק: המסד הישן + השרשרת, בהחלה **אחת**.
       test('התקנה טרייה מקבלת מסד ישן ואז patches, ברצף אחד', () async {
         await buildExporter([
-          release('v3', assets: [
-            'seforim.db.zst',
-            'patch-v2-v3.db.zst',
-            'patch-v2-v3.db.zst.manifest.json',
-          ]),
+          release(
+            'v3',
+            assets: [
+              'seforim.db.zst',
+              'patch-v2-v3.db.zst',
+              'patch-v2-v3.db.zst.manifest.json',
+            ],
+          ),
         ]).exporter.export(destDir: destDir);
         await buildExporter([
-          release('v4', assets: [
-            'seforim.db.zst',
-            'patch-v3-v4.db.zst',
-            'patch-v3-v4.db.zst.manifest.json',
-          ]),
-          release('v3', assets: [
-            'seforim.db.zst',
-            'patch-v2-v3.db.zst',
-            'patch-v2-v3.db.zst.manifest.json',
-          ]),
+          release(
+            'v4',
+            assets: [
+              'seforim.db.zst',
+              'patch-v3-v4.db.zst',
+              'patch-v3-v4.db.zst.manifest.json',
+            ],
+          ),
+          release(
+            'v3',
+            assets: [
+              'seforim.db.zst',
+              'patch-v2-v3.db.zst',
+              'patch-v2-v3.db.zst.manifest.json',
+            ],
+          ),
         ]).exporter.export(destDir: destDir);
 
         final result = await OfflineLibraryUpdateDiscovery(
@@ -540,8 +586,13 @@ void main() {
       ]);
       expect(
         () => built.exporter.export(destDir: destDir),
-        throwsA(isA<StateError>().having((e) => e.message, 'message',
-            LibraryUpdaterMessages.current.exportNoReleases)),
+        throwsA(
+          isA<StateError>().having(
+            (e) => e.message,
+            'message',
+            LibraryUpdaterMessages.current.exportNoReleases,
+          ),
+        ),
       );
     });
   });
@@ -556,10 +607,13 @@ void main() {
       final warnings = <String>[];
       final built = buildExporter(
         [
-          release('v26', assets: [
-            'patch-v25-v26.db.zst',
-            'patch-v25-v26.db.zst.manifest.json',
-          ]),
+          release(
+            'v26',
+            assets: [
+              'patch-v25-v26.db.zst',
+              'patch-v25-v26.db.zst.manifest.json',
+            ],
+          ),
           release('v25', assets: ['seforim.db.zst']),
         ],
         compressionByVersion: {26: 'gzip'},
@@ -573,8 +627,11 @@ void main() {
       expect(assetOnDisk(destDir, 'v26', 'patch-v25-v26.db.zst'), isFalse);
       // הפענוח נכשל, ולכן האזהרה היא "manifest אינו קריא" עם הסיבה.
       expect(
-        warnings.any((w) => w.contains(LibraryUpdaterMessages.current
-            .unsupportedPatchCompression('gzip'))),
+        warnings.any(
+          (w) => w.contains(
+            LibraryUpdaterMessages.current.unsupportedPatchCompression('gzip'),
+          ),
+        ),
         isTrue,
       );
       final discovery = await OfflineLibraryUpdateDiscovery(
@@ -591,25 +648,34 @@ void main() {
     // _reaches(32, 32) טריוויאלית, אך אינו התוכן המתוקן.
     test('מסד של tag ישן באותה גרסה אינו מחליף את המתוקן', () async {
       await buildExporter([
-        release('v32-old', assets: [
-          'seforim.db.zst',
-          'patch-v31-v32.db.zst',
-          'patch-v31-v32.db.zst.manifest.json',
-        ]),
+        release(
+          'v32-old',
+          assets: [
+            'seforim.db.zst',
+            'patch-v31-v32.db.zst',
+            'patch-v31-v32.db.zst.manifest.json',
+          ],
+        ),
       ]).exporter.export(destDir: destDir);
       expect(assetOnDisk(destDir, 'v32-old', 'seforim.db.zst'), isTrue);
 
       final second = buildExporter([
-        release('v32-fixed', assets: [
-          'seforim.db.zst',
-          'patch-v31-v32.db.zst',
-          'patch-v31-v32.db.zst.manifest.json',
-        ]),
-        release('v32-old', assets: [
-          'seforim.db.zst',
-          'patch-v31-v32.db.zst',
-          'patch-v31-v32.db.zst.manifest.json',
-        ]),
+        release(
+          'v32-fixed',
+          assets: [
+            'seforim.db.zst',
+            'patch-v31-v32.db.zst',
+            'patch-v31-v32.db.zst.manifest.json',
+          ],
+        ),
+        release(
+          'v32-old',
+          assets: [
+            'seforim.db.zst',
+            'patch-v31-v32.db.zst',
+            'patch-v31-v32.db.zst.manifest.json',
+          ],
+        ),
       ]);
       await second.exporter.export(destDir: destDir);
 
@@ -626,11 +692,14 @@ void main() {
       final stages = <String>[];
       final built = buildExporter(
         [
-          release('v26', assets: [
-            'seforim.db.zst',
-            'patch-v25-v26.db.zst',
-            'patch-v25-v26.db.zst.manifest.json',
-          ]),
+          release(
+            'v26',
+            assets: [
+              'seforim.db.zst',
+              'patch-v25-v26.db.zst',
+              'patch-v25-v26.db.zst.manifest.json',
+            ],
+          ),
         ],
         schemaByVersion: {25: 5, 26: 6},
         patchFormat: 999,
@@ -651,8 +720,14 @@ void main() {
       expect(warnings, isEmpty);
       expect(
         stages,
-        isNot(contains(LibraryUpdaterMessages.current
-            .exportFullDbRequiredByPatchFormat(999, 26))),
+        isNot(
+          contains(
+            LibraryUpdaterMessages.current.exportFullDbRequiredByPatchFormat(
+              999,
+              26,
+            ),
+          ),
+        ),
       );
     });
 
@@ -660,11 +735,14 @@ void main() {
       final warnings = <String>[];
       final built = buildExporter(
         [
-          release('v26', assets: [
-            'seforim.db.zst',
-            'patch-v25-v26.db.zst',
-            'patch-v25-v26.db.zst.manifest.json',
-          ]),
+          release(
+            'v26',
+            assets: [
+              'seforim.db.zst',
+              'patch-v25-v26.db.zst',
+              'patch-v25-v26.db.zst.manifest.json',
+            ],
+          ),
         ],
         schemaByVersion: {26: 8},
       );
@@ -688,26 +766,30 @@ void main() {
       expect(built.fetched, isNot(contains('patch-v25-v26.db.zst')));
       expect(
         warnings,
-        contains(LibraryUpdaterMessages.current.exportSkippingUnappliablePatch(
-          'v26',
-          'patch-v25-v26.db.zst',
-          8,
-        )),
+        contains(
+          LibraryUpdaterMessages.current.exportSkippingUnappliablePatch(
+            'v26',
+            'patch-v25-v26.db.zst',
+            8,
+          ),
+        ),
       );
     });
 
     for (final personal in [false, true]) {
-      test(
-          'מסד מלא בסכמה לא נתמכת בלבד נשמר כסמן, והאופליין דורש עדכון תוכנה '
+      test('מסד מלא בסכמה לא נתמכת בלבד נשמר כסמן, והאופליין דורש עדכון תוכנה '
           '(אישי: $personal)', () async {
         final warnings = <String>[];
         final built = buildExporter([
           release('v26', assets: ['seforim-schema8.db.zst']),
-          release('v25', assets: [
-            'seforim.db.zst',
-            'patch-v24-v25.db.zst',
-            'patch-v24-v25.db.zst.manifest.json',
-          ]),
+          release(
+            'v25',
+            assets: [
+              'seforim.db.zst',
+              'patch-v24-v25.db.zst',
+              'patch-v24-v25.db.zst.manifest.json',
+            ],
+          ),
         ]);
         expect(
           await built.exporter.export(
@@ -722,15 +804,22 @@ void main() {
         expect(mirroredAssetNames(destDir, 'v26'), ['seforim-schema8.db.zst']);
         expect(
           warnings,
-          contains(LibraryUpdaterMessages.current
-              .exportFullDbSchemaUnsupported('v26', 8)),
+          contains(
+            LibraryUpdaterMessages.current.exportFullDbSchemaUnsupported(
+              'v26',
+              8,
+            ),
+          ),
         );
-        final mirrored =
-            await LocalMirrorLibraryReleaseClient(mirrorDir: destDir)
-                .fetchReleases();
+        final mirrored = await LocalMirrorLibraryReleaseClient(
+          mirrorDir: destDir,
+        ).fetchReleases();
         for (final asset in mirrored.expand((r) => r.assets)) {
-          expect(File(asset.downloadUrl).existsSync(), isTrue,
-              reason: asset.name);
+          expect(
+            File(asset.downloadUrl).existsSync(),
+            isTrue,
+            reason: asset.name,
+          );
         }
 
         final discovery = await OfflineLibraryUpdateDiscovery(
@@ -755,11 +844,14 @@ void main() {
 
       final second = buildExporter(
         [
-          release('v26', assets: [
-            'seforim.db.zst',
-            'patch-v21-v26.db.zst',
-            'patch-v21-v26.db.zst.manifest.json',
-          ]),
+          release(
+            'v26',
+            assets: [
+              'seforim.db.zst',
+              'patch-v21-v26.db.zst',
+              'patch-v21-v26.db.zst.manifest.json',
+            ],
+          ),
           release('v21', assets: ['seforim.db.zst']),
         ],
         schemaByVersion: {26: 8},
@@ -775,18 +867,28 @@ void main() {
     // ריצות — קובץ patch שירד פעם ואינו קביל עכשיו הוא מאות MB מתים.
     test('patch שירד בריצה קודמת ואינו קביל עכשיו נמחק מהמראה', () async {
       // ריצה קודמת של הייצוא, מלפני שה-patch הזה נפסל — הקובץ כבר על הכונן.
-      final stale = File([destDir, 'assets', 'v26', 'patch-v25-v26.db.zst']
-          .join(Platform.pathSeparator))
-        ..parent.createSync(recursive: true)
-        ..writeAsStringSync('asset:patch-v25-v26.db.zst');
+      final stale =
+          File(
+              [
+                destDir,
+                'assets',
+                'v26',
+                'patch-v25-v26.db.zst',
+              ].join(Platform.pathSeparator),
+            )
+            ..parent.createSync(recursive: true)
+            ..writeAsStringSync('asset:patch-v25-v26.db.zst');
 
       await buildExporter(
         [
-          release('v26', assets: [
-            'seforim.db.zst',
-            'patch-v25-v26.db.zst',
-            'patch-v25-v26.db.zst.manifest.json',
-          ]),
+          release(
+            'v26',
+            assets: [
+              'seforim.db.zst',
+              'patch-v25-v26.db.zst',
+              'patch-v25-v26.db.zst.manifest.json',
+            ],
+          ),
         ],
         schemaByVersion: {26: 8},
       ).exporter.export(destDir: destDir);
@@ -803,11 +905,14 @@ void main() {
       final stages = <String>[];
       final built = buildExporter(
         [
-          release('v26', assets: [
-            'seforim.db.zst',
-            'patch-v25-v26.db.zst',
-            'patch-v25-v26.db.zst.manifest.json',
-          ]),
+          release(
+            'v26',
+            assets: [
+              'seforim.db.zst',
+              'patch-v25-v26.db.zst',
+              'patch-v25-v26.db.zst.manifest.json',
+            ],
+          ),
         ],
         schemaByVersion: {26: 8},
       );
@@ -820,7 +925,8 @@ void main() {
       expect(
         stages,
         contains(
-            LibraryUpdaterMessages.current.exportPersonalNeedsFullDb(25, 26)),
+          LibraryUpdaterMessages.current.exportPersonalNeedsFullDb(25, 26),
+        ),
       );
       // ה-patch נפסל בסכמה, ולכן המסד המלא הוא כל המסלול — גם כאן.
       expect(built.fetched, contains('seforim.db.zst'));
@@ -836,15 +942,21 @@ void main() {
       final stages = <String>[];
       final built = buildExporter(
         [
-          release('v23', assets: [
-            'patch-v21-v23.db.zst',
-            'patch-v21-v23.db.zst.manifest.json',
-          ]),
-          release('v26', assets: [
-            'seforim.db.zst',
-            'patch-v25-v26.db.zst',
-            'patch-v25-v26.db.zst.manifest.json',
-          ]),
+          release(
+            'v23',
+            assets: [
+              'patch-v21-v23.db.zst',
+              'patch-v21-v23.db.zst.manifest.json',
+            ],
+          ),
+          release(
+            'v26',
+            assets: [
+              'seforim.db.zst',
+              'patch-v25-v26.db.zst',
+              'patch-v25-v26.db.zst.manifest.json',
+            ],
+          ),
         ],
         // v26 בסכמה שאיננו יודעים להחיל: השרשרת אל 26 נחתכת, ומה שנשאר
         // (21→23) נעצר מתחת למסד המלא.
@@ -857,26 +969,31 @@ void main() {
       expect(assetOnDisk(destDir, 'v23', 'patch-v21-v23.db.zst'), isFalse);
       expect(
         stages,
-        contains(LibraryUpdaterMessages.current
-            .exportSkippingPatchesFullDbWins(2, 26)),
+        contains(
+          LibraryUpdaterMessages.current.exportSkippingPatchesFullDbWins(2, 26),
+        ),
       );
     });
 
     // הדקוּת של הכלל: קשת שכן מגיעה ליעד נשמרת, וזו שנכנסת למבוי סתום לא.
     test('קשת שמובילה ליעד נשמרת, קשת למבוי סתום מושמטת', () async {
-      final built = buildExporter(
-        [
-          release('v23', assets: [
+      final built = buildExporter([
+        release(
+          'v23',
+          assets: [
             'patch-v21-v23.db.zst',
             'patch-v21-v23.db.zst.manifest.json',
-          ]),
-          release('v26', assets: [
+          ],
+        ),
+        release(
+          'v26',
+          assets: [
             'seforim.db.zst',
             'patch-v22-v26.db.zst',
             'patch-v22-v26.db.zst.manifest.json',
-          ]),
-        ],
-      );
+          ],
+        ),
+      ]);
       await built.exporter.export(destDir: destDir);
 
       // 22→26 מגיעה ל-latest ולכן שווה את מקומה; 21→23 היא מבוי סתום, כי
@@ -889,18 +1006,27 @@ void main() {
       final built = buildExporter(
         [
           release('v26', assets: ['seforim.db.zst']),
-          release('v27', assets: [
-            'patch-v25-v27.db.zst',
-            'patch-v25-v27.db.zst.manifest.json',
-          ]),
-          release('v28', assets: [
-            'patch-v26-v28.db.zst',
-            'patch-v26-v28.db.zst.manifest.json',
-          ]),
-          release('v29', assets: [
-            'patch-v28-v29.db.zst',
-            'patch-v28-v29.db.zst.manifest.json',
-          ]),
+          release(
+            'v27',
+            assets: [
+              'patch-v25-v27.db.zst',
+              'patch-v25-v27.db.zst.manifest.json',
+            ],
+          ),
+          release(
+            'v28',
+            assets: [
+              'patch-v26-v28.db.zst',
+              'patch-v26-v28.db.zst.manifest.json',
+            ],
+          ),
+          release(
+            'v29',
+            assets: [
+              'patch-v28-v29.db.zst',
+              'patch-v28-v29.db.zst.manifest.json',
+            ],
+          ),
         ],
         schemaByVersion: {29: 99},
       );
@@ -935,11 +1061,14 @@ void main() {
 
       final warnings = <String>[];
       final second = buildExporter([
-        release('v26', assets: [
-          'seforim.db.zst',
-          'patch-v21-v26.db.zst',
-          'patch-v21-v26.db.zst.manifest.json',
-        ]),
+        release(
+          'v26',
+          assets: [
+            'seforim.db.zst',
+            'patch-v21-v26.db.zst',
+            'patch-v21-v26.db.zst.manifest.json',
+          ],
+        ),
         release('v21', assets: ['seforim.db.zst']),
       ]);
       await second.exporter.export(destDir: destDir, onWarning: warnings.add);
@@ -969,7 +1098,7 @@ void main() {
     test('רק המסד המלא יורד, וההיסטוריה נמחקת מהמראה', () async {
       await buildExporter(
         [
-          release('v23', assets: ['seforim.db.zst'])
+          release('v23', assets: ['seforim.db.zst']),
         ],
         assetSizes: {'seforim.db.zst': 4 << 20},
       ).exporter.export(destDir: destDir);
@@ -977,11 +1106,14 @@ void main() {
       final stages = <String>[];
       final second = buildExporter(
         [
-          release('v27', assets: [
-            'seforim.db.zst',
-            'patch-v23-v27.db.zst',
-            'patch-v23-v27.db.zst.manifest.json',
-          ]),
+          release(
+            'v27',
+            assets: [
+              'seforim.db.zst',
+              'patch-v23-v27.db.zst',
+              'patch-v23-v27.db.zst.manifest.json',
+            ],
+          ),
           release('v23', assets: ['seforim.db.zst']),
         ],
         assetSizes: {
@@ -1001,8 +1133,14 @@ void main() {
       expect(mirroredAssetNames(destDir, 'v23'), isEmpty);
       expect(
         stages,
-        contains(LibraryUpdaterMessages.current
-            .exportFullDbInsteadOfSlowPatches(2, 59, 4, 27)),
+        contains(
+          LibraryUpdaterMessages.current.exportFullDbInsteadOfSlowPatches(
+            2,
+            59,
+            4,
+            27,
+          ),
+        ),
       );
 
       // ומה שהמחשב הלא-מקוון מקבל: החלפת מסד מלא, לא החלת patch של שעה.
@@ -1035,11 +1173,14 @@ void main() {
       };
       await buildExporter(
         [
-          release('v27', assets: [
-            'seforim.db.zst',
-            'patch-v23-v27.db.zst',
-            'patch-v23-v27.db.zst.manifest.json',
-          ]),
+          release(
+            'v27',
+            assets: [
+              'seforim.db.zst',
+              'patch-v23-v27.db.zst',
+              'patch-v23-v27.db.zst.manifest.json',
+            ],
+          ),
           release('v23', assets: ['seforim.db.zst']),
         ],
         assetSizes: sizes,
@@ -1048,16 +1189,22 @@ void main() {
 
       final third = buildExporter(
         [
-          release('v28', assets: [
-            'seforim.db.zst',
-            'patch-v27-v28.db.zst',
-            'patch-v27-v28.db.zst.manifest.json',
-          ]),
-          release('v27', assets: [
-            'seforim.db.zst',
-            'patch-v23-v27.db.zst',
-            'patch-v23-v27.db.zst.manifest.json',
-          ]),
+          release(
+            'v28',
+            assets: [
+              'seforim.db.zst',
+              'patch-v27-v28.db.zst',
+              'patch-v27-v28.db.zst.manifest.json',
+            ],
+          ),
+          release(
+            'v27',
+            assets: [
+              'seforim.db.zst',
+              'patch-v23-v27.db.zst',
+              'patch-v23-v27.db.zst.manifest.json',
+            ],
+          ),
           release('v23', assets: ['seforim.db.zst']),
         ],
         assetSizes: sizes,
@@ -1095,29 +1242,40 @@ void main() {
     });
 
     for (final unsupportedLatest in [false, true]) {
-      test(
-          'קשת כבדה אינה חוזרת כשאין מסד מלא לגרסה החדשה '
+      test('קשת כבדה אינה חוזרת כשאין מסד מלא לגרסה החדשה '
           '(סכמה לא נתמכת: $unsupportedLatest)', () async {
         final built = buildExporter(
           [
             if (unsupportedLatest)
-              release('v31', assets: [
-                'patch-v27-v31.db.zst',
-                'patch-v27-v31.db.zst.manifest.json',
-              ]),
-            release('v28', assets: [
-              'patch-v27-v28.db.zst',
-              'patch-v27-v28.db.zst.manifest.json',
-            ]),
-            release('v27', assets: [
-              'seforim.db.zst',
-              'patch-v23-v27.db.zst',
-              'patch-v23-v27.db.zst.manifest.json',
-            ]),
-            release('v23', assets: [
-              'patch-v22-v23.db.zst',
-              'patch-v22-v23.db.zst.manifest.json',
-            ]),
+              release(
+                'v31',
+                assets: [
+                  'patch-v27-v31.db.zst',
+                  'patch-v27-v31.db.zst.manifest.json',
+                ],
+              ),
+            release(
+              'v28',
+              assets: [
+                'patch-v27-v28.db.zst',
+                'patch-v27-v28.db.zst.manifest.json',
+              ],
+            ),
+            release(
+              'v27',
+              assets: [
+                'seforim.db.zst',
+                'patch-v23-v27.db.zst',
+                'patch-v23-v27.db.zst.manifest.json',
+              ],
+            ),
+            release(
+              'v23',
+              assets: [
+                'patch-v22-v23.db.zst',
+                'patch-v22-v23.db.zst.manifest.json',
+              ],
+            ),
           ],
           assetSizes: {
             'seforim.db.zst': 4 << 20,
@@ -1135,8 +1293,9 @@ void main() {
         expect(mirroredAssetNames(destDir, 'v27'), ['seforim.db.zst']);
         expect(mirroredAssetNames(destDir, 'v23'), isEmpty);
         if (unsupportedLatest) {
-          expect(mirroredAssetNames(destDir, 'v31'),
-              ['patch-v27-v31.db.zst.manifest.json']);
+          expect(mirroredAssetNames(destDir, 'v31'), [
+            'patch-v27-v31.db.zst.manifest.json',
+          ]);
         }
       });
     }
@@ -1146,18 +1305,21 @@ void main() {
     test('בתוך הטווח — ההיסטוריה נשמרת והמסד הישן מנצח', () async {
       await buildExporter(
         [
-          release('v23', assets: ['seforim.db.zst'])
+          release('v23', assets: ['seforim.db.zst']),
         ],
         assetSizes: {'seforim.db.zst': 4 << 20},
       ).exporter.export(destDir: destDir);
 
       final second = buildExporter(
         [
-          release('v24', assets: [
-            'seforim.db.zst',
-            'patch-v23-v24.db.zst',
-            'patch-v23-v24.db.zst.manifest.json',
-          ]),
+          release(
+            'v24',
+            assets: [
+              'seforim.db.zst',
+              'patch-v23-v24.db.zst',
+              'patch-v23-v24.db.zst.manifest.json',
+            ],
+          ),
           release('v23', assets: ['seforim.db.zst']),
         ],
         assetSizes: {
@@ -1180,11 +1342,14 @@ void main() {
       downloadSecondsPerMb: 1000,
     );
     final creditReleases = [
-      release('v24', assets: [
-        'seforim.db.zst',
-        'patch-v23-v24.db.zst',
-        'patch-v23-v24.db.zst.manifest.json',
-      ]),
+      release(
+        'v24',
+        assets: [
+          'seforim.db.zst',
+          'patch-v23-v24.db.zst',
+          'patch-v23-v24.db.zst.manifest.json',
+        ],
+      ),
       release('v23', assets: ['seforim.db.zst']),
     ];
     const creditSizes = {
@@ -1193,10 +1358,9 @@ void main() {
     };
 
     test('נשא ישן בכונן — זיכוי ההורדה משאיר את ה-patch', () async {
-      await buildExporter(
-        [creditReleases.last],
-        assetSizes: creditSizes,
-      ).exporter.export(destDir: destDir);
+      await buildExporter([
+        creditReleases.last,
+      ], assetSizes: creditSizes).exporter.export(destDir: destDir);
 
       final second = buildExporter(
         creditReleases,
@@ -1228,11 +1392,14 @@ void main() {
         'patch-v30-v31.db.zst': 3 << 20,
         'patch-v31-v32.db.zst': 64 << 10,
       };
-      final v31 = release('v31', assets: [
-        'seforim.db.zst',
-        'patch-v30-v31.db.zst',
-        'patch-v30-v31.db.zst.manifest.json',
-      ]);
+      final v31 = release(
+        'v31',
+        assets: [
+          'seforim.db.zst',
+          'patch-v30-v31.db.zst',
+          'patch-v30-v31.db.zst.manifest.json',
+        ],
+      );
       final v30 = release('v30', assets: ['seforim.db.zst']);
 
       final first = buildExporter(
@@ -1246,11 +1413,14 @@ void main() {
 
       final second = buildExporter(
         [
-          release('v32', assets: [
-            'seforim.db.zst',
-            'patch-v31-v32.db.zst',
-            'patch-v31-v32.db.zst.manifest.json',
-          ]),
+          release(
+            'v32',
+            assets: [
+              'seforim.db.zst',
+              'patch-v31-v32.db.zst',
+              'patch-v31-v32.db.zst.manifest.json',
+            ],
+          ),
           v31,
           v30,
         ],
@@ -1271,10 +1441,13 @@ void main() {
     test('מסד מלא שאינו מגיע ל-latest אינו מאפס את המראה', () async {
       final built = buildExporter(
         [
-          release('v27', assets: [
-            'patch-v26-v27.db.zst',
-            'patch-v26-v27.db.zst.manifest.json',
-          ]),
+          release(
+            'v27',
+            assets: [
+              'patch-v26-v27.db.zst',
+              'patch-v26-v27.db.zst.manifest.json',
+            ],
+          ),
           release('v26', assets: ['seforim.db.zst']),
         ],
         assetSizes: {
@@ -1302,21 +1475,30 @@ void main() {
     test('המסד המלא אינו יורד, וגם לא patches שמתחת לגרסה', () async {
       final built = buildExporter(
         [
-          release('v4', assets: [
-            'seforim.db.zst',
-            'patch-v3-v4.db.zst',
-            'patch-v3-v4.db.zst.manifest.json',
-          ]),
-          release('v3', assets: [
-            'seforim.db.zst',
-            'patch-v2-v3.db.zst',
-            'patch-v2-v3.db.zst.manifest.json',
-          ]),
-          release('v2', assets: [
-            'seforim.db.zst',
-            'patch-v1-v2.db.zst',
-            'patch-v1-v2.db.zst.manifest.json',
-          ]),
+          release(
+            'v4',
+            assets: [
+              'seforim.db.zst',
+              'patch-v3-v4.db.zst',
+              'patch-v3-v4.db.zst.manifest.json',
+            ],
+          ),
+          release(
+            'v3',
+            assets: [
+              'seforim.db.zst',
+              'patch-v2-v3.db.zst',
+              'patch-v2-v3.db.zst.manifest.json',
+            ],
+          ),
+          release(
+            'v2',
+            assets: [
+              'seforim.db.zst',
+              'patch-v1-v2.db.zst',
+              'patch-v1-v2.db.zst.manifest.json',
+            ],
+          ),
         ],
         assetSizes: fullDbSizes,
         applyTime: realistic,
@@ -1338,15 +1520,18 @@ void main() {
     test('המראה האישית מספיקה לשרשרת דלתא מהגרסה המקומית', () async {
       final built = buildExporter(
         [
-          release('v4', assets: [
-            'seforim.db.zst',
-            'patch-v3-v4.db.zst',
-            'patch-v3-v4.db.zst.manifest.json',
-          ]),
-          release('v3', assets: [
-            'patch-v2-v3.db.zst',
-            'patch-v2-v3.db.zst.manifest.json',
-          ]),
+          release(
+            'v4',
+            assets: [
+              'seforim.db.zst',
+              'patch-v3-v4.db.zst',
+              'patch-v3-v4.db.zst.manifest.json',
+            ],
+          ),
+          release(
+            'v3',
+            assets: ['patch-v2-v3.db.zst', 'patch-v2-v3.db.zst.manifest.json'],
+          ),
         ],
         assetSizes: fullDbSizes,
         applyTime: realistic,
@@ -1382,20 +1567,26 @@ void main() {
 
     test('אין גרסה חדשה → false, והמראה הקיימת נשארת שלמה', () async {
       final first = buildExporter([
-        release('v3', assets: [
-          'seforim.db.zst',
-          'patch-v2-v3.db.zst',
-          'patch-v2-v3.db.zst.manifest.json',
-        ]),
+        release(
+          'v3',
+          assets: [
+            'seforim.db.zst',
+            'patch-v2-v3.db.zst',
+            'patch-v2-v3.db.zst.manifest.json',
+          ],
+        ),
       ]);
       await first.exporter.export(destDir: destDir);
 
       final again = buildExporter([
-        release('v3', assets: [
-          'seforim.db.zst',
-          'patch-v2-v3.db.zst',
-          'patch-v2-v3.db.zst.manifest.json',
-        ]),
+        release(
+          'v3',
+          assets: [
+            'seforim.db.zst',
+            'patch-v2-v3.db.zst',
+            'patch-v2-v3.db.zst.manifest.json',
+          ],
+        ),
       ]);
       expect(
         await again.exporter.export(destDir: destDir, fromVersion: 3),
@@ -1416,13 +1607,16 @@ void main() {
       final stages = <String>[];
       final built = buildExporter([
         release('v5', assets: ['seforim.db.zst']),
-        release('v4', assets: [
-          'patch-v3-v4.db.zst',
-          'patch-v3-v4.db.zst.manifest.json',
-        ]),
+        release(
+          'v4',
+          assets: ['patch-v3-v4.db.zst', 'patch-v3-v4.db.zst.manifest.json'],
+        ),
       ]);
-      await built.exporter
-          .export(destDir: destDir, fromVersion: 3, onStage: stages.add);
+      await built.exporter.export(
+        destDir: destDir,
+        fromVersion: 3,
+        onStage: stages.add,
+      );
 
       expect(built.fetched, contains('seforim.db.zst'));
       expect(assetOnDisk(destDir, 'v5', 'seforim.db.zst'), isTrue);
@@ -1431,7 +1625,8 @@ void main() {
       expect(
         stages,
         contains(
-            LibraryUpdaterMessages.current.exportPersonalNeedsFullDb(3, 5)),
+          LibraryUpdaterMessages.current.exportPersonalNeedsFullDb(3, 5),
+        ),
       );
     });
 
@@ -1440,82 +1635,106 @@ void main() {
       final warnings = <String>[];
       final built = buildExporter(
         [
-          release('v5', assets: [
-            'patch-v4-v5.db.zst',
-            'patch-v4-v5.db.zst.manifest.json',
-          ]),
+          release(
+            'v5',
+            assets: ['patch-v4-v5.db.zst', 'patch-v4-v5.db.zst.manifest.json'],
+          ),
         ],
         schemaByVersion: {5: 99},
       );
-      await built.exporter
-          .export(destDir: destDir, fromVersion: 3, onWarning: warnings.add);
+      await built.exporter.export(
+        destDir: destDir,
+        fromVersion: 3,
+        onWarning: warnings.add,
+      );
 
       expect(built.fetched, isNot(contains('seforim.db.zst')));
       expect(
         warnings,
         contains(
-            LibraryUpdaterMessages.current.exportPersonalNoFullDbEither(3, 5)),
+          LibraryUpdaterMessages.current.exportPersonalNoFullDbEither(3, 5),
+        ),
       );
     });
 
     // ⚠️ אותה הרחבה של v27, במצב אישי: השרשרת של המשתמש היא צעד אחד של
     // 5MB — ובזמן, כמעט שעה מול ארבע דקות. המצב הזה נבנה כדי לדלג על המסד
     // המלא, אבל דילוג עליו כאן מותיר את המשתמש עם העדכון היקר משניהם.
-    test('שרשרת ארוכה בהרבה מהמסד המלא → המסד המלא יורד גם במצב אישי',
-        () async {
-      final stages = <String>[];
-      final built = buildExporter(
-        [
-          release('v27', assets: [
-            'seforim.db.zst',
-            'patch-v26-v27.db.zst',
-            'patch-v26-v27.db.zst.manifest.json',
-          ]),
-        ],
-        assetSizes: {
-          'seforim.db.zst': 4 << 20,
-          'patch-v26-v27.db.zst': 5 << 20,
-        },
-        applyTime: const ApplyTimeEstimate(
-          fullSecondsPerMb: 60,
-          stepSecondsPerMb: 640,
-        ),
-      );
-      await built.exporter
-          .export(destDir: destDir, fromVersion: 26, onStage: stages.add);
+    test(
+      'שרשרת ארוכה בהרבה מהמסד המלא → המסד המלא יורד גם במצב אישי',
+      () async {
+        final stages = <String>[];
+        final built = buildExporter(
+          [
+            release(
+              'v27',
+              assets: [
+                'seforim.db.zst',
+                'patch-v26-v27.db.zst',
+                'patch-v26-v27.db.zst.manifest.json',
+              ],
+            ),
+          ],
+          assetSizes: {
+            'seforim.db.zst': 4 << 20,
+            'patch-v26-v27.db.zst': 5 << 20,
+          },
+          applyTime: const ApplyTimeEstimate(
+            fullSecondsPerMb: 60,
+            stepSecondsPerMb: 640,
+          ),
+        );
+        await built.exporter.export(
+          destDir: destDir,
+          fromVersion: 26,
+          onStage: stages.add,
+        );
 
-      expect(built.fetched, contains('seforim.db.zst'));
-      expect(built.fetched, isNot(contains('patch-v26-v27.db.zst')));
-      expect(mirroredAssetNames(destDir, 'v27'), ['seforim.db.zst']);
-      expect(
-        stages,
-        contains(LibraryUpdaterMessages.current
-            .exportFullDbInsteadOfSlowPatches(2, 59, 4, 27)),
-      );
-    });
+        expect(built.fetched, contains('seforim.db.zst'));
+        expect(built.fetched, isNot(contains('patch-v26-v27.db.zst')));
+        expect(mirroredAssetNames(destDir, 'v27'), ['seforim.db.zst']);
+        expect(
+          stages,
+          contains(
+            LibraryUpdaterMessages.current.exportFullDbInsteadOfSlowPatches(
+              2,
+              59,
+              4,
+              27,
+            ),
+          ),
+        );
+      },
+    );
   });
 
   // הלב של המראה: מכונה שכמה גרסאות מאחור מקבלת **שרשרת דלתא** מהמראה, כמו
   // באוצריא המקוונת — ורק מי שרחוק מעבר לעומק ההיסטוריה נופל להורדה המלאה.
   test('שרשרת דלתא רב-שלבית נבנית מהמראה, ומעבר לעומק — הורדה מלאה', () async {
-    final built = buildExporter([
-      release('v3', assets: [
-        'seforim.db.zst',
-        'patch-v2-v3.db.zst',
-        'patch-v2-v3.db.zst.manifest.json',
-      ]),
-      release('v2', assets: [
-        'patch-v1-v2.db.zst',
-        'patch-v1-v2.db.zst.manifest.json',
-      ]),
-    ], assetSizes: const {
-      'seforim.db.zst': 4 << 20
-    });
+    final built = buildExporter(
+      [
+        release(
+          'v3',
+          assets: [
+            'seforim.db.zst',
+            'patch-v2-v3.db.zst',
+            'patch-v2-v3.db.zst.manifest.json',
+          ],
+        ),
+        release(
+          'v2',
+          assets: ['patch-v1-v2.db.zst', 'patch-v1-v2.db.zst.manifest.json'],
+        ),
+      ],
+      assetSizes: const {'seforim.db.zst': 4 << 20},
+    );
     await built.exporter.export(destDir: destDir);
 
     final mirror = LocalMirrorLibraryReleaseClient(mirrorDir: destDir);
     final discovery = OfflineLibraryUpdateDiscovery(
-        supportedDbSchemaVersion: kSupportedDbSchemaVersion, client: mirror);
+      supportedDbSchemaVersion: kSupportedDbSchemaVersion,
+      client: mirror,
+    );
     final result = await discovery.discover(allowPrerelease: true);
     expect(result.latestVersion, 3);
     // שני ה-edges שרדו את הייצוא — זה בדיוק מה שהעומק החדש נותן.
@@ -1581,15 +1800,22 @@ void main() {
       ]);
       await built.exporter.export(destDir: destDir);
 
-      final decoded = jsonDecode(File([
-        destDir,
-        LocalMirrorLibraryReleaseClient.manifestFileName,
-      ].join(Platform.pathSeparator))
-          .readAsStringSync()) as Map<String, dynamic>;
+      final decoded =
+          jsonDecode(
+                File(
+                  [
+                    destDir,
+                    LocalMirrorLibraryReleaseClient.manifestFileName,
+                  ].join(Platform.pathSeparator),
+                ).readAsStringSync(),
+              )
+              as Map<String, dynamic>;
       expect(decoded['formatVersion'], 1);
       expect(decoded['exportedAt'], isA<String>());
-      final url = ((decoded['releases'] as List).first
-          as Map<String, dynamic>)['assets'][0]['downloadUrl'] as String;
+      final url =
+          ((decoded['releases'] as List).first
+                  as Map<String, dynamic>)['assets'][0]['downloadUrl']
+              as String;
       expect(url, isNot(startsWith('http')));
       expect(url, isNot(contains(destDir)));
       expect(url, contains('seforim.db.zst'));
@@ -1601,27 +1827,33 @@ void main() {
     // חלון ההיסטוריה מסתובב: release שנפל ממנו השאיר עד עכשיו את נכסיו על
     // הכונן לעד — כולל DB מלא של ~1.5GB מריצות של גרסאות קודמות.
     test('נכסים שאינם במניפסט החדש נמחקים מהמראה', () async {
-      final stale =
-          Directory([destDir, 'assets', 'v1'].join(Platform.pathSeparator))
-            ..createSync(recursive: true);
-      File([stale.path, 'seforim.db.zst'].join(Platform.pathSeparator))
-          .writeAsStringSync('גרוטאה');
+      final stale = Directory(
+        [destDir, 'assets', 'v1'].join(Platform.pathSeparator),
+      )..createSync(recursive: true);
+      File(
+        [stale.path, 'seforim.db.zst'].join(Platform.pathSeparator),
+      ).writeAsStringSync('גרוטאה');
 
-      final built = buildExporter(
-        [
-          release('v3', assets: [
+      final built = buildExporter([
+        release(
+          'v3',
+          assets: [
             'seforim.db.zst',
             'patch-v2-v3.db.zst',
             'patch-v2-v3.db.zst.manifest.json',
-          ]),
-        ],
-        historyDepth: 1,
-      );
+          ],
+        ),
+      ], historyDepth: 1);
       await built.exporter.export(destDir: destDir);
       // נכס מיותר בתוך תיקייה שכן נשמרת — נמחק גם הוא.
-      final orphan = File([destDir, 'assets', 'v3', 'patch-v1-v2.db.zst']
-          .join(Platform.pathSeparator))
-        ..writeAsStringSync('גרוטאה');
+      final orphan = File(
+        [
+          destDir,
+          'assets',
+          'v3',
+          'patch-v1-v2.db.zst',
+        ].join(Platform.pathSeparator),
+      )..writeAsStringSync('גרוטאה');
       await built.exporter.export(destDir: destDir);
 
       expect(stale.existsSync(), isFalse);
@@ -1630,58 +1862,67 @@ void main() {
       expect(assetOnDisk(destDir, 'v3', 'patch-v2-v3.db.zst'), isTrue);
     });
 
-    test('pruning retains lock inodes even for obsolete and nested assets',
-        () async {
-      final paths = [
-        p.join(destDir, 'assets', 'v1', 'removed.zst.lock'),
-        p.join(destDir, 'assets', 'v1', 'parts', 'part-000.lock'),
-        p.join(destDir, 'assets', 'v3', 'removed.zst.lock'),
-        p.join(destDir, 'assets', 'root.lock'),
-      ];
-      for (final path in paths) {
-        File(path)
-          ..createSync(recursive: true)
-          ..writeAsBytesSync(const []);
-      }
-      final owner = sqlite3.sqlite3.open(paths.first);
-      owner.execute('BEGIN EXCLUSIVE');
-      addTearDown(owner.close);
-      final obsolete = File(p.join(destDir, 'assets', 'v1', 'removed.zst'))
-        ..writeAsStringSync('obsolete asset');
-      final built = buildExporter([
-        release('v3', assets: ['seforim.db.zst']),
-      ]);
-      await built.exporter.export(destDir: destDir);
-      expect(obsolete.existsSync(), isFalse);
-      for (final path in paths) {
-        expect(File(path).existsSync(), isTrue, reason: path);
-        expect(File(path).lengthSync(), 0);
-      }
-      // Deleting/recreating a lock would let this connection acquire a new
-      // inode despite the owner still holding the old one.
-      final contender = sqlite3.sqlite3.open(paths.first);
-      try {
-        expect(() => contender.execute('BEGIN EXCLUSIVE'),
-            throwsA(isA<sqlite3.SqliteException>()));
-      } finally {
-        contender.close();
-      }
-    });
+    test(
+      'pruning retains lock inodes even for obsolete and nested assets',
+      () async {
+        final paths = [
+          p.join(destDir, 'assets', 'v1', 'removed.zst.lock'),
+          p.join(destDir, 'assets', 'v1', 'parts', 'part-000.lock'),
+          p.join(destDir, 'assets', 'v3', 'removed.zst.lock'),
+          p.join(destDir, 'assets', 'root.lock'),
+        ];
+        for (final path in paths) {
+          File(path)
+            ..createSync(recursive: true)
+            ..writeAsBytesSync(const []);
+        }
+        final owner = sqlite3.sqlite3.open(paths.first);
+        owner.execute('BEGIN EXCLUSIVE');
+        addTearDown(owner.close);
+        final obsolete = File(p.join(destDir, 'assets', 'v1', 'removed.zst'))
+          ..writeAsStringSync('obsolete asset');
+        final built = buildExporter([
+          release('v3', assets: ['seforim.db.zst']),
+        ]);
+        await built.exporter.export(destDir: destDir);
+        expect(obsolete.existsSync(), isFalse);
+        for (final path in paths) {
+          expect(File(path).existsSync(), isTrue, reason: path);
+          expect(File(path).lengthSync(), 0);
+        }
+        // Deleting/recreating a lock would let this connection acquire a new
+        // inode despite the owner still holding the old one.
+        final contender = sqlite3.sqlite3.open(paths.first);
+        try {
+          expect(
+            () => contender.execute('BEGIN EXCLUSIVE'),
+            throwsA(isA<sqlite3.SqliteException>()),
+          );
+        } finally {
+          contender.close();
+        }
+      },
+    );
 
     test('manifest פגום אינו מפיל את הייצוא — הנכס עדיין נשמר', () async {
       final built = buildExporter(
         [
-          release('v3', assets: [
-            'seforim.db.zst',
-            'patch-v2-v3.db.zst',
-            'patch-v2-v3.db.zst.manifest.json',
-          ]),
+          release(
+            'v3',
+            assets: [
+              'seforim.db.zst',
+              'patch-v2-v3.db.zst',
+              'patch-v2-v3.db.zst.manifest.json',
+            ],
+          ),
         ],
         corruptManifests: {'patch-v2-v3.db.zst.manifest.json'},
       );
       await built.exporter.export(destDir: destDir);
-      expect(assetOnDisk(destDir, 'v3', 'patch-v2-v3.db.zst.manifest.json'),
-          isTrue);
+      expect(
+        assetOnDisk(destDir, 'v3', 'patch-v2-v3.db.zst.manifest.json'),
+        isTrue,
+      );
       // קובץ ה-patch עצמו לא נדרש — ה-manifest שמצביע עליו לא נקרא.
       expect(assetOnDisk(destDir, 'v3', 'patch-v2-v3.db.zst'), isFalse);
     });
@@ -1690,11 +1931,14 @@ void main() {
       final warnings = <String>[];
       final built = buildExporter(
         [
-          release('v3', assets: [
-            'seforim.db.zst',
-            'patch-v2-v3.db.zst',
-            'patch-v2-v3.db.zst.manifest.json',
-          ]),
+          release(
+            'v3',
+            assets: [
+              'seforim.db.zst',
+              'patch-v2-v3.db.zst',
+              'patch-v2-v3.db.zst.manifest.json',
+            ],
+          ),
         ],
         manifestOverrides: {
           'patch-v2-v3.db.zst.manifest.json': {
@@ -1704,21 +1948,27 @@ void main() {
       );
       await built.exporter.export(destDir: destDir, onWarning: warnings.add);
       expect(
-          warnings.where((w) => w.contains('patch-v2-v3.db.zst.manifest.json')),
-          hasLength(1));
-      expect(assetOnDisk(destDir, 'v3', 'patch-v2-v3.db.zst.manifest.json'),
-          isTrue);
+        warnings.where((w) => w.contains('patch-v2-v3.db.zst.manifest.json')),
+        hasLength(1),
+      );
+      expect(
+        assetOnDisk(destDir, 'v3', 'patch-v2-v3.db.zst.manifest.json'),
+        isTrue,
+      );
       expect(assetOnDisk(destDir, 'v3', 'patch-v2-v3.db.zst'), isFalse);
     });
 
     test('שדות אופציונליים מסוג שגוי אינם פוסלים את הקשת', () async {
       final built = buildExporter(
         [
-          release('v3', assets: [
-            'seforim.db.zst',
-            'patch-v2-v3.db.zst',
-            'patch-v2-v3.db.zst.manifest.json',
-          ]),
+          release(
+            'v3',
+            assets: [
+              'seforim.db.zst',
+              'patch-v2-v3.db.zst',
+              'patch-v2-v3.db.zst.manifest.json',
+            ],
+          ),
         ],
         manifestOverrides: {
           'patch-v2-v3.db.zst.manifest.json': {
@@ -1732,12 +1982,9 @@ void main() {
     });
 
     test('כשל HTTP בנכס מפיל את הייצוא (לא מראה חלקית בשקט)', () {
-      final built = buildExporter(
-        [
-          release('v3', assets: ['seforim.db.zst']),
-        ],
-        failAsset: 'seforim.db.zst',
-      );
+      final built = buildExporter([
+        release('v3', assets: ['seforim.db.zst']),
+      ], failAsset: 'seforim.db.zst');
       expect(
         () => built.exporter.export(destDir: destDir),
         throwsA(isA<PatchDownloadException>()),
@@ -1750,50 +1997,66 @@ void main() {
       ]);
       await expectLater(
         built.exporter.export(destDir: destDir, isCancelled: () => true),
-        throwsA(isA<StateError>().having((e) => e.message, 'message',
-            LibraryUpdaterMessages.current.exportCancelled)),
+        throwsA(
+          isA<StateError>().having(
+            (e) => e.message,
+            'message',
+            LibraryUpdaterMessages.current.exportCancelled,
+          ),
+        ),
       );
       expect(
-        File([destDir, LocalMirrorLibraryReleaseClient.manifestFileName]
-                .join(Platform.pathSeparator))
-            .existsSync(),
+        File(
+          [
+            destDir,
+            LocalMirrorLibraryReleaseClient.manifestFileName,
+          ].join(Platform.pathSeparator),
+        ).existsSync(),
         isFalse,
       );
     });
 
-    test('onStage/onAssetProgress מדווחים מ-otzaria_l10n ומגיעים ל-100%',
-        () async {
-      final built = buildExporter([
-        release('v3', assets: [
-          'seforim.db.zst',
-          'patch-v2-v3.db.zst',
-          'patch-v2-v3.db.zst.manifest.json',
-        ]),
-      ]);
-      final stages = <String>[];
-      final progress = <(int, int)>[];
-      await built.exporter.export(
-        destDir: destDir,
-        onStage: stages.add,
-        onAssetProgress: (done, total) => progress.add((done, total)),
-      );
+    test(
+      'onStage/onAssetProgress מדווחים מ-otzaria_l10n ומגיעים ל-100%',
+      () async {
+        final built = buildExporter([
+          release(
+            'v3',
+            assets: [
+              'seforim.db.zst',
+              'patch-v2-v3.db.zst',
+              'patch-v2-v3.db.zst.manifest.json',
+            ],
+          ),
+        ]);
+        final stages = <String>[];
+        final progress = <(int, int)>[];
+        await built.exporter.export(
+          destDir: destDir,
+          onStage: stages.add,
+          onAssetProgress: (done, total) => progress.add((done, total)),
+        );
 
-      final strings = LibraryUpdaterMessages.current;
-      expect(stages.first, strings.exportLoadingReleases);
-      expect(stages.last, strings.exportDone);
-      expect(
-        stages,
-        contains(strings.exportDownloading('v3', 'seforim.db.zst')),
-      );
-      expect(
-        stages,
-        contains(strings.exportWritingManifest(
-            LocalMirrorLibraryReleaseClient.manifestFileName)),
-      );
-      // היעד מדווח לפני הנכס הראשון, אחרת המד לא יודע לכמה לחכות.
-      expect(progress.first, (0, 3));
-      expect(progress.last, (3, 3));
-    });
+        final strings = LibraryUpdaterMessages.current;
+        expect(stages.first, strings.exportLoadingReleases);
+        expect(stages.last, strings.exportDone);
+        expect(
+          stages,
+          contains(strings.exportDownloading('v3', 'seforim.db.zst')),
+        );
+        expect(
+          stages,
+          contains(
+            strings.exportWritingManifest(
+              LocalMirrorLibraryReleaseClient.manifestFileName,
+            ),
+          ),
+        );
+        // היעד מדווח לפני הנכס הראשון, אחרת המד לא יודע לכמה לחכות.
+        expect(progress.first, (0, 3));
+        expect(progress.last, (3, 3));
+      },
+    );
 
     test('תגית עם תווים אסורים בשם תיקייה מנוקה', () async {
       final built = buildExporter([
@@ -1818,21 +2081,25 @@ void main() {
       expect(second.fetched, isEmpty);
     });
 
-    test('הרצה חוזרת מייצרת releases.json זהה בתוכן (חוץ מ-exportedAt)',
-        () async {
-      final releases = [
-        release('v3', assets: ['seforim.db.zst']),
-      ];
-      await buildExporter(releases).exporter.export(destDir: destDir);
-      final path = [destDir, LocalMirrorLibraryReleaseClient.manifestFileName]
-          .join(Platform.pathSeparator);
-      final firstJson =
-          jsonDecode(File(path).readAsStringSync()) as Map<String, dynamic>;
-      await buildExporter(releases).exporter.export(destDir: destDir);
-      final secondJson =
-          jsonDecode(File(path).readAsStringSync()) as Map<String, dynamic>;
-      expect(secondJson['releases'], firstJson['releases']);
-    });
+    test(
+      'הרצה חוזרת מייצרת releases.json זהה בתוכן (חוץ מ-exportedAt)',
+      () async {
+        final releases = [
+          release('v3', assets: ['seforim.db.zst']),
+        ];
+        await buildExporter(releases).exporter.export(destDir: destDir);
+        final path = [
+          destDir,
+          LocalMirrorLibraryReleaseClient.manifestFileName,
+        ].join(Platform.pathSeparator);
+        final firstJson =
+            jsonDecode(File(path).readAsStringSync()) as Map<String, dynamic>;
+        await buildExporter(releases).exporter.export(destDir: destDir);
+        final secondJson =
+            jsonDecode(File(path).readAsStringSync()) as Map<String, dynamic>;
+        expect(secondJson['releases'], firstJson['releases']);
+      },
+    );
   });
 
   group('export — בדיקת מקום פנוי לפני ההורדה', () {
@@ -1841,32 +2108,37 @@ void main() {
       release('v3', assets: ['seforim.db.zst']),
     ];
 
-    test('חוסר ידוע במקום עוצר לפני כל הורדה, עם הדרוש והפנוי בהודעה',
-        () async {
-      final probed = <String>[];
-      final built = buildExporter(
-        releases,
-        assetSizes: const {'seforim.db.zst': assetSize},
-        freeBytesFor: (path) {
-          probed.add(path);
-          return 1 << 20;
-        },
-      );
-      await expectLater(
-        built.exporter.export(destDir: destDir),
-        throwsA(isA<StateError>().having(
-          (e) => e.message,
-          'message',
-          LibraryUpdaterMessages.current.mirrorNotEnoughDiskSpace(
-              destDir,
-              DiskSpaceProbe.formatBytes(3 << 20),
-              DiskSpaceProbe.formatBytes(1 << 20)),
-        )),
-      );
-      expect(probed, [destDir]);
-      expect(built.fetched, isEmpty);
-      expect(assetOnDisk(destDir, 'v3', 'seforim.db.zst'), isFalse);
-    });
+    test(
+      'חוסר ידוע במקום עוצר לפני כל הורדה, עם הדרוש והפנוי בהודעה',
+      () async {
+        final probed = <String>[];
+        final built = buildExporter(
+          releases,
+          assetSizes: const {'seforim.db.zst': assetSize},
+          freeBytesFor: (path) {
+            probed.add(path);
+            return 1 << 20;
+          },
+        );
+        await expectLater(
+          built.exporter.export(destDir: destDir),
+          throwsA(
+            isA<StateError>().having(
+              (e) => e.message,
+              'message',
+              LibraryUpdaterMessages.current.mirrorNotEnoughDiskSpace(
+                destDir,
+                DiskSpaceProbe.formatBytes(3 << 20),
+                DiskSpaceProbe.formatBytes(1 << 20),
+              ),
+            ),
+          ),
+        );
+        expect(probed, [destDir]);
+        expect(built.fetched, isEmpty);
+        expect(assetOnDisk(destDir, 'v3', 'seforim.db.zst'), isFalse);
+      },
+    );
 
     test('הרזרבה נספרת בדיוק: בייט אחד פחות חוסם, הסכום המדויק עובר', () async {
       const exact = assetSize + DiskSpaceProbe.defaultHeadroomBytes;
@@ -1886,34 +2158,37 @@ void main() {
       expect(assetOnDisk(destDir, 'v3', 'seforim.db.zst'), isTrue);
     });
 
-    test('קובץ שיורד בטווחים דורש גם את הטווח הגדול ביותר לזמן הצירוף',
-        () async {
-      // 3MB בשני חיבורים: טווח גדול ביותר של 1.5MB.
-      const exact = assetSize +
-          (assetSize + 1) ~/ 2 +
-          DiskSpaceProbe.defaultHeadroomBytes;
-      DownloadScheduler single() => DownloadScheduler(maxConcurrent: 1);
-      await expectLater(
-        buildExporter(
+    test(
+      'קובץ שיורד בטווחים דורש גם את הטווח הגדול ביותר לזמן הצירוף',
+      () async {
+        // 3MB בשני חיבורים: טווח גדול ביותר של 1.5MB.
+        const exact =
+            assetSize +
+            (assetSize + 1) ~/ 2 +
+            DiskSpaceProbe.defaultHeadroomBytes;
+        DownloadScheduler single() => DownloadScheduler(maxConcurrent: 1);
+        await expectLater(
+          buildExporter(
+            releases,
+            assetSizes: const {'seforim.db.zst': assetSize},
+            scheduler: single(),
+            maxConnections: 2,
+            segmentThresholdBytes: 1 << 20,
+            freeBytesFor: (_) => exact - 1,
+          ).exporter.export(destDir: destDir),
+          throwsA(isA<StateError>()),
+        );
+        await buildExporter(
           releases,
           assetSizes: const {'seforim.db.zst': assetSize},
           scheduler: single(),
           maxConnections: 2,
           segmentThresholdBytes: 1 << 20,
-          freeBytesFor: (_) => exact - 1,
-        ).exporter.export(destDir: destDir),
-        throwsA(isA<StateError>()),
-      );
-      await buildExporter(
-        releases,
-        assetSizes: const {'seforim.db.zst': assetSize},
-        scheduler: single(),
-        maxConnections: 2,
-        segmentThresholdBytes: 1 << 20,
-        freeBytesFor: (_) => exact,
-      ).exporter.export(destDir: destDir);
-      expect(assetOnDisk(destDir, 'v3', 'seforim.db.zst'), isTrue);
-    });
+          freeBytesFor: (_) => exact,
+        ).exporter.export(destDir: destDir);
+        expect(assetOnDisk(destDir, 'v3', 'seforim.db.zst'), isTrue);
+      },
+    );
 
     test('מדידה שנכשלה (null) אינה חוסמת', () async {
       await buildExporter(
@@ -1961,16 +2236,19 @@ void main() {
   group('export — הורדה מקבילה', () {
     /// שלושה releases: אחד עם מסד מלא גדול, והשאר patches קטנים.
     List<ReleaseSpec> parallelReleases() => [
-          release('v3', assets: [
-            'seforim.db.zst',
-            'patch-v2-v3.db.zst',
-            'patch-v2-v3.db.zst.manifest.json',
-          ]),
-          release('v2', assets: [
-            'patch-v1-v2.db.zst',
-            'patch-v1-v2.db.zst.manifest.json',
-          ]),
-        ];
+      release(
+        'v3',
+        assets: [
+          'seforim.db.zst',
+          'patch-v2-v3.db.zst',
+          'patch-v2-v3.db.zst.manifest.json',
+        ],
+      ),
+      release(
+        'v2',
+        assets: ['patch-v1-v2.db.zst', 'patch-v1-v2.db.zst.manifest.json'],
+      ),
+    ];
 
     test('נכסים יורדים בו-זמנית, עד תקרת המקביליות', () async {
       // מחסום: כל נכס ממתין עד ששלושה נמצאים בו-זמנית. בהורדה טורית
@@ -1986,8 +2264,10 @@ void main() {
           inFlight++;
           if (inFlight > peak) peak = inFlight;
           if (inFlight >= 3 && !barrier.isCompleted) barrier.complete();
-          await barrier.future
-              .timeout(const Duration(seconds: 2), onTimeout: () {});
+          await barrier.future.timeout(
+            const Duration(seconds: 2),
+            onTimeout: () {},
+          );
           inFlight--;
         },
       );
@@ -2061,45 +2341,53 @@ void main() {
       expect(received.last, greaterThan(4096 + 64 + 32));
     });
 
-    test('היעד מוכרז לפני הבייט הראשון, ונכס שכבר על הכונן מנוכה בו מיד',
-        () async {
-      final sizes = {
-        'seforim.db.zst': 4096,
-        'patch-v2-v3.db.zst': 64,
-        'patch-v1-v2.db.zst': 32,
-      };
-      await buildExporter(parallelReleases(), assetSizes: sizes)
-          .exporter
-          .export(destDir: destDir);
-      // מוחקים נכס אחד בלבד: השאר כבר על הכונן, ולכן היעד חייב לתאר אותו
-      // לבדו — כשהניכוי קרה רק כשהג'וב הגיע לתורו, היעד צנח באמצע והאחוז קפץ.
-      File([destDir, 'assets', 'v3', 'patch-v2-v3.db.zst']
-              .join(Platform.pathSeparator))
-          .deleteSync();
+    test(
+      'היעד מוכרז לפני הבייט הראשון, ונכס שכבר על הכונן מנוכה בו מיד',
+      () async {
+        final sizes = {
+          'seforim.db.zst': 4096,
+          'patch-v2-v3.db.zst': 64,
+          'patch-v1-v2.db.zst': 32,
+        };
+        await buildExporter(
+          parallelReleases(),
+          assetSizes: sizes,
+        ).exporter.export(destDir: destDir);
+        // מוחקים נכס אחד בלבד: השאר כבר על הכונן, ולכן היעד חייב לתאר אותו
+        // לבדו — כשהניכוי קרה רק כשהג'וב הגיע לתורו, היעד צנח באמצע והאחוז קפץ.
+        File(
+          [
+            destDir,
+            'assets',
+            'v3',
+            'patch-v2-v3.db.zst',
+          ].join(Platform.pathSeparator),
+        ).deleteSync();
 
-      var firstReceived = -1;
-      int? firstTotal;
-      int? lastTotal;
-      final again = buildExporter(parallelReleases(), assetSizes: sizes);
-      await again.exporter.export(
-        destDir: destDir,
-        onBytesProgress: (downloaded, total) {
-          if (firstReceived < 0) {
-            firstReceived = downloaded;
-            firstTotal = total;
-          }
-          lastTotal = total;
-        },
-      );
+        var firstReceived = -1;
+        int? firstTotal;
+        int? lastTotal;
+        final again = buildExporter(parallelReleases(), assetSizes: sizes);
+        await again.exporter.export(
+          destDir: destDir,
+          onBytesProgress: (downloaded, total) {
+            if (firstReceived < 0) {
+              firstReceived = downloaded;
+              firstTotal = total;
+            }
+            lastTotal = total;
+          },
+        );
 
-      // הדיווח הראשון הוא ההכרזה עצמה: יעד ידוע, בלי בייט אחד שעבר.
-      expect(firstReceived, 0);
-      expect(firstTotal, isNotNull);
-      // המסד המלא (4096) כבר על הכונן ומנוכה כבר כאן, לא כשיגיע תורו בתור.
-      expect(firstTotal, lessThan(sizes['seforim.db.zst']!));
-      // ומעל הכול: היעד אינו זז באמצע — זה מה שהקפיץ את האחוזים.
-      expect(lastTotal, firstTotal);
-    });
+        // הדיווח הראשון הוא ההכרזה עצמה: יעד ידוע, בלי בייט אחד שעבר.
+        expect(firstReceived, 0);
+        expect(firstTotal, isNotNull);
+        // המסד המלא (4096) כבר על הכונן ומנוכה כבר כאן, לא כשיגיע תורו בתור.
+        expect(firstTotal, lessThan(sizes['seforim.db.zst']!));
+        // ומעל הכול: היעד אינו זז באמצע — זה מה שהקפיץ את האחוזים.
+        expect(lastTotal, firstTotal);
+      },
+    );
 
     test('נכס שכבר שלם על הכונן אינו נספר במד — לא ביעד ולא במונה', () async {
       final sizes = {
@@ -2107,9 +2395,10 @@ void main() {
         'patch-v2-v3.db.zst': 64,
         'patch-v1-v2.db.zst': 32,
       };
-      await buildExporter(parallelReleases(), assetSizes: sizes)
-          .exporter
-          .export(destDir: destDir);
+      await buildExporter(
+        parallelReleases(),
+        assetSizes: sizes,
+      ).exporter.export(destDir: destDir);
 
       // ריצה שנייה על אותה מראה: הכול כבר שם, ולכן שום בייט אינו עובר ברשת.
       var lastReceived = -1;
@@ -2139,9 +2428,10 @@ void main() {
         throwsA(isA<Exception>()),
       );
       expect(
-        File('$destDir${Platform.pathSeparator}'
-                '${LocalMirrorLibraryReleaseClient.manifestFileName}')
-            .existsSync(),
+        File(
+          '$destDir${Platform.pathSeparator}'
+          '${LocalMirrorLibraryReleaseClient.manifestFileName}',
+        ).existsSync(),
         isFalse,
       );
     });
@@ -2149,13 +2439,16 @@ void main() {
 
   group('export — שליפת manifests', () {
     List<ReleaseSpec> chainReleases() => [
-          for (var to = 7; to >= 2; to--)
-            release('v$to', assets: [
-              if (to == 7) 'seforim.db.zst',
-              'patch-v${to - 1}-v$to.db.zst',
-              'patch-v${to - 1}-v$to.db.zst.manifest.json',
-            ]),
-        ];
+      for (var to = 7; to >= 2; to--)
+        release(
+          'v$to',
+          assets: [
+            if (to == 7) 'seforim.db.zst',
+            'patch-v${to - 1}-v$to.db.zst',
+            'patch-v${to - 1}-v$to.db.zst.manifest.json',
+          ],
+        ),
+    ];
 
     test('ה-manifests נשלפים במקביל, עד תקרת המקביליות', () async {
       final barrier = Completer<void>();
@@ -2171,16 +2464,20 @@ void main() {
               !barrier.isCompleted) {
             barrier.complete();
           }
-          await barrier.future
-              .timeout(const Duration(seconds: 1), onTimeout: () {});
+          await barrier.future.timeout(
+            const Duration(seconds: 1),
+            onTimeout: () {},
+          );
           inFlight--;
         },
       );
       await built.exporter.export(destDir: destDir);
       expect(peak, DownloadScheduler.defaultMaxConcurrent);
       for (var to = 7; to >= 2; to--) {
-        expect(assetOnDisk(destDir, 'v$to', 'patch-v${to - 1}-v$to.db.zst'),
-            isTrue);
+        expect(
+          assetOnDisk(destDir, 'v$to', 'patch-v${to - 1}-v$to.db.zst'),
+          isTrue,
+        );
       }
     });
 
@@ -2203,28 +2500,36 @@ void main() {
       expect(mirroredAssetNames(destDir, 'v4'), contains('patch-v3-v4.db.zst'));
     });
 
-    test('manifest שנכשל בכל הניסיונות מפיל את הייצוא, גם כשהשאר הצליחו',
-        () async {
-      const broken = 'patch-v3-v4.db.zst.manifest.json';
-      final built = buildExporter(
-        chainReleases(),
-        respond: (request, body) => request.url.path.endsWith(broken)
-            ? http.StreamedResponse(const Stream<List<int>>.empty(), 503)
-            : null,
-      );
-      await expectLater(
-        built.exporter.export(destDir: destDir),
-        throwsA(isA<StateError>()
-            .having((e) => e.message, 'message', contains(broken))),
-      );
-      expect(built.fetched.where((n) => n == broken).length, 3);
-      expect(
-        File('$destDir${Platform.pathSeparator}'
-                '${LocalMirrorLibraryReleaseClient.manifestFileName}')
-            .existsSync(),
-        isFalse,
-      );
-    });
+    test(
+      'manifest שנכשל בכל הניסיונות מפיל את הייצוא, גם כשהשאר הצליחו',
+      () async {
+        const broken = 'patch-v3-v4.db.zst.manifest.json';
+        final built = buildExporter(
+          chainReleases(),
+          respond: (request, body) => request.url.path.endsWith(broken)
+              ? http.StreamedResponse(const Stream<List<int>>.empty(), 503)
+              : null,
+        );
+        await expectLater(
+          built.exporter.export(destDir: destDir),
+          throwsA(
+            isA<StateError>().having(
+              (e) => e.message,
+              'message',
+              contains(broken),
+            ),
+          ),
+        );
+        expect(built.fetched.where((n) => n == broken).length, 3);
+        expect(
+          File(
+            '$destDir${Platform.pathSeparator}'
+            '${LocalMirrorLibraryReleaseClient.manifestFileName}',
+          ).existsSync(),
+          isFalse,
+        );
+      },
+    );
   });
 
   group('export — ריצה חוזרת על אותו כונן', () {
@@ -2232,11 +2537,14 @@ void main() {
 
     test('נכס שכבר אומת אינו מגובב שוב בריצה השנייה', () async {
       final releases = [
-        release('v3', assets: [
-          'seforim.db.zst',
-          'patch-v2-v3.db.zst',
-          'patch-v2-v3.db.zst.manifest.json',
-        ]),
+        release(
+          'v3',
+          assets: [
+            'seforim.db.zst',
+            'patch-v2-v3.db.zst',
+            'patch-v2-v3.db.zst.manifest.json',
+          ],
+        ),
       ];
       final strings = LibraryUpdaterMessages.current;
       final verifying = {
@@ -2245,73 +2553,154 @@ void main() {
             strings.exportVerifying('v3', name, percent),
       };
 
-      await buildExporter(releases,
-              assetSizes: const {'seforim.db.zst': dbSize})
-          .exporter
-          .export(destDir: destDir);
+      await buildExporter(
+        releases,
+        assetSizes: const {'seforim.db.zst': dbSize},
+      ).exporter.export(destDir: destDir);
 
       final secondStages = <String>[];
-      final second =
-          buildExporter(releases, assetSizes: const {'seforim.db.zst': dbSize});
+      final second = buildExporter(
+        releases,
+        assetSizes: const {'seforim.db.zst': dbSize},
+      );
       await second.exporter.export(destDir: destDir, onStage: secondStages.add);
       expect(second.fetched, isNot(contains('seforim.db.zst')));
       expect(secondStages.where(verifying.contains), isEmpty);
 
-      File([destDir, 'assets', 'v3', 'seforim.db.zst']
-              .join(Platform.pathSeparator))
-          .setLastModifiedSync(DateTime(2020));
+      File(
+        [
+          destDir,
+          'assets',
+          'v3',
+          'seforim.db.zst',
+        ].join(Platform.pathSeparator),
+      ).setLastModifiedSync(DateTime(2020));
       final thirdStages = <String>[];
-      await buildExporter(releases,
-              assetSizes: const {'seforim.db.zst': dbSize})
-          .exporter
-          .export(destDir: destDir, onStage: thirdStages.add);
+      await buildExporter(
+        releases,
+        assetSizes: const {'seforim.db.zst': dbSize},
+      ).exporter.export(destDir: destDir, onStage: thirdStages.add);
       expect(
         thirdStages,
         contains(strings.exportVerifying('v3', 'seforim.db.zst', 100)),
       );
     });
 
-    test('הורדה שנקטעה ממשיכה בריצה הבאה מאותו בייט (Range + If-Range)',
-        () async {
-      const cut = 20000;
-      const etag = '"db-v3"';
-      final releases = [
-        release('v3', assets: ['seforim.db.zst']),
-      ];
-      final dbPath = [destDir, 'assets', 'v3', 'seforim.db.zst']
-          .join(Platform.pathSeparator);
+    test(
+      'הורדה שנקטעה ממשיכה בריצה הבאה מאותו בייט (Range + If-Range)',
+      () async {
+        const cut = 20000;
+        const etag = '"db-v3"';
+        final releases = [
+          release('v3', assets: ['seforim.db.zst']),
+        ];
+        final dbPath = [
+          destDir,
+          'assets',
+          'v3',
+          'seforim.db.zst',
+        ].join(Platform.pathSeparator);
 
-      Stream<List<int>> droppedAfterCut(Uint8List body) async* {
-        yield body.sublist(0, cut);
-        throw http.ClientException('connection reset');
-      }
+        Stream<List<int>> droppedAfterCut(Uint8List body) async* {
+          yield body.sublist(0, cut);
+          throw http.ClientException('connection reset');
+        }
 
-      final first = buildExporter(
-        releases,
-        assetSizes: const {'seforim.db.zst': dbSize},
-        respond: (request, body) => http.StreamedResponse(
-          droppedAfterCut(body),
-          200,
-          contentLength: body.length,
-          headers: {'etag': etag},
-        ),
-      );
-      await expectLater(
-        first.exporter.export(destDir: destDir),
-        throwsA(anything),
-      );
-      expect(File(dbPath).lengthSync(), cut);
+        final first = buildExporter(
+          releases,
+          assetSizes: const {'seforim.db.zst': dbSize},
+          respond: (request, body) => http.StreamedResponse(
+            droppedAfterCut(body),
+            200,
+            contentLength: body.length,
+            headers: {'etag': etag},
+          ),
+        );
+        await expectLater(
+          first.exporter.export(destDir: destDir),
+          throwsA(anything),
+        );
+        expect(File(dbPath).lengthSync(), cut);
 
-      final requests = <Map<String, String>>[];
-      var served = 0;
-      final second = buildExporter(
-        releases,
-        assetSizes: const {'seforim.db.zst': dbSize},
+        final requests = <Map<String, String>>[];
+        var served = 0;
+        final second = buildExporter(
+          releases,
+          assetSizes: const {'seforim.db.zst': dbSize},
+          respond: (request, body) {
+            requests.add(request.headers);
+            final range = request.headers['Range'];
+            if (range == null) {
+              served += body.length;
+              return http.StreamedResponse(
+                Stream.value(body),
+                200,
+                contentLength: body.length,
+                headers: {'etag': etag},
+              );
+            }
+            final start = int.parse(
+              range.substring('bytes='.length).split('-')[0],
+            );
+            final rest = body.sublist(start);
+            served += rest.length;
+            return http.StreamedResponse(
+              Stream.value(rest),
+              206,
+              contentLength: rest.length,
+              headers: {
+                'etag': etag,
+                'content-range':
+                    'bytes $start-${body.length - 1}/${body.length}',
+              },
+            );
+          },
+        );
+        expect(await second.exporter.export(destDir: destDir), isTrue);
+
+        expect(requests, hasLength(1));
+        expect(requests.single['Range'], 'bytes=$cut-');
+        expect(requests.single['If-Range'], etag);
+        expect(served, dbSize - cut);
+        expect(File(dbPath).lengthSync(), dbSize);
+        expect(mirroredAssetNames(destDir, 'v3'), ['seforim.db.zst']);
+      },
+    );
+  });
+
+  group('connectionsForAsset — חיבורים לפי נכס', () {
+    const size = 3 << 20;
+    final releases = [
+      release(
+        'v3',
+        assets: [
+          'seforim.db.zst',
+          'patch-v2-v3.db.zst',
+          'patch-v2-v3.db.zst.manifest.json',
+        ],
+      ),
+    ];
+    const sizes = {'seforim.db.zst': size, 'patch-v2-v3.db.zst': size};
+
+    // שרת Range פשוט; מתעד את ה-Range של כל בקשת נכס לפי שם.
+    ({
+      http.StreamedResponse? Function(http.BaseRequest, Uint8List) respond,
+      Map<String, List<String?>> ranges,
+    })
+    rangeServer() {
+      final ranges = <String, List<String?>>{};
+      return (
+        ranges: ranges,
         respond: (request, body) {
-          requests.add(request.headers);
+          final name = request.url.pathSegments.last;
+          if (!sizes.containsKey(name)) return null;
           final range = request.headers['Range'];
-          if (range == null) {
-            served += body.length;
+          (ranges[name] ??= []).add(range);
+          final m = range == null
+              ? null
+              : RegExp(r'bytes=(\d+)-(\d*)').firstMatch(range);
+          const etag = '"v1"';
+          if (m == null) {
             return http.StreamedResponse(
               Stream.value(body),
               200,
@@ -2319,29 +2708,247 @@ void main() {
               headers: {'etag': etag},
             );
           }
-          final start =
-              int.parse(range.substring('bytes='.length).split('-')[0]);
-          final rest = body.sublist(start);
-          served += rest.length;
+          final start = int.parse(m.group(1)!);
+          final end = m.group(2)!.isEmpty
+              ? body.length - 1
+              : int.parse(m.group(2)!);
+          final part = body.sublist(start, end + 1);
           return http.StreamedResponse(
-            Stream.value(rest),
+            Stream.value(part),
             206,
-            contentLength: rest.length,
+            contentLength: part.length,
             headers: {
               'etag': etag,
-              'content-range': 'bytes $start-${body.length - 1}/${body.length}',
+              'content-range': 'bytes $start-$end/${body.length}',
             },
           );
         },
       );
-      expect(await second.exporter.export(destDir: destDir), isTrue);
+    }
 
-      expect(requests, hasLength(1));
-      expect(requests.single['Range'], 'bytes=$cut-');
-      expect(requests.single['If-Range'], etag);
-      expect(served, dbSize - cut);
-      expect(File(dbPath).lengthSync(), dbSize);
-      expect(mirroredAssetNames(destDir, 'v3'), ['seforim.db.zst']);
+    LibraryMirrorExporter build(
+      http.StreamedResponse? Function(http.BaseRequest, Uint8List) respond,
+      FutureOr<int> Function(String, int, String?, String?)? callback,
+    ) => buildExporter(
+      releases,
+      assetSizes: sizes,
+      respond: respond,
+      scheduler: DownloadScheduler(maxConcurrent: 1),
+      maxConnections: 4,
+      segmentThresholdBytes: 1 << 20,
+      connectionsForAsset: callback,
+    ).exporter;
+
+    test('נכס אחד מפוצל ל-2 וחבירו בחיבור יחיד באותו ייצוא', () async {
+      final server = rangeServer();
+      final seen = <(String, int, String?)>[];
+      await build(server.respond, (dest, s, sha, _) {
+        seen.add((p.basename(dest), s, sha));
+        return p.basename(dest) == 'seforim.db.zst' ? 2 : 1;
+      }).export(destDir: destDir);
+
+      expect(
+        seen.map((e) => e.$1),
+        containsAll(['seforim.db.zst', 'patch-v2-v3.db.zst']),
+      );
+      expect(seen.where((e) => e.$2 == size).map((e) => e.$1), hasLength(2));
+      expect(seen.every((e) => e.$3 != null), isTrue);
+      expect(server.ranges['seforim.db.zst'], hasLength(2));
+      expect(server.ranges['seforim.db.zst']!.every((r) => r != null), isTrue);
+      expect(server.ranges['patch-v2-v3.db.zst'], [null]);
+      expect(File('$destDir/assets/v3/seforim.db.zst').lengthSync(), size);
+      expect(File('$destDir/assets/v3/patch-v2-v3.db.zst').lengthSync(), size);
+    });
+
+    test('ערך קטן מ-1 נחשב לחיבור יחיד', () async {
+      final server = rangeServer();
+      await build(server.respond, (_, _, _, _) => 0).export(destDir: destDir);
+      expect(server.ranges['seforim.db.zst'], [null]);
+    });
+
+    test('בלי callback — ברירת המחדל של הייצוא (4 טווחים)', () async {
+      final server = rangeServer();
+      await build(server.respond, null).export(destDir: destDir);
+      expect(server.ranges['seforim.db.zst'], hasLength(4));
+      expect(server.ranges['patch-v2-v3.db.zst'], hasLength(4));
+    });
+
+    test('callback שזורק — כשל נקי בלי נכס חצי-כתוב', () async {
+      final server = rangeServer();
+      await expectLater(
+        build(server.respond, (dest, _, _, _) {
+          if (p.basename(dest) == 'seforim.db.zst') throw StateError('boom');
+          return 1;
+        }).export(destDir: destDir),
+        throwsA(isA<StateError>()),
+      );
+      expect(server.ranges['seforim.db.zst'], isNull);
+      expect(File('$destDir/assets/v3/seforim.db.zst').existsSync(), isFalse);
+      expect(
+        File('$destDir/assets/v3/seforim.db.zst.segments').existsSync(),
+        isFalse,
+      );
+    });
+
+    test('callback שמבוטל (isCancelled) — ייצוא מבוטל בלי הורדה', () async {
+      final server = rangeServer();
+      var cancelled = false;
+      await expectLater(
+        build(server.respond, (_, _, _, _) {
+          cancelled = true;
+          return 2;
+        }).export(destDir: destDir, isCancelled: () => cancelled),
+        throwsA(anything),
+      );
+      expect(server.ranges['seforim.db.zst'], isNull);
+      expect(File('$destDir/assets/v3/seforim.db.zst').existsSync(), isFalse);
+    });
+
+    test('ה-resumeToken שה-callback מקבל זהה לזה שנשמר ב-.segments', () async {
+      final server = rangeServer();
+      final stored = <String>[];
+      String? sha;
+      String? token;
+      await build(
+        (request, body) {
+          final state = File('$destDir/assets/v3/seforim.db.zst.segments');
+          if (request.url.pathSegments.last == 'seforim.db.zst' &&
+              state.existsSync()) {
+            final json = jsonDecode(state.readAsStringSync()) as Map;
+            stored.add(json['token'] as String);
+          }
+          return server.respond(request, body);
+        },
+        (dest, _, s, t) {
+          if (p.basename(dest) == 'seforim.db.zst') {
+            sha = s;
+            token = t;
+          }
+          return 2;
+        },
+      ).export(destDir: destDir);
+
+      expect(token, 'seforim.db.zst'.hashCode.abs().toString());
+      expect(token, isNot(sha));
+      expect(stored, isNotEmpty);
+      expect(stored.toSet(), {token});
+    });
+
+    group('בדיקת המקום לפי החיבורים של כל נכס', () {
+      final single = [
+        release('v3', assets: ['seforim.db.zst']),
+      ];
+      const headroom = DiskSpaceProbe.defaultHeadroomBytes;
+
+      void savePlan({String? differentField}) {
+        final dest = p.join(destDir, 'assets', 'v3', 'seforim.db.zst');
+        Directory(p.dirname(dest)).createSync(recursive: true);
+        final state = <String, Object?>{
+          'v': 1,
+          'token': 'seforim.db.zst'.hashCode.abs().toString(),
+          'url': 'https://x/v3/seforim.db.zst',
+          'size': size,
+          'sha256': sha256
+              .convert(Uint8List(size)..fillRange(0, size, 7))
+              .toString(),
+          'etag': '"v1"',
+          'bounds': [0, size ~/ 2, size],
+          'assembled': 1,
+        };
+        if (differentField != null) state[differentField] = 'other';
+        File('$dest.segments').writeAsStringSync(jsonEncode(state));
+      }
+
+      Future<void> run(
+        int free,
+        FutureOr<int> Function() connections, [
+        List<String>? calls,
+      ]) {
+        final server = rangeServer();
+        return buildExporter(
+          single,
+          assetSizes: const {'seforim.db.zst': size},
+          respond: server.respond,
+          scheduler: DownloadScheduler(maxConcurrent: 1),
+          maxConnections: 4,
+          segmentThresholdBytes: 1 << 20,
+          freeBytesFor: (_) => free,
+          connectionsForAsset: (dest, _, _, _) {
+            calls?.add(p.basename(dest));
+            return connections();
+          },
+        ).exporter.export(destDir: destDir);
+      }
+
+      test('חיבור יחיד: בלי תוספת צירוף, והנכס נקרא פעם אחת', () async {
+        final calls = <String>[];
+        await run(size + headroom, () => 1, calls);
+        expect(calls, ['seforim.db.zst']);
+        expect(File('$destDir/assets/v3/seforim.db.zst').lengthSync(), size);
+      });
+
+      for (final connections in [1, 8]) {
+        test(
+          'תוכנית חיה שומרת מקום לפי הטווחים שלה עם $connections חיבורים',
+          () async {
+            savePlan();
+            final required = size + size ~/ 2 + headroom;
+            await expectLater(
+              run(required - 1, () => connections),
+              throwsA(isA<StateError>()),
+            );
+            await run(required, () => connections);
+            expect(
+              File('$destDir/assets/v3/seforim.db.zst').lengthSync(),
+              size,
+            );
+          },
+        );
+      }
+
+      for (final field in ['token', 'url', 'sha256']) {
+        test(
+          'תוכנית של $field אחר לא מחייבת מקום לצירוף בחיבור יחיד',
+          () async {
+            savePlan(differentField: field);
+            await run(size + headroom, () => 1);
+            expect(
+              File('$destDir/assets/v3/seforim.db.zst').lengthSync(),
+              size,
+            );
+          },
+        );
+      }
+
+      test('ערך מעל התקרה נספר לפי התקרה (8), לא לפי הערך', () async {
+        final overhead = (size + 7) ~/ 8;
+        await expectLater(
+          run(size + overhead + headroom - 1, () => 100),
+          throwsA(isA<StateError>()),
+        );
+        await run(size + overhead + headroom, () => 100);
+        expect(File('$destDir/assets/v3/seforim.db.zst').lengthSync(), size);
+      });
+
+      test('הטווח האחרון כולל את כל שארית חלוקת הנכס', () async {
+        const oddSize = size + 3;
+        final server = rangeServer();
+        final exporter = buildExporter(
+          single,
+          assetSizes: const {'seforim.db.zst': oddSize},
+          respond: server.respond,
+          segmentThresholdBytes: 1 << 20,
+          freeBytesFor: (_) => oddSize + oddSize ~/ 8 + 2 + headroom,
+          connectionsForAsset: (_, _, _, _) => 8,
+        ).exporter;
+        addTearDown(exporter.dispose);
+
+        await expectLater(
+          exporter.export(destDir: destDir),
+          throwsA(isA<StateError>()),
+        );
+        expect(server.ranges, isEmpty);
+      });
     });
   });
 }
