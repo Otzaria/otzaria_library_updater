@@ -40,12 +40,14 @@ Future<void> _writeSegmentStateFile(
   await temp.rename(statePath);
 }
 
+RegExp _segmentLeftoverPattern(String destPath) =>
+    RegExp('^${RegExp.escape(p.basename(destPath))}'
+        r'\.(segments\.tmp|seg-\d+)$');
+
 /// מוחק את קובצי הטווחים ואת קובץ המצב (לא את dest עצמו). קובץ המצב נמחק
 /// אחרון, כדי שמחיקה שנכשלה באמצע תנוסה שוב בריצה הבאה.
-void _deleteSegmentLeftovers(String destPath) {
-  final statePath = _segmentStatePath(destPath);
-  final pattern = RegExp('^${RegExp.escape(p.basename(destPath))}'
-      r'\.(segments\.tmp|seg-\d+)$');
+void _deleteSegmentLeftoversSync(String destPath) {
+  final pattern = _segmentLeftoverPattern(destPath);
   try {
     for (final entity in Directory(p.dirname(destPath)).listSync()) {
       if (entity is File && pattern.hasMatch(p.basename(entity.path))) {
@@ -53,7 +55,23 @@ void _deleteSegmentLeftovers(String destPath) {
       }
     }
   } catch (_) {}
-  _deleteFileQuietly(statePath);
+  _deleteFileQuietly(_segmentStatePath(destPath));
+}
+
+/// כמו [_deleteSegmentLeftoversSync], למסלול ההורדה: מחיקת טווח של כמה GB
+/// חוסמת את ה-isolate הקורא (ה-UI) לשניות ארוכות.
+Future<void> _deleteSegmentLeftovers(String destPath) async {
+  final statePath = _segmentStatePath(destPath);
+  final pattern = _segmentLeftoverPattern(destPath);
+  try {
+    final entities = await Directory(p.dirname(destPath)).list().toList();
+    for (final entity in entities) {
+      if (entity is File && pattern.hasMatch(p.basename(entity.path))) {
+        await _deleteFileQuietlyAsync(entity.path);
+      }
+    }
+  } catch (_) {}
+  await _deleteFileQuietlyAsync(statePath);
 }
 
 extension _SegmentedDownload on PatchDownloader {
@@ -189,7 +207,7 @@ extension _SegmentedDownload on PatchDownloader {
         destPath,
         LibraryUpdaterMessages.current.deletePartialBeforeRetryFailed,
       );
-      _deleteSegmentLeftovers(destPath);
+      await _deleteSegmentLeftovers(destPath);
       plan = null;
       validator = null;
       onExistingBytes?.call(0);
@@ -216,7 +234,7 @@ extension _SegmentedDownload on PatchDownloader {
         isCancelled: isCancelled,
       );
       if (outcome is _SegmentFallback) {
-        _deleteSegmentLeftovers(destPath);
+        await _deleteSegmentLeftovers(destPath);
         // בלי ETag אין If-Range שיכבול את התחילית לגרסת השרת.
         if (current.etag == null || unboundPrefix) {
           await _deleteRequired(
@@ -245,15 +263,15 @@ extension _SegmentedDownload on PatchDownloader {
         onProgress: onVerifyProgress,
       );
       if (sha256 == null || digest == sha256) {
-        _deleteSegmentLeftovers(destPath);
+        await _deleteSegmentLeftovers(destPath);
         if (resumeToken != null && sha256 != null) {
           await _markVerified(sidecarPath, resumeToken, sha256, file);
         }
         return (done: true, validator: current.etag);
       }
       if (cleanRetryUsed) {
-        _deleteQuietly(destPath);
-        _deleteSegmentLeftovers(destPath);
+        await _deleteFileQuietlyAsync(destPath);
+        await _deleteSegmentLeftovers(destPath);
         _deleteQuietly(sidecarPath);
         throw PatchDownloadException(
             LibraryUpdaterMessages.current.fullDbHashMismatch);

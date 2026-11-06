@@ -304,7 +304,7 @@ class PatchDownloader {
           ? _readSegmentPlan(destPath, resumeToken, url, expectedSize!,
               expectedSha256?.toLowerCase())
           : null;
-      if (resumedPlan == null) _deleteSegmentLeftovers(destPath);
+      if (resumedPlan == null) await _deleteSegmentLeftovers(destPath);
 
       // חלקי בלי validator אינו נאמן: אין If-Range שיכבול אותו לגרסת השרת.
       if (!alreadyComplete &&
@@ -407,7 +407,7 @@ class PatchDownloader {
       final downloaded = outcome.downloaded;
 
       if (expectedSize != null && downloaded != expectedSize) {
-        _deleteQuietly(destPath);
+        await _deleteFileQuietlyAsync(destPath);
         _deleteQuietly(sidecarPath);
         throw PatchDownloadException(
           messages.fullDbSizeMismatch(downloaded, expectedSize),
@@ -419,7 +419,7 @@ class PatchDownloader {
             await _hashFileSha256InIsolate(
                 destPath, isCancelled, onVerifyProgress);
         if (actual != expected) {
-          _deleteQuietly(destPath);
+          await _deleteFileQuietlyAsync(destPath);
           _deleteQuietly(sidecarPath);
           throw PatchDownloadException(messages.fullDbHashMismatch);
         }
@@ -434,8 +434,8 @@ class PatchDownloader {
       if (!adopting &&
           !_partialIsResumable(
               destPath, sidecarPath, expectedSize, resumeToken)) {
-        _deleteQuietly(destPath);
-        _deleteSegmentLeftovers(destPath);
+        await _deleteFileQuietlyAsync(destPath);
+        await _deleteSegmentLeftovers(destPath);
         if (!file.existsSync()) _deleteQuietly(sidecarPath);
       }
       rethrow;
@@ -448,6 +448,10 @@ class PatchDownloader {
   /// מוחק את קובצי ההורדה המפוצלת של [destPath] (`.segments`, `.seg-N`),
   /// לצד [destPath] ו-[resumeSidecarPath] שהצרכן מוחק בעצמו.
   static void deleteSegmentFiles(String destPath) =>
+      _deleteSegmentLeftoversSync(destPath);
+
+  @visibleForTesting
+  static Future<void> deleteSegmentFilesAsync(String destPath) =>
       _deleteSegmentLeftovers(destPath);
 
   /// הטוקן שנשמר בקובץ הצד של [destPath], אם יש.
@@ -1731,5 +1735,11 @@ void _deleteFileQuietly(String path) {
   try {
     final file = File(path);
     if (file.existsSync()) file.deleteSync();
+  } catch (_) {}
+}
+
+Future<void> _deleteFileQuietlyAsync(String path) async {
+  try {
+    await File(path).delete();
   } catch (_) {}
 }
