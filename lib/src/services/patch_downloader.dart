@@ -681,6 +681,10 @@ class PatchDownloader {
   /// [onPartProgress]/[onPartExisting] עם משבצת לכל חלק: בסכום, ירידת בסיס
   /// של חלק מאוחר הייתה חותכת גם בתי רשת של חלקים קודמים.
   /// נעילת `<destPath>.lock` כמו ב-[downloadToFile]; נעילות החלקים נפרדות.
+  /// Assembly is cancellable and retains all verified parts until publication.
+  /// Reserve [SplitAsset.size] additional bytes for the staged archive. Failed
+  /// size/hash verification invalidates part verification markers, so a retry
+  /// freshly checks retained parts and downloads only corrupt or missing ones.
   Future<void> downloadSplitToFile({
     required SplitAsset split,
     required String destPath,
@@ -777,9 +781,12 @@ class PatchDownloader {
     bool Function()? isCancelled,
   }) async {
     final sidecarPath = resumeSidecarPath(destPath);
+    final stagingPath = '$destPath.joining';
     final joinedToken = resumeToken == null
         ? null
         : '$resumeToken|joined:${split.sha256}';
+    await _deleteFileQuietlyAsync(stagingPath);
+    _throwIfCancelled(isCancelled);
 
     if (joinedToken != null &&
         _readSidecar(sidecarPath)?.token == joinedToken &&
@@ -797,7 +804,7 @@ class PatchDownloader {
             onVerifyProgress,
           ) ==
           split.sha256) {
-        _deleteSplitParts(destPath, from: 0);
+        await _deleteSplitParts(destPath, from: 0);
         return;
       }
     }
@@ -805,8 +812,8 @@ class PatchDownloader {
       destPath,
       LibraryUpdaterMessages.current.deletePreviousArchiveFailed,
     );
-    _deleteQuietly(sidecarPath);
-    _deleteSplitParts(destPath, from: split.parts.length);
+    await _deleteFileQuietlyAsync(sidecarPath);
+    await _deleteSplitParts(destPath, from: split.parts.length);
 
     var completed = 0;
     final baselines = List<int>.filled(split.parts.length, 0);
@@ -842,32 +849,51 @@ class PatchDownloader {
     }
     _throwIfCancelled(isCancelled);
 
-    await _joinPartsInIsolate(
-      [for (var i = 0; i < split.parts.length; i++) splitPartPath(destPath, i)],
-      destPath,
-      split.size,
-      split.sha256,
-      onAssembleProgress,
-    );
-    if (joinedToken != null) {
-      await _writeSidecar(sidecarPath, joinedToken, null);
+    try {
+      final staged = await _joinPartsInIsolate(
+        [
+          for (var i = 0; i < split.parts.length; i++)
+            splitPartPath(destPath, i),
+        ],
+        destPath,
+        split.size,
+        split.sha256,
+        isCancelled,
+        onAssembleProgress,
+      );
+      if (joinedToken != null) {
+        // Write before committing so a sidecar failure cannot report failure
+        // after a valid archive has already been published.
+        await _writeSidecar(sidecarPath, joinedToken, null);
+      }
+      // The worker only stages output. Its progress has been drained before it
+      // returns, including callbacks that cancel a very short join. Check once
+      // more after asynchronous sidecar I/O, then commit without yielding.
+      _throwIfCancelled(isCancelled);
+      File(staged).renameSync(destPath);
+    } catch (_) {
+      await _deleteFileQuietlyAsync(stagingPath);
+      await _deleteFileQuietlyAsync(sidecarPath);
+      rethrow;
     }
+    // The rename is the commit point. No callbacks or cancellation checks may
+    // turn a successful publication into a reported cancellation afterwards.
+    await _deleteSplitParts(destPath, from: 0);
   }
 
   /// מוחק חלקים (ואת קבצי הצד שלהם) מהאינדקס [from] והלאה.
-  void _deleteSplitParts(String destPath, {required int from}) {
+  Future<void> _deleteSplitParts(String destPath, {required int from}) async {
     final dir = Directory(p.dirname(destPath));
-    if (!dir.existsSync()) return;
     final pattern = RegExp(
       '^${RegExp.escape(p.basename(destPath))}'
       r'\.part-(\d+)(\.resume)?$',
     );
     try {
-      for (final entity in dir.listSync()) {
-        if (entity is! File) continue;
+      await for (final entity in dir.list(followLinks: false)) {
+        if (entity is! File && entity is! Link) continue;
         final match = pattern.firstMatch(p.basename(entity.path));
         if (match != null && int.parse(match.group(1)!) >= from) {
-          _deleteQuietly(entity.path);
+          await _deleteFileQuietlyAsync(entity.path);
         }
       }
     } catch (_) {}
@@ -1777,7 +1803,8 @@ class PatchDownloader {
     final digestSink = expectedSha256 != null ? Sha256DigestCollector() : null;
     final input = digestSink != null ? FastSha256.start(digestSink) : null;
     try {
-      _deleteQuietly(destPath);
+      await _deleteFileQuietlyAsync(destPath);
+      _throwIfCancelled(isCancelled);
       output = await File(destPath).open(mode: FileMode.write);
       var copied = 0;
       await for (final chunk in source.openRead()) {
@@ -1815,7 +1842,7 @@ class PatchDownloader {
           await output.close();
         } catch (_) {}
       }
-      _deleteQuietly(destPath);
+      await _deleteFileQuietlyAsync(destPath);
       rethrow;
     } finally {
       input?.dispose();
@@ -2030,45 +2057,50 @@ Future<String> _hashFileSha256(
 
 /// top-level כדי שה-closure של `Isolate.run` לא ילכוד את ה-PatchDownloader.
 /// המלל הפעיל עובר ל-isolate, אחרת הודעת כשל הייתה חוזרת בעברית.
-Future<void> _joinPartsInIsolate(
+Future<String> _joinPartsInIsolate(
   List<String> partPaths,
   String destPath,
   int expectedSize,
   String expectedSha256, [
+  bool Function()? isCancelled,
   void Function(int done, int total)? onAssemble,
 ]) => _runCancellableWorker(
   _joinWork(partPaths, destPath, expectedSize, expectedSha256),
-  null,
+  isCancelled,
   null,
   onAssemble,
 );
 
-_WorkerBody<void> _joinWork(
+_WorkerBody<String> _joinWork(
   List<String> partPaths,
   String destPath,
   int expectedSize,
   String expectedSha256,
 ) {
   final messages = LibraryUpdaterMessages.current;
-  return (_, _, onAssemble) async {
+  return (isCancelled, _, onAssemble) async {
     LibraryUpdaterMessages.current = messages;
-    await _joinParts(
+    return _joinParts(
       partPaths,
       destPath,
       expectedSize,
       expectedSha256,
+      isCancelled,
       onAssemble,
     );
   };
 }
 
-/// מצרף לקובץ זמני, מוחק כל חלק אחרי צירופו, ומעביר ל-[destPath] רק אחרי
-/// אימות. אינו נעצר בביטול: חיבור שנקטע היה מאבד חלקים שכבר צורפו.
-Future<void> _joinParts(
+/// Stages a verified archive with bounded reads and writes. Parts remain intact
+/// until the caller commits the result, so cancellation or failure can retry
+/// without downloading verified parts again. This needs [expectedSize] bytes of
+/// extra disk space while all parts and the staged archive coexist.
+Future<String> _joinParts(
   List<String> partPaths,
   String destPath,
   int expectedSize,
   String expectedSha256, [
+  bool Function()? isCancelled,
   void Function(int done, int total)? onAssemble,
 ]) async {
   final messages = LibraryUpdaterMessages.current;
@@ -2077,19 +2109,28 @@ Future<void> _joinParts(
   final hasher = FastSha256.start(digestSink);
   var written = 0;
   var lastReported = 0;
+  void checkCancelled() {
+    if (isCancelled?.call() ?? false) throw const PatchDownloadCancelled();
+  }
+
   try {
-    // writeOnly אינו קוצץ: זנב של צירוף שנקטע היה נשאר אחרי הסוף.
-    _deleteFileQuietly(tempPath);
-    final output = File(tempPath).openSync(mode: FileMode.writeOnly);
+    checkCancelled();
+    await _deleteFileQuietlyAsync(tempPath);
+    checkCancelled();
+    final output = await File(tempPath).open(mode: FileMode.write);
     try {
+      final buffer = Uint8List(1 << 20);
+      onAssemble?.call(0, expectedSize);
       for (final partPath in partPaths) {
-        final input = File(partPath).openSync();
+        checkCancelled();
+        final input = await File(partPath).open();
         try {
-          for (
-            var chunk = input.readSync(1 << 20);
-            chunk.isNotEmpty;
-            chunk = input.readSync(1 << 20)
-          ) {
+          while (true) {
+            checkCancelled();
+            final count = await input.readInto(buffer);
+            checkCancelled();
+            if (count == 0) break;
+            final chunk = Uint8List.sublistView(buffer, 0, count);
             if (chunk.length > expectedSize - written) {
               throw PatchDownloadException(
                 messages.joinedArchiveSizeMismatch(
@@ -2098,29 +2139,25 @@ Future<void> _joinParts(
                 ),
               );
             }
-            hasher.add(chunk);
-            // writeFromSync מחזיק את ה-buffer עד סוף הכתיבה, וה-GC של כל
-            // ה-isolates (גם של ה-UI) ממתין לו בדיסק עמוס.
             await output.writeFrom(chunk);
+            hasher.add(chunk);
             written += chunk.length;
             if (onAssemble != null && written - lastReported >= (4 << 20)) {
               lastReported = written;
               onAssemble(written, expectedSize);
             }
+            checkCancelled();
           }
         } finally {
-          input.closeSync();
+          await input.close();
         }
-        _deleteFileQuietly(partPath);
-        _deleteFileQuietly(PatchDownloader.resumeSidecarPath(partPath));
       }
-      // writeOnly אינו מובטח לקצץ, ו-.joining ישן שלא נמחק השאיר זנב.
-      output.truncateSync(written);
-      output.flushSync();
+      await output.flush();
+      checkCancelled();
     } finally {
-      output.closeSync();
+      await output.close();
     }
-    onAssemble?.call(written, expectedSize);
+    checkCancelled();
     hasher.close();
     if (written != expectedSize) {
       throw PatchDownloadException(
@@ -2130,9 +2167,21 @@ Future<void> _joinParts(
     if (digestSink.value.toString() != expectedSha256) {
       throw PatchDownloadException(messages.joinedArchiveHashMismatch);
     }
-    File(tempPath).renameSync(destPath);
-  } catch (_) {
-    _deleteFileQuietly(tempPath);
+    onAssemble?.call(written, expectedSize);
+    checkCancelled();
+    return tempPath;
+  } catch (error) {
+    await _deleteFileQuietlyAsync(tempPath);
+    if (error is PatchDownloadException) {
+      // A changed part can still match a size/mtime verification marker on a
+      // coarse-timestamp filesystem. Retain its bytes, but force fresh hashes
+      // before the next attempt adopts complete parts from this failed join.
+      for (final partPath in partPaths) {
+        await _deleteFileQuietlyAsync(
+          PatchDownloader.resumeSidecarPath(partPath),
+        );
+      }
+    }
     rethrow;
   } finally {
     hasher.dispose();

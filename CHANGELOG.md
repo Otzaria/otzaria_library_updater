@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- 0.9.1: split-archive assembly now checks cancellation between bounded 1 MiB
+  reads/writes and keeps all downloaded parts until the verified archive is
+  committed. A cancelled or failed join removes `.joining` output, allowing a
+  retry to reuse complete parts. Failed size/hash checks invalidate cached part
+  verification markers so corrupted retained content is checked again.
+- Final assembly progress is delivered before the caller checks cancellation
+  and atomically publishes the archive; cancellation from that final callback
+  cannot publish an archive or turn an already committed result into failure.
+  Local-copy and split-payload cleanup now use asynchronous file operations.
+- Consumers of `downloadSplitToFile`/split `downloadReleaseAssetToFile` must
+  reserve an additional full `SplitAsset.size` for staging, because the parts
+  and assembled archive coexist until commit. Range-segment assembly overhead
+  is unchanged; `LibraryMirrorExporter` already reserves the full split output.
+- Split mirror assembly enforces part/archive limits before writes and verifies
+  exact sizes before publication. It honors final-stage cancellation, closes
+  handles before asynchronous cleanup, and preserves the old output until a
+  verified replacement is ready. Disk preflight gives no credit to an unverified
+  assembled output; cancelled/failed assembly retains valid parts for retry.
+
 - `downloadToFile`: מחיקת שאריות הטווחים ומחיקת היעד בכשל אורך או sha256
   אסינכרוניות. מחיקה סינכרונית של טווח בגודל של כמה GB תקעה את ה-UI של אוצריא
   ל-17 שניות (Otzaria/otzaria#4070). `deleteSegmentFiles` נשאר סינכרוני.

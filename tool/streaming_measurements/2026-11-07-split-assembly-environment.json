@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-11-07T23:18:41.329018+00:00",
+  "baseline_commit": "6bfd33c3bc14392c1a6bb0887fdb23209068eab5",
+  "source_snapshot": "Baseline core library plus the exact downloader and mirror files fingerprinted below; isolated dependencies use the baseline pubspec constraints.",
+  "files": {
+    "lib/src/services/patch_downloader.dart": {
+      "git_blob": "6b7aba49880b6f5e7d38e81e915582dd6f74f8cd",
+      "sha256": "5c2802810130dd52dfb0b4f09e7e70b1e006ef4c8f0756ce3c2fb8654d7c90c5"
+    },
+    "lib/src/services/library_mirror_exporter.dart": {
+      "git_blob": "a91060f294bd6261003e3195b07c9b14e032183a",
+      "sha256": "52c637c44d3edcf2ee4c4a1c2ce1fcb50d23fe22288a72b9603d9ed1d73c95b3"
+    },
+    "tool/split_assembly_probe.dart": {
+      "git_blob": "f3336b2b3019c42565a7a922893c857cb2f2d2bb",
+      "sha256": "8e78fec7c6f207a3b436f9521c335e327c71446f1524f206a5a40a642fb6571d"
+    },
+    "tool/split_assembly_probe_fixture.py": {
+      "git_blob": "7db58713221340dc7644c62122fa7edeba443ebc",
+      "sha256": "499285b05bc126edf72909cc1ec9334fbb2acaa38c1a3625097e2a556f4b6a93"
+    },
+    "test/split_assembly_cancellation_test.dart": {
+      "git_blob": "6f4a19c62fefd9d2cd6cf54154804a954d7d3d0f",
+      "sha256": "4a399a9ac014bb8b554e802db3c52e16d780467d15ef2f981b7d8d4102734c57"
+    },
+    "test/patch_downloader_async_cleanup_test.dart": {
+      "git_blob": "6e85420cadae9b6d898729cbd00567ea8d9e065b",
+      "sha256": "3658094c18c40291a32c2f67efd9cd7d3ffdcfce6994824e9eb4c0ccf43bd1fc"
+    },
+    "test/offline/split_assembly_safety_test.dart": {
+      "git_blob": "9ae4a8f30e81cf8b6d1d1c360e8bc6930d57548c",
+      "sha256": "3479f5960d70369972eb13a55ea9d2d9b29bda19b283a730e9de89dfd02329dd"
+    }
+  },
+  "results": {
+    "path": "2026-11-07-split-assembly.jsonl",
+    "sha256": "49395a4e503639e3eb00b8a54177d31d7f1c747cf332611be8f1688f793a1f7f",
+    "rows": 8
+  },
+  "runtime": {
+    "dart": "3.13.5 (stable) (Tue Sep 29 01:00:52 2026 -0700) on \"linux_x64\"",
+    "os": "Linux 6.18.57 #1 SMP Tue Oct 20 21:56:04 UTC 2026",
+    "architecture": "x86_64",
+    "cpu_count_visible": 9,
+    "sqlite3_dart_package": "3.9.0",
+    "native_sha256": false,
+    "hash_implementation": "package:crypto fallback on Linux",
+    "compiler_command": "dart build cli",
+    "aot_bundle_includes": "package:sqlite3/src/ffi/libsqlite3.g.dart"
+  },
+  "conditions": {
+    "filesystem": "Linux tmpfs (/dev/shm)",
+    "cache": "Warm page cache from separate fixture preparation and verification; caches were not dropped.",
+    "host": "Shared managed host; other tasks may run concurrently.",
+    "fixture_sizes_mib": [
+      64,
+      256
+    ],
+    "repeats_per_size": 2,
+    "fresh_aot_processes": 8,
+    "parts_per_archive": 3,
+    "part_boundaries": "Unequal; two non-aligned boundaries.",
+    "fixture_format": "Synthetic opaque archive bytes; no decompression is invoked.",
+    "preparation_buffer_bytes": 65536,
+    "external_hash_read_bytes": 1048576,
+    "join_read_buffer_bytes": 1048576,
+    "fixture_preparation": "Outside measured AOT processes.",
+    "network": "Mock HTTP client counts and rejects every request; all runs recorded zero requests."
+  },
+  "metrics": {
+    "peak_rss_bytes": "ProcessInfo.maxRss process high-watermark, sampled when the operation future completes, before external hash validation. Includes runtime and all worker isolates.",
+    "baseline_rss_bytes": "ProcessInfo.currentRss before starting downloadSplitToFile.",
+    "operation_us": "Stopwatch duration for downloadSplitToFile, including cached-part verification where needed.",
+    "cancel_latency_us": "From setting cancellation at the first positive assembly report (4 MiB) until the operation future completes with cleanup.",
+    "cancellation_peak_scope": "Cancellation processes start with identity sidecars but no verified marker, so peak includes fresh hashes of every cached part before assembly.",
+    "retry_peak_scope": "Fresh retry process reuses retained verified parts, joins the entire archive, publishes, and cleans parts.",
+    "callbacks_after_completion": "Checked after allowing the event loop another 20 ms.",
+    "thresholds": "No RSS or timing pass/fail threshold; correctness assertions determine passed."
+  },
+  "verification": [
+    "Every cancellation reports PatchDownloadCancelled, preserves all three parts and identity sidecars, and leaves neither the destination nor .joining.",
+    "A separate Python process streams SHA-256 over every retained part before retry.",
+    "Retry runs in a new AOT process, makes zero HTTP requests, publishes the expected size/hash, and removes part payloads and resume sidecars.",
+    "A separate Python process verifies the final archive SHA-256 and joined identity.",
+    "Every run records zero progress callbacks or cancellation checks after publication, and zero progress callbacks after future completion."
+  ],
+  "independent_regressions": {
+    "passed": 28,
+    "failed": 0,
+    "command": [
+      "dart",
+      "test",
+      "--reporter=expanded",
+      "test/split_assembly_cancellation_test.dart",
+      "test/patch_downloader_async_cleanup_test.dart",
+      "test/offline/split_assembly_safety_test.dart"
+    ]
+  },
+  "reproduce": {
+    "working_directory": "Repository root, with dependencies resolved.",
+    "build": [
+      "dart",
+      "build",
+      "cli",
+      "--target=tool/split_assembly_probe.dart",
+      "--output=build/split-assembly-probe"
+    ],
+    "prepare": [
+      "python3",
+      "tool/split_assembly_probe_fixture.py",
+      "prepare",
+      "<owned-scratch>/64-r1",
+      "64"
+    ],
+    "cancel": [
+      "build/split-assembly-probe/bundle/bin/split_assembly_probe",
+      "cancel",
+      "<owned-scratch>/64-r1/manifest.json"
+    ],
+    "verify_cancel": [
+      "python3",
+      "tool/split_assembly_probe_fixture.py",
+      "cancel",
+      "<owned-scratch>/64-r1/manifest.json"
+    ],
+    "retry": [
+      "build/split-assembly-probe/bundle/bin/split_assembly_probe",
+      "retry",
+      "<owned-scratch>/64-r1/manifest.json"
+    ],
+    "verify_retry": [
+      "python3",
+      "tool/split_assembly_probe_fixture.py",
+      "retry",
+      "<owned-scratch>/64-r1/manifest.json"
+    ],
+    "repeat": "Use a fresh fixture directory for each repetition and replace 64 with 256 for the larger case. Run cancel and retry as separate AOT processes. Remove only owned fixtures after validation.",
+    "source_fingerprint": "The fixture generator records the downloader source SHA-256. Build and prepare from the same unchanged source snapshot.",
+    "windows_note": "The generated executable uses the .exe suffix on Windows; these recorded results are Linux only.",
+    "space": "Allow at least twice the fixture size plus headroom, because retained parts and staging coexist."
+  },
+  "limitations": [
+    "Two repetitions per case are diagnostics, not statistical tail-latency guarantees.",
+    "tmpfs and warm cache do not represent slow storage, removable media, antivirus, or Windows behavior.",
+    "Peak RSS is a platform-dependent process metric and is not Dart heap size.",
+    "The probe covers cached-part assembly/cancellation/resume, not network transfer or ZSTD extraction.",
+    "Native SHA implementations on Windows/macOS were not exercised."
+  ]
+}
