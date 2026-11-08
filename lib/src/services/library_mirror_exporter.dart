@@ -20,6 +20,7 @@ import 'github_library_release_client.dart';
 import 'library_http_exception.dart';
 import 'library_update_discovery.dart';
 import 'local_mirror_library_release_client.dart';
+import 'offline_library_update_planner.dart';
 import 'patch_downloader.dart';
 
 /// נתיב יחסי עם `/`, כדי שמראה שנוצרה ב-Windows תיקרא גם ב-macOS.
@@ -325,6 +326,7 @@ class LibraryMirrorExporter {
             from: manifest.fromVersion,
             to: manifest.toVersion,
             assetNames: [manifestAsset.name, ...fileNames],
+            manifest: manifest,
           ));
         }
       }
@@ -395,6 +397,16 @@ class LibraryMirrorExporter {
             LibraryUpdateDiscovery.releaseVersionOf(fullDbCarrier),
           ),
         );
+      }
+
+      final unpicked = _dropUnpickedPatches(
+        neededByRelease: neededByRelease,
+        mirroredEdges: mirroredEdges,
+        edges: edges,
+        carrier: fullDbCarrier,
+      );
+      if (unpicked > 0) {
+        onStage?.call(strings.exportSkippingUnpickedPatches(unpicked));
       }
     }
 
@@ -1121,6 +1133,55 @@ class LibraryMirrorExporter {
     return dropped;
   }
 
+  /// מוציא מהתוכנית קשתות ש-[OfflineLibraryUpdatePlanner] לא יבחר באף גרסה
+  /// מקומית, כשהמסד המלא של [carrier] יושב לצידן. מחזיר כמה נכסים הוסרו.
+  ///
+  /// **למה צריך את זה מעבר ל-[_dropSlowPatches]:** שם כל קשת נמדדת לבדה ועם
+  /// זיכוי הורדה, אבל במראה רגילה המסד המלא נכנס ממילא — באופליין שני הקבצים
+  /// כבר על הכונן, והמתכנן בוחר בלי זיכוי ולפי השרשרת כולה. בנובמבר 2026
+  /// (v37) 332MiB מתוך 2.4GB היו קשתות שאף גרסה מקומית אינה בוחרת.
+  ///
+  /// ההכרעה היא של המתכנן עצמו ([OfflineLibraryUpdatePlanner.pickedEdges]),
+  /// על הגדלים שב-manifests — אותם גדלים שהמחשב הלא-מקוון יראה.
+  int _dropUnpickedPatches({
+    required Map<LibraryRelease, Map<String, ReleaseAsset>> neededByRelease,
+    required List<MirroredEdge> mirroredEdges,
+    required List<({int from, int to})> edges,
+    required LibraryRelease carrier,
+  }) {
+    final full = _fullDb(carrier);
+    if (full == null) return 0;
+    final kept = [
+      for (final e in mirroredEdges)
+        if (_plannedEdgeBytes(e, neededByRelease) != null) e,
+    ];
+    final picked = OfflineLibraryUpdatePlanner(applyTime: applyTime)
+        .pickedEdges(
+      edges: [
+        for (final e in kept)
+          (from: e.from, to: e.to, bytes: e.manifest.totalCompressedSize),
+      ],
+      fullDbBytes: full.size,
+      fullDbVersion: LibraryUpdateDiscovery.releaseVersionOf(carrier),
+    );
+    if (picked == null) return 0;
+
+    var dropped = 0;
+    for (final (i, edge) in kept.indexed) {
+      if (picked.contains(i)) continue;
+      final needed = neededByRelease[edge.release]!;
+      for (final name in edge.assetNames) {
+        if (needed.remove(name) != null) dropped++;
+      }
+    }
+    edges
+      ..clear()
+      ..addAll(mirroredEdges
+          .where((e) => _plannedEdgeBytes(e, neededByRelease) != null)
+          .map((e) => (from: e.from, to: e.to)));
+    return dropped;
+  }
+
   int _dropSlowPatches({
     required Map<LibraryRelease, Map<String, ReleaseAsset>> neededByRelease,
     required List<MirroredEdge> mirroredEdges,
@@ -1723,4 +1784,5 @@ typedef MirroredEdge = ({
   int from,
   int to,
   List<String> assetNames,
+  DeltaManifest manifest,
 });

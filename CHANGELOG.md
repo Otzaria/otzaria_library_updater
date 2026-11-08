@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `LibraryMirrorExporter`: a full mirror no longer carries patches that
+  `OfflineLibraryUpdatePlanner` would never pick for any local version (nor for
+  a machine with no known version), since the full DB ships beside them. The
+  decision is the planner's own (`OfflineLibraryUpdatePlanner.pickedEdges`),
+  and nothing is pruned if removing the rest would change any plan's kind or
+  target. On the v37 release graph this removes 332 MiB of 2.4 GB. New message
+  `exportSkippingUnpickedPatches`; `MirroredEdge` carries its `DeltaManifest`.
 - Split archive publication uses asynchronous rename, keeping disk I/O off the
   caller isolate. Cancellation is accepted until publication starts; a cancel
   during rename cannot turn successful publication into failure. Split-part and

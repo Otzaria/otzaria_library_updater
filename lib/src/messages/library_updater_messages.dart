@@ -175,6 +175,7 @@ abstract class LibraryUpdaterMessages {
   );
   String exportFullDbSchemaUnsupported(String tag, int schemaVersion);
   String exportSkippingPatchesFullDbWins(int fileCount, int fullDbVersion);
+  String exportSkippingUnpickedPatches(int fileCount);
   String exportFullDbInsteadOfSlowPatches(
     int fileCount,
     int patchMinutes,
@@ -592,6 +593,10 @@ class HebrewLibraryUpdaterMessages extends LibraryUpdaterMessages {
   String exportSkippingPatchesFullDbWins(int fileCount, int fullDbVersion) =>
       'מדלג על $fileCount קובצי עדכון: המסד המלא (גרסה $fullDbVersion) מגיע '
       'גבוה מכל שרשרת שאפשר להחיל, ולכן אין בהם צורך';
+  @override
+  String exportSkippingUnpickedPatches(int fileCount) =>
+      'מדלג על $fileCount קובצי עדכון שאף מחשב לא ישתמש בהם: לכל גרסה יש '
+      'מסלול קצר יותר או המסד המלא';
   @override
   String exportFullDbInsteadOfSlowPatches(
     int fileCount,

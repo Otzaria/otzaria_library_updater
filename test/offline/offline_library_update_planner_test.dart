@@ -45,6 +45,7 @@ const _fullAsset = ReleaseAsset(
 );
 
 void main() {
+  _pickedEdgesTests();
   const planner = OfflineLibraryUpdatePlanner();
 
   LibraryUpdatePlan plan({
@@ -726,6 +727,77 @@ void main() {
         expect(p.kind, LibraryUpdatePlanKind.blocked);
         expect(p.blockReason, LibraryUpdateBlockReason.appUpdateRequired);
       });
+    });
+  });
+}
+
+void _pickedEdgesTests() {
+  group('pickedEdges — קשתות שאף גרסה מקומית אינה בוחרת', () {
+    const planner = OfflineLibraryUpdatePlanner();
+    const mb = 1 << 20;
+
+    test('קשת שיש מעליה קיצור אינה נבחרת', () {
+      expect(
+        planner.pickedEdges(
+          edges: const [
+            (from: 1, to: 2, bytes: mb),
+            (from: 2, to: 3, bytes: mb),
+            (from: 1, to: 3, bytes: mb),
+          ],
+          fullDbBytes: 1000 * mb,
+          fullDbVersion: 3,
+        ),
+        {1, 2},
+      );
+    });
+
+    test('הצורה של v37: קשת כבדה מפסידה למסד המלא, הקלות נשארות', () {
+      expect(
+        planner.pickedEdges(
+          edges: const [
+            (from: 34, to: 37, bytes: 250 * mb),
+            (from: 35, to: 37, bytes: 90 * mb),
+            (from: 36, to: 37, bytes: 88 * mb),
+          ],
+          fullDbBytes: 1900 * mb,
+          fullDbVersion: 37,
+        ),
+        {1, 2},
+      );
+    });
+
+    test('השלמה אחרי מסד מלא ישן נבחרת תמיד', () {
+      expect(
+        planner.pickedEdges(
+          edges: const [
+            (from: 1, to: 2, bytes: mb),
+            (from: 2, to: 3, bytes: mb),
+            (from: 1, to: 3, bytes: mb),
+          ],
+          fullDbBytes: 1000 * mb,
+          fullDbVersion: 2,
+        ),
+        {1, 2},
+      );
+    });
+
+    test('כשכל הקשתות נבחרות, או שאין מסד מלא — null', () {
+      expect(
+        planner.pickedEdges(
+          edges: const [(from: 1, to: 2, bytes: mb), (from: 2, to: 3, bytes: mb)],
+          fullDbBytes: 1000 * mb,
+          fullDbVersion: 3,
+        ),
+        isNull,
+      );
+      expect(
+        planner.pickedEdges(
+          edges: const [(from: 1, to: 3, bytes: mb)],
+          fullDbBytes: 0,
+          fullDbVersion: 3,
+        ),
+        isNull,
+      );
     });
   });
 }
