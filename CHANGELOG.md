@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Split archive publication uses asynchronous rename, keeping disk I/O off the
+  caller isolate. Cancellation is accepted until publication starts; a cancel
+  during rename cannot turn successful publication into failure. Split-part and
+  mirror cleanup finish each directory listing before deleting its entries.
 - 0.9.1: split-archive assembly now checks cancellation between bounded 1 MiB
   reads/writes and keeps all downloaded parts until the verified archive is
   committed. A cancelled or failed join removes `.joining` output, allowing a

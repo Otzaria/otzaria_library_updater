@@ -868,9 +868,10 @@ class PatchDownloader {
       }
       // The worker only stages output. Its progress has been drained before it
       // returns, including callbacks that cancel a very short join. Check once
-      // more after asynchronous sidecar I/O, then commit without yielding.
+      // more after asynchronous sidecar I/O, then start publication. A cancel
+      // arriving while the asynchronous rename is in flight cannot undo it.
       _throwIfCancelled(isCancelled);
-      File(staged).renameSync(destPath);
+      await File(staged).rename(destPath);
     } catch (_) {
       await _deleteFileQuietlyAsync(stagingPath);
       await _deleteFileQuietlyAsync(sidecarPath);
@@ -888,15 +889,21 @@ class PatchDownloader {
       '^${RegExp.escape(p.basename(destPath))}'
       r'\.part-(\d+)(\.resume)?$',
     );
+    final paths = <String>[];
     try {
       await for (final entity in dir.list(followLinks: false)) {
         if (entity is! File && entity is! Link) continue;
         final match = pattern.firstMatch(p.basename(entity.path));
         if (match != null && int.parse(match.group(1)!) >= from) {
-          await _deleteFileQuietlyAsync(entity.path);
+          paths.add(entity.path);
         }
       }
     } catch (_) {}
+    // Finish enumeration before mutating the directory: listings need not be
+    // snapshots, and deleting during traversal can skip entries on Windows.
+    for (final path in paths) {
+      await _deleteFileQuietlyAsync(path);
+    }
   }
 
   /// זורם את גוף התגובה אל [file], תוך המשך מ-[offset] בעזרת `Range`, ומחזיר

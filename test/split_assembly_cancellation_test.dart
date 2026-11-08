@@ -78,7 +78,7 @@ final class _PublicationIO extends IOOverrides {
   _PublicationIO(this.staging, {this.beforeRename, this.afterRename});
 
   final String staging;
-  final void Function()? beforeRename;
+  final FutureOr<void> Function()? beforeRename;
   final void Function()? afterRename;
 
   @override
@@ -102,9 +102,9 @@ class _PublicationFile implements File {
       file.delete(recursive: recursive);
 
   @override
-  File renameSync(String newPath) {
-    owner.beforeRename?.call();
-    final result = file.renameSync(newPath);
+  Future<File> rename(String newPath) async {
+    await owner.beforeRename?.call();
+    final result = await file.rename(newPath);
     owner.afterRename?.call();
     return result;
   }
@@ -380,6 +380,46 @@ void main() {
     expect(checksAfterCommit, 0);
     expect(callbacksAfterCommit, 0);
     expect(File(destination).readAsBytesSync(), fixture.bytes);
+  });
+
+  test('cancellation during asynchronous publication still succeeds', () async {
+    final fixture = _Fixture(51);
+    final downloader = fixture.downloader([]);
+    addTearDown(downloader.dispose);
+    final renameStarted = Completer<void>();
+    final finishRename = Completer<void>();
+    var cancelled = false;
+    final io = _PublicationIO(
+      '$destination.joining',
+      beforeRename: () async {
+        renameStarted.complete();
+        await finishRename.future;
+      },
+    );
+    final operation = IOOverrides.runWithIOOverrides(
+      () => downloader.downloadSplitToFile(
+        split: fixture.split,
+        destPath: destination,
+        resumeToken: 'v1',
+        isCancelled: () => cancelled,
+      ),
+      io,
+    );
+    await renameStarted.future;
+    expect(File(destination).existsSync(), isFalse);
+    await expectLater(
+      downloader.downloadSplitToFile(
+        split: fixture.split,
+        destPath: destination,
+        resumeToken: 'v1',
+      ),
+      throwsA(isA<PatchDownloadException>()),
+    );
+    cancelled = true;
+    finishRename.complete();
+    await operation;
+    expect(File(destination).readAsBytesSync(), fixture.bytes);
+    expect(File('$destination.joining').existsSync(), isFalse);
   });
 
   test('the destination remains locked during assembly callbacks', () async {

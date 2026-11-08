@@ -14,6 +14,8 @@ final class _AsyncCleanup extends IOOverrides {
   final List<String> deleted = [];
   var synchronousDeletes = 0;
   var synchronousLists = 0;
+  var listing = false;
+  var deletedWhileListing = false;
 
   @override
   File createFile(String path) {
@@ -52,6 +54,7 @@ class _CleanupFile implements File {
 
   @override
   Future<FileSystemEntity> delete({bool recursive = false}) async {
+    owner.deletedWhileListing |= owner.listing;
     final result = await file.delete(recursive: recursive);
     owner.deleted.add(path);
     return result;
@@ -85,7 +88,14 @@ class _CleanupDirectory implements Directory {
   Stream<FileSystemEntity> list({
     bool recursive = false,
     bool followLinks = true,
-  }) => directory.list(recursive: recursive, followLinks: followLinks);
+  }) async* {
+    owner.listing = true;
+    try {
+      yield* directory.list(recursive: recursive, followLinks: followLinks);
+    } finally {
+      owner.listing = false;
+    }
+  }
 
   @override
   List<FileSystemEntity> listSync({
@@ -202,6 +212,7 @@ void main() {
         io,
       );
       expect(io.synchronousLists, 0);
+      expect(io.deletedWhileListing, isFalse);
       expect(io.synchronousDeletes, 0);
       expect(io.deleted, unorderedEquals(paths));
       expect(File(destination).readAsBytesSync(), bytes);

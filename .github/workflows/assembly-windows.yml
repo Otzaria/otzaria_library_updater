@@ -1,0 +1,24 @@
+name: assembly-windows
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  assembly:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dart-lang/setup-dart@v1
+      - run: dart pub get
+      - name: Split assembly, cancellation, replacement, cleanup and locking
+        run: >-
+          dart test
+          test/split_assembly_cancellation_test.dart
+          test/patch_downloader_async_cleanup_test.dart
+          test/split_full_db_test.dart
+          test/split_destination_lock_test.dart
+          test/split_source_alias_test.dart
+          test/offline/split_assembly_safety_test.dart
+          test/offline/split_full_db_test.dart
+          -r expanded

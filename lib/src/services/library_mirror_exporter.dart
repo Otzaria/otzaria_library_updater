@@ -1640,7 +1640,8 @@ class LibraryMirrorExporter {
   Future<void> _deletePreservingLocks(FileSystemEntity entity) async {
     if (entity.path.endsWith('.lock')) return;
     if (entity is Directory) {
-      await for (final child in entity.list(followLinks: false)) {
+      final children = await entity.list(followLinks: false).toList();
+      for (final child in children) {
         await _deletePreservingLocks(child);
       }
       // Never recursively unlink a lock created after the directory listing.
