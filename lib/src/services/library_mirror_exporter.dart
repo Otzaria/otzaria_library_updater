@@ -487,15 +487,19 @@ class LibraryMirrorExporter {
         assembled.add(split);
         doneAssets++;
       } else {
-        // שארית שאינה התוכן הנכון רק תופסת מקום עד ההרכבה.
-        _deleteQuietly(split.dest);
-        _deleteQuietly(PatchDownloader.resumeSidecarPath(split.dest));
+        // הקובץ הקודם נשמר עד שהמחליף מוכן; סימון ישן אינו מאמת אותו.
+        await _deleteFileQuietlyAsync(
+          PatchDownloader.resumeSidecarPath(split.dest),
+        );
       }
     }
 
-    // המקום נבדק לפי מה שנשאר להוריד, אחרי אימות המפוצלים (מורכב פגום נמחק);
-    // ה-prune רץ רק בסוף, ולכן בדרך יש על הכונן שני עותקים של המסד.
-    await _ensureSpaceForPlan(destDir, assetsRoot, plannedByRelease);
+    await _ensureSpaceForPlan(
+      destDir,
+      assetsRoot,
+      plannedByRelease,
+      verifiedSplitOutputs: {for (final split in assembled) split.dest},
+    );
 
     // מדווחים את היעד עוד לפני הנכס הראשון: אחרת מד ההתקדמות אינו יודע לכמה
     // נכסים לחכות עד שהראשון (המסד המלא, ~1GB) מסתיים.
@@ -709,8 +713,9 @@ class LibraryMirrorExporter {
   Future<void> _ensureSpaceForPlan(
     String destDir,
     Directory assetsRoot,
-    Map<LibraryRelease, List<ReleaseAsset>> planned,
-  ) async {
+    Map<LibraryRelease, List<ReleaseAsset>> planned, {
+    required Set<String> verifiedSplitOutputs,
+  }) async {
     _connectionsAtPlanning.clear();
     var needed = 0;
     for (final entry in planned.entries) {
@@ -718,7 +723,11 @@ class LibraryMirrorExporter {
       for (final asset in entry.value) {
         if (asset.size <= 0) continue;
         final existing = File(p.join(tagDir, asset.name));
-        final have = existing.existsSync() ? existing.lengthSync() : 0;
+        final reusable =
+            asset.split == null || verifiedSplitOutputs.contains(existing.path);
+        final have = reusable && existing.existsSync()
+            ? existing.lengthSync()
+            : 0;
         final missing = asset.size - have;
         if (missing <= 0) continue;
         needed += missing;
@@ -1489,19 +1498,36 @@ class LibraryMirrorExporter {
     final corruptParts = <String>[];
     RandomAccessFile? out;
     try {
+      _throwIfCancelled(isCancelled);
       out = await tmp.open(mode: FileMode.write);
       var written = 0;
       var lastPercent = -1;
       for (final part in manifest.parts) {
         final partHasher = Sha256Stream();
+        var partWritten = 0;
         try {
           await for (final chunk in File(
             p.join(split.partsDir, part.name),
           ).openRead()) {
             _throwIfCancelled(isCancelled);
+            if (chunk.length > part.size - partWritten) {
+              corruptParts.add(part.name);
+              throw StateError(
+                strings.exportSplitPartCorrupted(split.asset.name, part.name),
+              );
+            }
+            if (chunk.length > manifest.size - written) {
+              throw StateError(
+                strings.joinedArchiveSizeMismatch(
+                  written + chunk.length,
+                  manifest.size,
+                ),
+              );
+            }
             hasher.add(chunk);
             partHasher.add(chunk);
             await out.writeFrom(chunk);
+            partWritten += chunk.length;
             written += chunk.length;
             final percent = (written * 100 ~/ manifest.size).clamp(0, 100);
             if (percent != lastPercent) {
@@ -1515,7 +1541,9 @@ class LibraryMirrorExporter {
               );
             }
           }
-          if (partHasher.close() != part.sha256) corruptParts.add(part.name);
+          if (partWritten != part.size || partHasher.close() != part.sha256) {
+            corruptParts.add(part.name);
+          }
         } finally {
           partHasher.dispose();
         }
@@ -1523,13 +1551,8 @@ class LibraryMirrorExporter {
       await out.flush();
       await out.close();
       out = null;
+      _throwIfCancelled(isCancelled);
       if (corruptParts.isNotEmpty) {
-        _deleteQuietly(tmp.path);
-        for (final name in corruptParts) {
-          final path = p.join(split.partsDir, name);
-          _deleteQuietly(path);
-          _deleteQuietly(PatchDownloader.resumeSidecarPath(path));
-        }
         throw StateError(
           strings.exportSplitPartCorrupted(
             split.asset.name,
@@ -1537,12 +1560,16 @@ class LibraryMirrorExporter {
           ),
         );
       }
+      if (written != manifest.size) {
+        throw StateError(
+          strings.joinedArchiveSizeMismatch(written, manifest.size),
+        );
+      }
       if (hasher.close() != manifest.sha256) {
         await _deleteDirQuietly(split.partsDir);
         await _rejectSplit(destDir, manifest);
         return false;
       }
-      _deleteQuietly(split.dest);
       try {
         await tmp.rename(split.dest);
       } on FileSystemException catch (e) {
@@ -1563,6 +1590,12 @@ class LibraryMirrorExporter {
       try {
         await out?.close();
       } catch (_) {}
+      await _deleteFileQuietlyAsync(tmp.path);
+      for (final name in corruptParts) {
+        final path = p.join(split.partsDir, name);
+        await _deleteFileQuietlyAsync(path);
+        await _deleteFileQuietlyAsync(PatchDownloader.resumeSidecarPath(path));
+      }
     }
     await _deleteDirQuietly(split.partsDir);
     return true;
@@ -1607,7 +1640,8 @@ class LibraryMirrorExporter {
   Future<void> _deletePreservingLocks(FileSystemEntity entity) async {
     if (entity.path.endsWith('.lock')) return;
     if (entity is Directory) {
-      await for (final child in entity.list(followLinks: false)) {
+      final children = await entity.list(followLinks: false).toList();
+      for (final child in children) {
         await _deletePreservingLocks(child);
       }
       // Never recursively unlink a lock created after the directory listing.
@@ -1619,11 +1653,12 @@ class LibraryMirrorExporter {
     }
   }
 
-  void _deleteQuietly(String path) {
+  Future<void> _deleteFileQuietlyAsync(String path) async {
     try {
-      final file = File(path);
-      if (file.existsSync()) file.deleteSync();
-    } catch (_) {}
+      await File(path).delete();
+    } on FileSystemException {
+      // Cleanup must not replace the failure that stopped assembly.
+    }
   }
 
   /// ה-`digest` שמגיע מ-GitHub הוא בצורת `sha256:<hex>`; פורמט אחר (או היעדר
