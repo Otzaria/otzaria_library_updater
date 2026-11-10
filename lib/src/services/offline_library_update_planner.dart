@@ -61,9 +61,20 @@ class OfflineLibraryUpdatePlanner {
       if (e.to > latest) latest = e.to;
       if (e.from < lowest) lowest = e.from;
     }
+    // דלתא יכולה להתחיל רק בגרסת מקור של קשת. בשאר הגרסאות ההחלטה היא
+    // בין מסד מלא לחסימה, לפי מיקומן ביחס ליעד המסלול המלא — גרסת המסד
+    // או יעד של קשת. לכן מספיק לבדוק את הגבולות האלה ונציג בכל רווח
+    // ביניהם, גם כשהמספור דליל מאוד. אין צורך בתוכנית לכל מספר גרסה.
+    final firstVersion = lowest > 0 ? lowest - 1 : 0;
+    final localVersions = <int>{
+      firstVersion,
+      fullDbVersion - 1,
+      fullDbVersion,
+      for (final e in edges) ...[e.from - 1, e.from, e.to - 1, e.to],
+    }.where((v) => v >= firstVersion && v < latest).toList()..sort();
     final full = ReleaseAsset(name: 'full', downloadUrl: '', size: fullDbBytes);
     List<LibraryUpdatePlan> plansWith(List<PatchEdge> available) => [
-          for (var v = lowest > 0 ? lowest - 1 : 0; v < latest; v++)
+          for (final v in localVersions)
             plan(
               localVersion: v,
               hasLocalVersionMeta: true,
@@ -427,14 +438,21 @@ class OfflineLibraryUpdatePlanner {
   /// מנסה מלמעלה למטה ועוצר בהצלחה הראשונה, ולכן מחזיר תמיד את הגבוהה ביותר.
   /// `null` כשאין אף מסלול קדימה.
   ///
-  /// הגרף כאן הוא עשרות קשתות, ולכן כמה ריצות Dijkstra הן זולות — וזה מה
-  /// שמאפשר לעצור באמצע כשמעבר סכמה חתך את הדרך ל-latest.
+  /// כל יעד נגיש הוא קצה של קשת קדימה. מנסים רק קצוות כאלה, כדי שפערים
+  /// במספרי הגרסאות לא יוסיפו ריצות Dijkstra שאין להן סיכוי להצליח.
   List<PatchEdge>? _bestReachablePath(
     List<PatchEdge> edges,
     int from,
     int to,
   ) {
-    for (var target = to; target > from; target--) {
+    final targets = {
+      for (final edge in edges)
+        if (edge.toVersion > edge.fromVersion &&
+            edge.toVersion > from &&
+            edge.toVersion <= to)
+          edge.toVersion,
+    }.toList()..sort((a, b) => b.compareTo(a));
+    for (final target in targets) {
       final path = _findBestPath(edges, from, target);
       if (path != null && path.isNotEmpty) return path;
     }

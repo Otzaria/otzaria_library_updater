@@ -175,7 +175,6 @@ abstract class LibraryUpdaterMessages {
   );
   String exportFullDbSchemaUnsupported(String tag, int schemaVersion);
   String exportSkippingPatchesFullDbWins(int fileCount, int fullDbVersion);
-  String exportSkippingUnpickedPatches(int fileCount);
   String exportFullDbInsteadOfSlowPatches(
     int fileCount,
     int patchMinutes,
@@ -187,8 +186,18 @@ abstract class LibraryUpdaterMessages {
   String mirrorNotEnoughDiskSpace(String dir, String needed, String free);
 }
 
+/// Optional progress text for mirror pruning.
+///
+/// Existing consumers can keep implementing [LibraryUpdaterMessages] without
+/// adding this capability. The exporter omits this informational stage when
+/// the selected message provider does not implement it.
+abstract interface class LibraryMirrorPruningMessages {
+  String exportSkippingUnpickedPatches(int fileCount);
+}
+
 /// המלל העברי — ברירת המחדל של [LibraryUpdaterMessages.current].
-class HebrewLibraryUpdaterMessages extends LibraryUpdaterMessages {
+class HebrewLibraryUpdaterMessages extends LibraryUpdaterMessages
+    implements LibraryMirrorPruningMessages {
   const HebrewLibraryUpdaterMessages();
 
   @override

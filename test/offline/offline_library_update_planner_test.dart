@@ -46,6 +46,7 @@ const _fullAsset = ReleaseAsset(
 
 void main() {
   _pickedEdgesTests();
+  _sparseVersionTests();
   const planner = OfflineLibraryUpdatePlanner();
 
   LibraryUpdatePlan plan({
@@ -798,6 +799,224 @@ void _pickedEdgesTests() {
         ),
         isNull,
       );
+    });
+
+    test('מספור דליל שומר קיצור והשלמה בלי לסרוק את הפערים', () {
+      const middle = 500000000;
+      const latest = 1000000000;
+      for (final fullVersion in [middle, latest]) {
+        expect(
+          planner.pickedEdges(
+            edges: const [
+              (from: 1, to: middle, bytes: mb),
+              (from: middle, to: latest, bytes: mb),
+              (from: 1, to: latest, bytes: mb),
+            ],
+            fullDbBytes: 1000 * mb,
+            fullDbVersion: fullVersion,
+          ),
+          {1, 2},
+          reason: 'full DB at $fullVersion',
+        );
+      }
+      expect(
+        planner.pickedEdges(
+          edges: const [
+            (from: 1, to: latest, bytes: mb),
+            (from: 2, to: latest, bytes: mb),
+          ],
+          fullDbBytes: 1000 * mb,
+          fullDbVersion: latest,
+        ),
+        isNull,
+      );
+    });
+
+    const cases = [
+      (
+        name: 'קיצורים ומסלולים שווי עלות',
+        fullVersion: 4,
+        edges: [
+          (from: 1, to: 3, bytes: mb),
+          (from: 1, to: 2, bytes: mb),
+          (from: 3, to: 4, bytes: mb),
+          (from: 2, to: 4, bytes: mb),
+          (from: 0, to: 4, bytes: mb),
+          (from: 0, to: 1, bytes: mb),
+        ],
+      ),
+      (
+        name: 'מסד מלא באמצע הגרף וגרסאות ללא קשת יוצאת',
+        fullVersion: 3,
+        edges: [
+          (from: 1, to: 3, bytes: mb),
+          (from: 1, to: 7, bytes: mb),
+          (from: 3, to: 6, bytes: mb),
+          (from: 8, to: 10, bytes: mb),
+        ],
+      ),
+      (
+        name: 'מסד מלא מתחת לגרף ללא השלמה',
+        fullVersion: 1,
+        edges: [
+          (from: 3, to: 5, bytes: mb),
+          (from: 5, to: 9, bytes: mb),
+          (from: 3, to: 9, bytes: mb),
+        ],
+      ),
+      (
+        name: 'מסד מלא גבוה מכל הקשתות',
+        fullVersion: 9,
+        edges: [(from: 1, to: 2, bytes: mb), (from: 2, to: 3, bytes: mb)],
+      ),
+      (
+        name: 'גרסאות ישנות וקשת כבדה',
+        fullVersion: 37,
+        edges: [
+          (from: 34, to: 37, bytes: 250 * mb),
+          (from: 35, to: 37, bytes: 90 * mb),
+          (from: 36, to: 37, bytes: 88 * mb),
+        ],
+      ),
+      (
+        name: 'קשתות לא מתקדמות אינן מסלול',
+        fullVersion: 2,
+        edges: [
+          (from: 0, to: 2, bytes: mb),
+          (from: 2, to: 4, bytes: mb),
+          (from: 0, to: 4, bytes: mb),
+          (from: 6, to: 6, bytes: mb),
+          (from: 5, to: 1, bytes: mb),
+        ],
+      ),
+    ];
+    for (final scenario in cases) {
+      test('התוכנית נשמרת לכל גרסה: ${scenario.name}', () {
+        final edges = [
+          for (final e in scenario.edges) _edge(e.from, e.to, size: e.bytes),
+        ];
+        final picked = planner.pickedEdges(
+          edges: scenario.edges,
+          fullDbBytes: 1000 * mb,
+          fullDbVersion: scenario.fullVersion,
+        );
+        final remaining = [
+          for (final (i, edge) in edges.indexed)
+            if (picked == null || picked.contains(i)) edge,
+        ];
+        final latest = scenario.edges.fold<int>(
+          scenario.fullVersion,
+          (version, e) => e.to > version ? e.to : version,
+        );
+        LibraryUpdatePlan from(
+          int version,
+          List<PatchEdge> available, {
+          bool hasMeta = true,
+        }) => planner.plan(
+          localVersion: version,
+          hasLocalVersionMeta: hasMeta,
+          latestVersion: latest,
+          edges: available,
+          latestFullDbAsset: const ReleaseAsset(
+            name: 'full',
+            downloadUrl: '',
+            size: 1000 * mb,
+          ),
+          fullDbReleaseTag: 'full',
+          latestFullDbVersion: scenario.fullVersion,
+        );
+
+        // הבדיקה עצמה מונה את כל הגרסאות, גם כאלה שהדגימה אינה מבקרת.
+        // משווים את שלבי הביצוע וההתאוששות, לא נימוק תצוגה שהסרת מסלול
+        // איטי עשויה לשנות מ"המלא מהיר יותר" ל"אין מסלול דלתא".
+        for (var version = 0; version <= latest + 1; version++) {
+          expect(
+            _executionShape(from(version, remaining)),
+            _executionShape(from(version, edges)),
+            reason: 'local version $version',
+          );
+        }
+        expect(
+          _executionShape(from(0, remaining, hasMeta: false)),
+          _executionShape(from(0, edges, hasMeta: false)),
+        );
+      });
+    }
+  });
+}
+
+Object? _executionShape(LibraryUpdatePlan? plan) => plan == null
+    ? null
+    : [
+        plan.kind,
+        plan.localVersion,
+        plan.targetVersion,
+        plan.blockReason,
+        plan.deltaSteps,
+        plan.fullDbAsset,
+        plan.fullDbReleaseTag,
+        _executionShape(plan.fullDownloadFallback),
+        _executionShape(plan.followUpDelta),
+      ];
+
+void _sparseVersionTests() {
+  group('תכנון בגרף עם פערים גדולים בין גרסאות', () {
+    const planner = OfflineLibraryUpdatePlanner();
+    const middle = 500000000;
+    const reached = 800000000;
+    const latest = 1000000000;
+
+    test('יעד חלקי שומר השלמה והתאוששות ממסד מלא ישן', () {
+      final edges = [
+        _edge(1, middle),
+        _edge(middle, reached),
+        _edge(1, reached),
+        _edge(7, latest),
+      ];
+      LibraryUpdatePlan from(int local, {bool hasMeta = true}) => planner.plan(
+        localVersion: local,
+        hasLocalVersionMeta: hasMeta,
+        latestVersion: latest,
+        edges: edges,
+        latestFullDbAsset: _fullAsset,
+        fullDbReleaseTag: 'full',
+        latestFullDbVersion: middle,
+      );
+
+      final delta = from(1);
+      expect(delta.kind, LibraryUpdatePlanKind.delta);
+      expect(delta.targetVersion, reached);
+      expect(delta.deltaSteps, [edges[2]]);
+      final fallback = delta.fullDownloadFallback!;
+      expect(fallback.targetVersion, middle);
+      expect(fallback.followUpDelta!.deltaSteps, [edges[1]]);
+      expect(fallback.finalTargetVersion, reached);
+
+      final install = from(0, hasMeta: false);
+      expect(install.kind, LibraryUpdatePlanKind.fullDownload);
+      expect(install.targetVersion, middle);
+      expect(install.followUpDelta!.deltaSteps, [edges[1]]);
+      expect(from(reached + 1).kind, LibraryUpdatePlanKind.blocked);
+    });
+
+    test('תיקו שומר סדר קשתות ויעד אינו חורג מ-latest', () {
+      final edges = [
+        _edge(1, 300000000),
+        _edge(1, 200000000),
+        _edge(300000000, reached),
+        _edge(200000000, reached),
+        _edge(1, latest + 1),
+        _edge(7, latest),
+      ];
+      final result = planner.plan(
+        localVersion: 1,
+        hasLocalVersionMeta: true,
+        latestVersion: latest,
+        edges: edges,
+      );
+      expect(result.kind, LibraryUpdatePlanKind.delta);
+      expect(result.targetVersion, reached);
+      expect(result.deltaSteps, [edges[0], edges[2]]);
     });
   });
 }

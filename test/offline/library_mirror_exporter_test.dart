@@ -22,6 +22,8 @@ import 'package:seforim_library_updater/src/services/patch_downloader.dart';
 import 'package:test/test.dart';
 import 'package:sqlite3/sqlite3.dart' as sqlite3;
 
+import '../support/legacy_library_updater_messages.dart';
+
 typedef ReleaseSpec = ({
   String tag,
   bool prerelease,
@@ -731,7 +733,7 @@ void main() {
       expect(
         stages,
         contains(
-          LibraryUpdaterMessages.current.exportSkippingUnpickedPatches(2),
+          const HebrewLibraryUpdaterMessages().exportSkippingUnpickedPatches(2),
         ),
       );
       final plans = await offlinePlans(3);
@@ -799,7 +801,44 @@ void main() {
         stages,
         isNot(
           contains(
-            LibraryUpdaterMessages.current.exportSkippingUnpickedPatches(2),
+            const HebrewLibraryUpdaterMessages().exportSkippingUnpickedPatches(
+              2,
+            ),
+          ),
+        ),
+      );
+    });
+
+    test('מימוש הודעות קיים אינו חייב לתמוך בהודעת הגיזום החדשה', () async {
+      LibraryUpdaterMessages.current = const LegacyLibraryUpdaterMessages();
+      final built = buildExporter([
+        release(
+          'v3',
+          assets: [
+            'seforim.db.zst',
+            'patch-v2-v3.db.zst',
+            'patch-v2-v3.db.zst.manifest.json',
+            'patch-v1-v3.db.zst',
+            'patch-v1-v3.db.zst.manifest.json',
+          ],
+        ),
+        release(
+          'v2',
+          assets: ['patch-v1-v2.db.zst', 'patch-v1-v2.db.zst.manifest.json'],
+        ),
+      ]);
+      final stages = <String>[];
+      await built.exporter.export(destDir: destDir, onStage: stages.add);
+      expect(assetOnDisk(destDir, 'v2', 'patch-v1-v2.db.zst'), isFalse);
+      expect(assetOnDisk(destDir, 'v3', 'patch-v1-v3.db.zst'), isTrue);
+      expect(stages.last, LibraryUpdaterMessages.current.exportDone);
+      expect(
+        stages,
+        isNot(
+          contains(
+            const HebrewLibraryUpdaterMessages().exportSkippingUnpickedPatches(
+              2,
+            ),
           ),
         ),
       );
