@@ -1,6 +1,8 @@
 import '../messages/library_updater_messages.dart';
+import '../models/delta_manifest.dart';
 import '../models/library_release.dart';
 import '../models/library_update_plan.dart';
+import '../models/patch_table_spec.dart';
 import 'apply_time_estimate.dart';
 
 /// מתכנן למסלול המראה (offline): אותו פלט כמו [LibraryUpdatePlanner], אבל
@@ -14,6 +16,109 @@ class OfflineLibraryUpdatePlanner {
   /// אומדן זמן העדכון **על המחשב הזה**, שלפיו נבחר בין שרשרת קובצי עדכון
   /// לבין החלפת המסד המלא כששתיהן מגיעות לאותה גרסה. ניתן להזרקה לבדיקות.
   final ApplyTimeEstimate applyTime;
+
+  /// אילו מ-[edges] (לפי מיקום) [plan] בוחר לגרסה מקומית כלשהי — כולל מחשב
+  /// בלי גרסה ידועה — כשמסד מלא בגודל [fullDbBytes] בגרסה [fullDbVersion] יושב
+  /// לצידן. `null` = אין מה להסיר: כולן נבחרות, או שהסרת השאר הייתה משנה את
+  /// סוג התוכנית או את הגרסה שאליה היא מגיעה עבור גרסה כלשהי.
+  ///
+  /// מראה רגילה ממילא נושאת את המסד המלא, ולכן קשת שאינה כאן היא בייטים
+  /// מתים על הכונן. המייצא והחסם שמוצג לפני ההורדה קוראים לאותה פונקציה.
+  Set<int>? pickedEdges({
+    required List<({int from, int to, int bytes})> edges,
+    required int fullDbBytes,
+    required int fullDbVersion,
+  }) {
+    if (edges.isEmpty || fullDbBytes <= 0) return null;
+    final patchEdges = [
+      for (final (i, e) in edges.indexed)
+        PatchEdge(
+          manifest: DeltaManifest(
+            fromVersion: e.from,
+            toVersion: e.to,
+            fromSchemaVersion: kSupportedDbSchemaVersion,
+            toSchemaVersion: kSupportedDbSchemaVersion,
+            fromContentHash: '',
+            toContentHash: '',
+            patchFiles: [
+              PatchFileEntry(
+                file: '$i',
+                compression: 'zstd',
+                sha256: '',
+                size: e.bytes,
+                uncompressedSha256: '',
+                uncompressedSize: 0,
+              ),
+            ],
+          ),
+          patchFileUrls: const {},
+          manifestUrl: '$i',
+        ),
+    ];
+    var latest = fullDbVersion;
+    var lowest = fullDbVersion;
+    for (final e in edges) {
+      if (e.to > latest) latest = e.to;
+      if (e.from < lowest) lowest = e.from;
+    }
+    // דלתא יכולה להתחיל רק בגרסת מקור של קשת. בשאר הגרסאות ההחלטה היא
+    // בין מסד מלא לחסימה, לפי מיקומן ביחס ליעד המסלול המלא — גרסת המסד
+    // או יעד של קשת. לכן מספיק לבדוק את הגבולות האלה ונציג בכל רווח
+    // ביניהם, גם כשהמספור דליל מאוד. אין צורך בתוכנית לכל מספר גרסה.
+    final firstVersion = lowest > 0 ? lowest - 1 : 0;
+    final localVersions = <int>{
+      firstVersion,
+      fullDbVersion - 1,
+      fullDbVersion,
+      for (final e in edges) ...[e.from - 1, e.from, e.to - 1, e.to],
+    }.where((v) => v >= firstVersion && v < latest).toList()..sort();
+    final full = ReleaseAsset(name: 'full', downloadUrl: '', size: fullDbBytes);
+    List<LibraryUpdatePlan> plansWith(List<PatchEdge> available) => [
+          for (final v in localVersions)
+            plan(
+              localVersion: v,
+              hasLocalVersionMeta: true,
+              latestVersion: latest,
+              edges: available,
+              latestFullDbAsset: full,
+              fullDbReleaseTag: 'full',
+              latestFullDbVersion: fullDbVersion,
+            ),
+          plan(
+            localVersion: 0,
+            hasLocalVersionMeta: false,
+            latestVersion: latest,
+            edges: available,
+            latestFullDbAsset: full,
+            fullDbReleaseTag: 'full',
+            latestFullDbVersion: fullDbVersion,
+          ),
+        ];
+
+    final before = plansWith(patchEdges);
+    final picked = <PatchEdge>{};
+    void collect(LibraryUpdatePlan? p) {
+      if (p == null) return;
+      picked.addAll(p.deltaSteps);
+      collect(p.fullDownloadFallback);
+      collect(p.followUpDelta);
+    }
+
+    before.forEach(collect);
+    if (picked.length == patchEdges.length) return null;
+
+    String outcome(LibraryUpdatePlan p) => '${p.kind.name}>${p.targetVersion}'
+        '+${p.followUpDelta?.targetVersion}'
+        '|${p.fullDownloadFallback?.targetVersion}';
+    final after = plansWith(patchEdges.where(picked.contains).toList());
+    for (var i = 0; i < before.length; i++) {
+      if (outcome(before[i]) != outcome(after[i])) return null;
+    }
+    return {
+      for (final (i, e) in patchEdges.indexed)
+        if (picked.contains(e)) i,
+    };
+  }
 
   /// בונה תוכנית עדכון.
   ///
@@ -333,14 +438,21 @@ class OfflineLibraryUpdatePlanner {
   /// מנסה מלמעלה למטה ועוצר בהצלחה הראשונה, ולכן מחזיר תמיד את הגבוהה ביותר.
   /// `null` כשאין אף מסלול קדימה.
   ///
-  /// הגרף כאן הוא עשרות קשתות, ולכן כמה ריצות Dijkstra הן זולות — וזה מה
-  /// שמאפשר לעצור באמצע כשמעבר סכמה חתך את הדרך ל-latest.
+  /// כל יעד נגיש הוא קצה של קשת קדימה. מנסים רק קצוות כאלה, כדי שפערים
+  /// במספרי הגרסאות לא יוסיפו ריצות Dijkstra שאין להן סיכוי להצליח.
   List<PatchEdge>? _bestReachablePath(
     List<PatchEdge> edges,
     int from,
     int to,
   ) {
-    for (var target = to; target > from; target--) {
+    final targets = {
+      for (final edge in edges)
+        if (edge.toVersion > edge.fromVersion &&
+            edge.toVersion > from &&
+            edge.toVersion <= to)
+          edge.toVersion,
+    }.toList()..sort((a, b) => b.compareTo(a));
+    for (final target in targets) {
       final path = _findBestPath(edges, from, target);
       if (path != null && path.isNotEmpty) return path;
     }

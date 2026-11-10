@@ -18,8 +18,11 @@ import 'disk_space_probe.dart';
 import 'download_scheduler.dart';
 import 'github_library_release_client.dart';
 import 'library_http_exception.dart';
+import 'library_release_source.dart';
 import 'library_update_discovery.dart';
 import 'local_mirror_library_release_client.dart';
+import 'offline_library_update_discovery.dart';
+import 'offline_library_update_planner.dart';
 import 'patch_downloader.dart';
 
 /// נתיב יחסי עם `/`, כדי שמראה שנוצרה ב-Windows תיקרא גם ב-macOS.
@@ -325,6 +328,7 @@ class LibraryMirrorExporter {
             from: manifest.fromVersion,
             to: manifest.toVersion,
             assetNames: [manifestAsset.name, ...fileNames],
+            manifest: manifest,
           ));
         }
       }
@@ -394,6 +398,23 @@ class LibraryMirrorExporter {
             dropped,
             LibraryUpdateDiscovery.releaseVersionOf(fullDbCarrier),
           ),
+        );
+      }
+
+      final unpicked = await _dropUnpickedPatches(
+        neededByRelease: neededByRelease,
+        mirroredEdges: mirroredEdges,
+        edges: edges,
+        carrier: fullDbCarrier,
+        prefetched: prefetched,
+        assetsRootPath: assetsRoot.path,
+        destDir: destDir,
+        isCancelled: isCancelled,
+      );
+      if (unpicked > 0 && strings is LibraryMirrorPruningMessages) {
+        onStage?.call(
+          (strings as LibraryMirrorPruningMessages)
+              .exportSkippingUnpickedPatches(unpicked),
         );
       }
     }
@@ -645,30 +666,12 @@ class LibraryMirrorExporter {
     // שברשימה אכן יושב שלם בדיסק.
     final mirroredReleases = <LibraryRelease>[
       for (final entry in plannedByRelease.entries)
-        LibraryRelease(
-          tag: entry.key.tag,
-          isPrerelease: entry.key.isPrerelease,
-          isDraft: entry.key.isDraft,
-          publishedAt: entry.key.publishedAt,
-          assets: [
-            for (final asset in entry.value)
-              ReleaseAsset(
-                name: asset.name,
-                downloadUrl: mirrorRelativePath(
-                  p.join(
-                    assetsRoot.path,
-                    _safeDirName(entry.key.tag),
-                    asset.name,
-                  ),
-                  from: destDir,
-                ),
-                size: asset.size,
-                id: asset.id,
-                updatedAt: asset.updatedAt,
-                digest: asset.digest,
-              ),
-            ?schemaMarkers[entry.key],
-          ],
+        _mirroredRelease(
+          entry.key,
+          entry.value,
+          assetsRootPath: assetsRoot.path,
+          destDir: destDir,
+          schemaMarker: schemaMarkers[entry.key],
         ),
     ];
     for (final entry in schemaMarkers.entries) {
@@ -707,6 +710,36 @@ class LibraryMirrorExporter {
     onStage?.call(strings.exportDone);
     return true;
   }
+
+  /// אותו תיאור נכסים משמש לכתיבה ולבדיקת הגיזום, כולל שמות הארכיונים
+  /// המורכבים ונתיבים יחסיים. כך הבדיקה רואה בדיוק את המטא-דאטה של המראה.
+  LibraryRelease _mirroredRelease(
+    LibraryRelease release,
+    Iterable<ReleaseAsset> assets, {
+    required String assetsRootPath,
+    required String destDir,
+    ReleaseAsset? schemaMarker,
+  }) => LibraryRelease(
+    tag: release.tag,
+    isPrerelease: release.isPrerelease,
+    isDraft: release.isDraft,
+    publishedAt: release.publishedAt,
+    assets: [
+      for (final asset in assets)
+        ReleaseAsset(
+          name: asset.name,
+          downloadUrl: mirrorRelativePath(
+            p.join(assetsRootPath, _safeDirName(release.tag), asset.name),
+            from: destDir,
+          ),
+          size: asset.size,
+          id: asset.id,
+          updatedAt: asset.updatedAt,
+          digest: asset.digest,
+        ),
+      ?schemaMarker,
+    ],
+  );
 
   /// זורק כשידוע בוודאות שאין מקום להורדה שנותרה. מדידה שנכשלה אינה חוסמת —
   /// ראו [DiskSpaceProbe]. נכס שכבר על הדיסק נספר לפי מה שחסר בו בלבד.
@@ -1120,6 +1153,169 @@ class LibraryMirrorExporter {
     }
     return dropped;
   }
+
+  /// מוציא מהתוכנית קשתות ש-[OfflineLibraryUpdatePlanner] לא יבחר באף גרסה
+  /// מקומית, כשהמסד המלא של [carrier] יושב לצידן. מחזיר כמה נכסים הוסרו.
+  ///
+  /// **למה צריך את זה מעבר ל-[_dropSlowPatches]:** שם כל קשת נמדדת לבדה ועם
+  /// זיכוי הורדה, אבל במראה רגילה המסד המלא נכנס ממילא — באופליין שני הקבצים
+  /// כבר על הכונן, והמתכנן בוחר בלי זיכוי ולפי השרשרת כולה. בנובמבר 2026
+  /// (v37) 332MiB מתוך 2.4GB היו קשתות שאף גרסה מקומית אינה בוחרת.
+  ///
+  /// ההכרעה היא של המתכנן עצמו ([OfflineLibraryUpdatePlanner.pickedEdges]),
+  /// על הגדלים שב-manifests — אותם גדלים שהמחשב הלא-מקוון יראה.
+  /// גם זהות התוכן נשמרת: manifest שאינו נחוץ למסלול עדיין עשוי לקבוע
+  /// `latestContentTag` או את גרסת המסד המלא כשה-tag אינו מספרי. מריצים גילוי
+  /// אמיתי על התוכנית לפני/אחרי, מהמניפסטים שכבר נטענו וללא בקשות רשת.
+  Future<int> _dropUnpickedPatches({
+    required Map<LibraryRelease, Map<String, ReleaseAsset>> neededByRelease,
+    required List<MirroredEdge> mirroredEdges,
+    required List<({int from, int to})> edges,
+    required LibraryRelease carrier,
+    required Map<ReleaseAsset, _ManifestFetch> prefetched,
+    required String assetsRootPath,
+    required String destDir,
+    bool Function()? isCancelled,
+  }) async {
+    // אותה מראה יכולה להיפתח עם allowPrerelease:false. במסלולים מעורבים
+    // קשת יציבה עשויה להידחות רק בגלל קיצור או מסד מלא של prerelease;
+    // משאירים אז את הגרף הקיים לשתי מדיניות הגילוי.
+    final releases = neededByRelease.keys;
+    if (releases.any((r) => r.isPrerelease) &&
+        releases.any((r) => !r.isPrerelease)) {
+      return 0;
+    }
+    final kept = [
+      for (final e in mirroredEdges)
+        if (_plannedEdgeBytes(e, neededByRelease) != null) e,
+    ];
+    if (kept.isEmpty || _fullDb(carrier) == null) return 0;
+
+    Future<OfflineLibraryDiscoveryResult?> discover(
+      Map<LibraryRelease, Map<String, ReleaseAsset>> planned,
+    ) async {
+      final releases = <LibraryRelease>[];
+      final manifests = <String, _ManifestFetch>{};
+      for (final entry in planned.entries) {
+        final assets = entry.value.values.toList(growable: false);
+        final schema = _unsupportedFullDbSchema(entry.key);
+        final mirrored = _mirroredRelease(
+          entry.key,
+          assets,
+          assetsRootPath: assetsRootPath,
+          destDir: destDir,
+          schemaMarker: schema == null
+              ? null
+              : _fullDbSchemaMarker(
+                  entry.key,
+                  schema,
+                  assetsRootPath: assetsRootPath,
+                  destDir: destDir,
+                ),
+        );
+        releases.add(mirrored);
+        for (final (i, asset) in assets.indexed) {
+          if (!asset.isDeltaManifest) continue;
+          final fetched = prefetched[asset];
+          // אם אין לנו תוצאת פענוח מדויקת, לא מנחשים מה יגלה המחשב האחר.
+          if (fetched == null) return null;
+          manifests[mirrored.assets[i].downloadUrl] = fetched;
+        }
+      }
+      return OfflineLibraryUpdateDiscovery(
+        client: _PlannedMirrorSource(releases, manifests),
+        supportedDbSchemaVersion: supportedDbSchemaVersion,
+      ).discover(allowPrerelease: true);
+    }
+
+    _throwIfCancelled(isCancelled);
+    final before = await discover(neededByRelease);
+    _throwIfCancelled(isCancelled);
+    final full = before?.latestFullDbAsset;
+    final fullVersion = before?.latestFullDbVersion;
+    if (before == null || full == null || fullVersion == null) return 0;
+    final picked = OfflineLibraryUpdatePlanner(applyTime: applyTime)
+        .pickedEdges(
+          edges: [
+            for (final e in kept)
+              (from: e.from, to: e.to, bytes: e.manifest.totalCompressedSize),
+          ],
+          fullDbBytes: full.size,
+          fullDbVersion: fullVersion,
+        );
+    if (picked == null) return 0;
+
+    // כמה manifests יכולים להפנות לאותו קובץ. מסירים רק נכסים שאינם
+    // נדרשים לאף קשת שנבחרה, ולעולם לא מסירים ארכיון של מסד מלא.
+    final protected = <LibraryRelease, Set<String>>{
+      for (final entry in neededByRelease.entries)
+        entry.key: {
+          for (final asset in entry.value.values)
+            if (asset.isFullDbArchive || asset.isSplitFullDbManifest)
+              asset.name,
+        },
+    };
+    for (final i in picked) {
+      final edge = kept[i];
+      protected[edge.release]!.addAll(edge.assetNames);
+    }
+    final proposed = <LibraryRelease, Map<String, ReleaseAsset>>{
+      for (final entry in neededByRelease.entries)
+        entry.key: Map.of(entry.value),
+    };
+    var dropped = 0;
+    for (final (i, edge) in kept.indexed) {
+      if (picked.contains(i)) continue;
+      final needed = proposed[edge.release]!;
+      for (final name in edge.assetNames) {
+        if (protected[edge.release]!.contains(name)) continue;
+        if (needed.remove(name) != null) dropped++;
+      }
+    }
+    if (dropped == 0) return 0;
+
+    _throwIfCancelled(isCancelled);
+    final after = await discover(proposed);
+    _throwIfCancelled(isCancelled);
+    if (after == null || !_sameDiscoveryMetadata(before, after)) return 0;
+
+    neededByRelease
+      ..clear()
+      ..addAll(proposed);
+    edges
+      ..clear()
+      ..addAll(
+        mirroredEdges
+            .where((e) => _plannedEdgeBytes(e, neededByRelease) != null)
+            .map((e) => (from: e.from, to: e.to)),
+      );
+    return dropped;
+  }
+
+  bool _sameDiscoveryMetadata(
+    OfflineLibraryDiscoveryResult before,
+    OfflineLibraryDiscoveryResult after,
+  ) =>
+      before.latestVersion == after.latestVersion &&
+      before.latestFullDbVersion == after.latestFullDbVersion &&
+      before.latestFullDbAsset == after.latestFullDbAsset &&
+      before.fullDbReleaseTag == after.fullDbReleaseTag &&
+      before.latestContentTag == after.latestContentTag &&
+      before.newestReleaseTag == after.newestReleaseTag &&
+      before.unsupportedSchemaVersions.length ==
+          after.unsupportedSchemaVersions.length &&
+      before.unsupportedSchemaVersions.containsAll(
+        after.unsupportedSchemaVersions,
+      ) &&
+      before.unsupportedPatchFormatVersions.length ==
+          after.unsupportedPatchFormatVersions.length &&
+      before.unsupportedPatchFormatVersions.containsAll(
+        after.unsupportedPatchFormatVersions,
+      ) &&
+      before.unreadableManifests.length == after.unreadableManifests.length &&
+      before.unreadableManifests.indexed.every(
+        (entry) => entry.$2 == after.unreadableManifests[entry.$1],
+      );
 
   int _dropSlowPatches({
     required Map<LibraryRelease, Map<String, ReleaseAsset>> neededByRelease,
@@ -1706,6 +1902,26 @@ typedef _ManifestFetch = ({
   StackTrace? stack,
 });
 
+/// גילוי מתוכנית נכסים בלי גישה לרשת או קריאה נוספת מהדיסק. גם כשלי
+/// הפענוח המקוריים משוחזרים, כדי לשמר את גרסאות החסימה ואת ההודעות.
+class _PlannedMirrorSource extends LibraryReleaseSource {
+  final List<LibraryRelease> releases;
+  final Map<String, _ManifestFetch> manifests;
+
+  _PlannedMirrorSource(this.releases, this.manifests);
+
+  @override
+  Future<List<LibraryRelease>> fetchReleases() async => releases;
+
+  @override
+  Future<DeltaManifest> fetchManifest(String url) async {
+    final fetched = manifests[url]!;
+    final manifest = fetched.manifest;
+    if (manifest != null) return manifest;
+    Error.throwWithStackTrace(fetched.error!, fetched.stack!);
+  }
+}
+
 /// מסד מפוצל בתוכנית: המניפסט שלו, היעד המורכב ותיקיית החלקים.
 typedef _SplitJob = ({
   LibraryRelease release,
@@ -1723,4 +1939,5 @@ typedef MirroredEdge = ({
   int from,
   int to,
   List<String> assetNames,
+  DeltaManifest manifest,
 });

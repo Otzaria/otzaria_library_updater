@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- `LibraryMirrorExporter`: a full mirror no longer carries patches that
+  `OfflineLibraryUpdatePlanner` would never pick for any local version (nor for
+  a machine with no known version), since the full DB ships beside them. The
+  planner preserves fallback and follow-up routes; pruning also verifies the
+  actual offline discovery result before changing the export plan. Content
+  release identity, full-DB version and compatibility diagnostics are preserved,
+  and files referenced by retained patches are not removed. Mirrors containing
+  both stable and prerelease entries keep their existing patch selection so
+  consumers of either release channel retain their update routes.
+- Offline planning and pruning inspect versions present in the graph and
+  representative gaps, avoiding work proportional to every integer in a sparse
+  version range.
+- The optional `LibraryMirrorPruningMessages` capability provides
+  `exportSkippingUnpickedPatches`. Existing implementations of
+  `LibraryUpdaterMessages` remain source compatible and omit only this new
+  informational stage. The default Hebrew provider supports the capability.
 - Split archive publication uses asynchronous rename, keeping disk I/O off the
   caller isolate. Cancellation is accepted until publication starts; a cancel
   during rename cannot turn successful publication into failure. Split-part and

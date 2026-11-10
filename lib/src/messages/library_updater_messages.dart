@@ -186,8 +186,18 @@ abstract class LibraryUpdaterMessages {
   String mirrorNotEnoughDiskSpace(String dir, String needed, String free);
 }
 
+/// Optional progress text for mirror pruning.
+///
+/// Existing consumers can keep implementing [LibraryUpdaterMessages] without
+/// adding this capability. The exporter omits this informational stage when
+/// the selected message provider does not implement it.
+abstract interface class LibraryMirrorPruningMessages {
+  String exportSkippingUnpickedPatches(int fileCount);
+}
+
 /// המלל העברי — ברירת המחדל של [LibraryUpdaterMessages.current].
-class HebrewLibraryUpdaterMessages extends LibraryUpdaterMessages {
+class HebrewLibraryUpdaterMessages extends LibraryUpdaterMessages
+    implements LibraryMirrorPruningMessages {
   const HebrewLibraryUpdaterMessages();
 
   @override
@@ -592,6 +602,10 @@ class HebrewLibraryUpdaterMessages extends LibraryUpdaterMessages {
   String exportSkippingPatchesFullDbWins(int fileCount, int fullDbVersion) =>
       'מדלג על $fileCount קובצי עדכון: המסד המלא (גרסה $fullDbVersion) מגיע '
       'גבוה מכל שרשרת שאפשר להחיל, ולכן אין בהם צורך';
+  @override
+  String exportSkippingUnpickedPatches(int fileCount) =>
+      'מדלג על $fileCount קובצי עדכון שאף מחשב לא ישתמש בהם: לכל גרסה יש '
+      'מסלול קצר יותר או המסד המלא';
   @override
   String exportFullDbInsteadOfSlowPatches(
     int fileCount,

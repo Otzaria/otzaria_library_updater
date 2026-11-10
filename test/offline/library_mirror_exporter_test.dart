@@ -22,6 +22,8 @@ import 'package:seforim_library_updater/src/services/patch_downloader.dart';
 import 'package:test/test.dart';
 import 'package:sqlite3/sqlite3.dart' as sqlite3;
 
+import '../support/legacy_library_updater_messages.dart';
+
 typedef ReleaseSpec = ({
   String tag,
   bool prerelease,
@@ -681,6 +683,165 @@ void main() {
 
       expect(assetOnDisk(destDir, 'v32-fixed', 'seforim.db.zst'), isTrue);
       expect(second.fetched, contains('seforim.db.zst'));
+    });
+  });
+
+  group('export — קשתות שאף גרסה מקומית אינה בוחרת', () {
+    Future<List<LibraryUpdatePlan>> offlinePlans(int latest) async {
+      final d = await OfflineLibraryUpdateDiscovery(
+        supportedDbSchemaVersion: kSupportedDbSchemaVersion,
+        client: LocalMirrorLibraryReleaseClient(mirrorDir: destDir),
+      ).discover(allowPrerelease: false);
+      return [
+        for (var v = 0; v < latest; v++)
+          const OfflineLibraryUpdatePlanner().plan(
+            localVersion: v,
+            hasLocalVersionMeta: v > 0,
+            latestVersion: d.latestVersion,
+            edges: d.edges,
+            latestFullDbAsset: d.latestFullDbAsset,
+            fullDbReleaseTag: d.fullDbReleaseTag,
+            latestFullDbVersion: d.latestFullDbVersion,
+          ),
+      ];
+    }
+
+    test('קשת שיש מעליה קיצור אינה יורדת, והתוכניות לא משתנות', () async {
+      final stages = <String>[];
+      final built = buildExporter([
+        release(
+          'v3',
+          assets: [
+            'seforim.db.zst',
+            'patch-v2-v3.db.zst',
+            'patch-v2-v3.db.zst.manifest.json',
+            'patch-v1-v3.db.zst',
+            'patch-v1-v3.db.zst.manifest.json',
+          ],
+        ),
+        release(
+          'v2',
+          assets: ['patch-v1-v2.db.zst', 'patch-v1-v2.db.zst.manifest.json'],
+        ),
+      ]);
+      await built.exporter.export(destDir: destDir, onStage: stages.add);
+
+      expect(built.fetched, isNot(contains('patch-v1-v2.db.zst')));
+      expect(assetOnDisk(destDir, 'v2', 'patch-v1-v2.db.zst'), isFalse);
+      expect(assetOnDisk(destDir, 'v3', 'patch-v1-v3.db.zst'), isTrue);
+      expect(assetOnDisk(destDir, 'v3', 'patch-v2-v3.db.zst'), isTrue);
+      expect(
+        stages,
+        contains(
+          const HebrewLibraryUpdaterMessages().exportSkippingUnpickedPatches(2),
+        ),
+      );
+      final plans = await offlinePlans(3);
+      expect(plans[0].kind, LibraryUpdatePlanKind.fullDownload);
+      expect(plans[1].deltaSteps.map((e) => e.toVersion), [3]);
+      expect(plans[2].deltaSteps.map((e) => e.fromVersion), [2]);
+    });
+
+    test('השלמה אחרי מסד מלא ישן נשמרת', () async {
+      // אין מסד מלא ב-v3, ולכן המסלול המלא הוא v2 ואחריו 2→3.
+      final built = buildExporter([
+        release(
+          'v3',
+          assets: [
+            'patch-v2-v3.db.zst',
+            'patch-v2-v3.db.zst.manifest.json',
+            'patch-v1-v3.db.zst',
+            'patch-v1-v3.db.zst.manifest.json',
+          ],
+        ),
+        release(
+          'v2',
+          assets: [
+            'seforim.db.zst',
+            'patch-v1-v2.db.zst',
+            'patch-v1-v2.db.zst.manifest.json',
+          ],
+        ),
+      ]);
+      await built.exporter.export(destDir: destDir);
+
+      expect(assetOnDisk(destDir, 'v3', 'patch-v2-v3.db.zst'), isTrue);
+      expect(assetOnDisk(destDir, 'v2', 'patch-v1-v2.db.zst'), isFalse);
+      final plans = await offlinePlans(3);
+      expect(plans[0].kind, LibraryUpdatePlanKind.fullDownload);
+      expect(plans[0].finalTargetVersion, 3);
+      expect(plans[1].finalTargetVersion, 3);
+      expect(plans[2].finalTargetVersion, 3);
+    });
+
+    test('במצב אישי אין מסד מלא, ולכן אין גיזום', () async {
+      final built = buildExporter([
+        release(
+          'v3',
+          assets: [
+            'seforim.db.zst',
+            'patch-v2-v3.db.zst',
+            'patch-v2-v3.db.zst.manifest.json',
+            'patch-v1-v3.db.zst',
+            'patch-v1-v3.db.zst.manifest.json',
+          ],
+        ),
+        release(
+          'v2',
+          assets: ['patch-v1-v2.db.zst', 'patch-v1-v2.db.zst.manifest.json'],
+        ),
+      ]);
+      final stages = <String>[];
+      await built.exporter.export(
+        destDir: destDir,
+        fromVersion: 1,
+        onStage: stages.add,
+      );
+      expect(
+        stages,
+        isNot(
+          contains(
+            const HebrewLibraryUpdaterMessages().exportSkippingUnpickedPatches(
+              2,
+            ),
+          ),
+        ),
+      );
+    });
+
+    test('מימוש הודעות קיים אינו חייב לתמוך בהודעת הגיזום החדשה', () async {
+      LibraryUpdaterMessages.current = const LegacyLibraryUpdaterMessages();
+      final built = buildExporter([
+        release(
+          'v3',
+          assets: [
+            'seforim.db.zst',
+            'patch-v2-v3.db.zst',
+            'patch-v2-v3.db.zst.manifest.json',
+            'patch-v1-v3.db.zst',
+            'patch-v1-v3.db.zst.manifest.json',
+          ],
+        ),
+        release(
+          'v2',
+          assets: ['patch-v1-v2.db.zst', 'patch-v1-v2.db.zst.manifest.json'],
+        ),
+      ]);
+      final stages = <String>[];
+      await built.exporter.export(destDir: destDir, onStage: stages.add);
+      expect(assetOnDisk(destDir, 'v2', 'patch-v1-v2.db.zst'), isFalse);
+      expect(assetOnDisk(destDir, 'v3', 'patch-v1-v3.db.zst'), isTrue);
+      expect(stages.last, LibraryUpdaterMessages.current.exportDone);
+      expect(
+        stages,
+        isNot(
+          contains(
+            const HebrewLibraryUpdaterMessages().exportSkippingUnpickedPatches(
+              2,
+            ),
+          ),
+        ),
+      );
     });
   });
 
@@ -2456,6 +2617,8 @@ void main() {
       var peak = 0;
       final built = buildExporter(
         chainReleases(),
+        // שרשרת של שש קשתות נשארת בטווח, כדי שכולן ייבחרו ויישארו במראה.
+        applyTime: const ApplyTimeEstimate(stepIntermediateSeconds: 0),
         beforeAsset: (name) async {
           if (!name.endsWith('.manifest.json')) return;
           inFlight++;

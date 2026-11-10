@@ -10,7 +10,10 @@ library;
 
 export 'src/hashing/fast_sha256.dart' show Sha256Stream;
 export 'src/messages/library_updater_messages.dart'
-    show LibraryUpdaterMessages, HebrewLibraryUpdaterMessages;
+    show
+        LibraryUpdaterMessages,
+        HebrewLibraryUpdaterMessages,
+        LibraryMirrorPruningMessages;
 export 'src/models/delta_manifest.dart' show DeltaManifest, PatchFileEntry;
 export 'src/models/library_release.dart'
     show LibraryRelease, ReleaseAsset, fullDbArchiveNameForSchema;
