@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:http/testing.dart';
+import 'package:path/path.dart' as p;
 import 'package:seforim_library_updater/seforim_library_updater.dart';
 import 'package:test/test.dart';
 
@@ -176,7 +177,7 @@ void main() {
   test(
     'reusing a joined archive asynchronously removes leftover split parts',
     () async {
-      final destination = '${temp.path}/full.db.zst';
+      final destination = p.join(temp.path, 'full.db.zst');
       final bytes = Uint8List.fromList([1, 2, 3, 4]);
       final digest = sha256.convert(bytes).toString();
       File(destination).writeAsBytesSync(bytes);
