@@ -242,6 +242,27 @@ void main() {
     expect(File(service.markerPathFor(dbPath)).existsSync(), isFalse);
   });
 
+  test(
+    'finishSuccessAsync מוחק את הסימון לפני ההמתנה ואת הגיבוי אחריה',
+    () async {
+      await service.beginApply(
+        dbPath: dbPath,
+        fromVersion: 1,
+        toVersion: 2,
+        timestamp: 't',
+      );
+      File('${service.backupPathFor(dbPath)}-wal').writeAsStringSync('WAL');
+      final cleanup = service.finishSuccessAsync(dbPath);
+      expect(File(service.markerPathFor(dbPath)).existsSync(), isFalse);
+      await cleanup;
+      expect(File(service.backupPathFor(dbPath)).existsSync(), isFalse);
+      expect(
+        File('${service.backupPathFor(dbPath)}-wal').existsSync(),
+        isFalse,
+      );
+    },
+  );
+
   test('rollback משחזר את ה-DB מהגיבוי', () async {
     await service.beginApply(
       dbPath: dbPath,

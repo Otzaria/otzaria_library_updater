@@ -156,6 +156,13 @@ class LibraryDbRecoveryService {
     _deleteWithSidecars(backupPathFor(dbPath));
   }
 
+  /// כמו [finishSuccess], אך רק מחיקת הסימון (נקודת ה-commit) סינכרונית; מחיקת
+  /// הגיבוי, בגודל ה-DB, אסינכרונית כדי לא לחסום את ה-isolate הקורא.
+  Future<void> finishSuccessAsync(String dbPath) {
+    _deleteQuietly(markerPathFor(dbPath));
+    return _deleteWithSidecarsAsync(backupPathFor(dbPath));
+  }
+
   /// מנקה סימון/גיבוי תקועים אחרי שזוהה מצב לא תקין ודווח (לא מחיקה שקטה).
   void clearStaleArtifacts(String dbPath) {
     _deleteQuietly(markerPathFor(dbPath));
