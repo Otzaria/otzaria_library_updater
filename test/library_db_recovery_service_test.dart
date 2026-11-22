@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
@@ -16,6 +17,19 @@ void main() {
     File(dbPath).writeAsStringSync('ORIGINAL');
   });
   tearDown(() => tmp.deleteSync(recursive: true));
+
+  test('beginApply אינו חוסם את ה-event loop (#5789)', () async {
+    // I/O סינכרוני היה מסיים בלי לפנות ל-event loop, ו-Timer לא היה רץ.
+    var timerRan = false;
+    Timer.run(() => timerRan = true);
+    await service.beginApply(
+      dbPath: dbPath,
+      fromVersion: 1,
+      toVersion: 2,
+      timestamp: 't',
+    );
+    expect(timerRan, isTrue);
+  });
 
   test('beginApply יוצר גיבוי וסימון', () async {
     await service.beginApply(
