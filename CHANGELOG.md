@@ -7,6 +7,10 @@
   recovery marker is still flushed before the DB is renamed, but the write no
   longer blocks the caller's isolate on a slow or scanned disk.
 
+- `LibraryDbRecoveryService.finishSuccessAsync` removes the recovery marker
+  synchronously, like `finishSuccess`, and deletes the DB-sized backup with
+  asynchronous I/O, so the caller's isolate is not blocked while it is freed.
+
 - `LibraryMirrorExporter`: a full mirror no longer carries patches that
   `OfflineLibraryUpdatePlanner` would never pick for any local version (nor for
   a machine with no known version), since the full DB ships beside them. The

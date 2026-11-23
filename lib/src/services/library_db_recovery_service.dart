@@ -64,7 +64,7 @@ class LibraryDbRecoveryService {
     final backup = File(backupPathFor(dbPath));
 
     if (!await marker.exists()) {
-      if (await backup.exists()) await _deleteWithSidecarsAsync(backup.path);
+      if (await backup.exists()) await _deleteCommittedBackup(backup.path);
       return const RecoveryResult(RecoveryAction.none);
     }
 
@@ -156,6 +156,18 @@ class LibraryDbRecoveryService {
     _deleteWithSidecars(backupPathFor(dbPath));
   }
 
+  /// כמו [finishSuccess], אך רק מחיקת הסימון (נקודת ה-commit) סינכרונית; מחיקת
+  /// הגיבוי, בגודל ה-DB, אסינכרונית כדי לא לחסום את ה-isolate הקורא.
+  /// כשל במחיקת סמן קיים נזרק סינכרונית והגיבוי נשאר זמין לשחזור.
+  Future<void> finishSuccessAsync(String dbPath) {
+    try {
+      File(markerPathFor(dbPath)).deleteSync();
+    } on FileSystemException catch (error) {
+      if (!_isMissingFile(error)) rethrow;
+    }
+    return _deleteCommittedBackup(backupPathFor(dbPath));
+  }
+
   /// מנקה סימון/גיבוי תקועים אחרי שזוהה מצב לא תקין ודווח (לא מחיקה שקטה).
   void clearStaleArtifacts(String dbPath) {
     _deleteQuietly(markerPathFor(dbPath));
@@ -200,6 +212,24 @@ class LibraryDbRecoveryService {
       final file = File(path);
       if (file.existsSync()) file.deleteSync();
     } catch (_) {}
+  }
+
+  Future<void> _deleteCommittedBackup(String path) async {
+    // משאירים את הגיבוי כל עוד לא נוקו הצדדים שלו, כדי ששחזור יוכל לנסות שוב.
+    for (final suffix in _sidecarSuffixes) {
+      try {
+        await File('$path$suffix').delete();
+      } on FileSystemException catch (error) {
+        if (!_isMissingFile(error)) return;
+      }
+    }
+    await _deleteQuietlyAsync(path);
+  }
+
+  static bool _isMissingFile(FileSystemException error) {
+    // ENOENT / ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND.
+    final code = error.osError?.errorCode;
+    return code == 2 || (Platform.isWindows && code == 3);
   }
 
   Future<void> _deleteWithSidecarsAsync(String path) async {
