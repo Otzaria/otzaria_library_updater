@@ -263,6 +263,54 @@ void main() {
     },
   );
 
+  test('כשל במחיקת הסימון נזרק מיד והגיבוי נשמר', () async {
+    await service.beginApply(
+      dbPath: dbPath,
+      fromVersion: 1,
+      toVersion: 2,
+      timestamp: 't',
+    );
+    final markerPath = service.markerPathFor(dbPath);
+    File(markerPath).deleteSync();
+    Directory(markerPath).createSync();
+    File(p.join(markerPath, 'child')).createSync();
+
+    expect(
+      () => service.finishSuccessAsync(dbPath),
+      throwsA(isA<FileSystemException>()),
+    );
+    expect(File(service.backupPathFor(dbPath)).existsSync(), isTrue);
+  });
+
+  test('finishSuccessAsync מנקה גיבוי גם כשהסימון כבר חסר', () async {
+    final backup = File(service.backupPathFor(dbPath))..createSync();
+
+    await service.finishSuccessAsync(dbPath);
+
+    expect(backup.existsSync(), isFalse);
+  });
+
+  test('התאוששות מנסה שוב לנקות גיבוי כשהסרת sidecar נכשלה', () async {
+    final backup = File(service.backupPathFor(dbPath))..createSync();
+    final blockedWal = Directory('${backup.path}-wal')..createSync();
+    File(p.join(blockedWal.path, 'child')).createSync();
+
+    await service.finishSuccessAsync(dbPath);
+    expect(backup.existsSync(), isTrue);
+
+    await service.recoverIfNeeded(dbPath);
+    expect(backup.existsSync(), isTrue);
+
+    blockedWal.deleteSync(recursive: true);
+    final backupWal = File(blockedWal.path)..writeAsStringSync('WAL');
+    final result = await service.recoverIfNeeded(dbPath);
+
+    expect(result.action, RecoveryAction.none);
+    expect(backupWal.existsSync(), isFalse);
+    expect(backup.existsSync(), isFalse);
+    expect(File(dbPath).existsSync(), isTrue);
+  });
+
   test('rollback משחזר את ה-DB מהגיבוי', () async {
     await service.beginApply(
       dbPath: dbPath,
