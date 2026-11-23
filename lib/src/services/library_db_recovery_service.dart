@@ -57,26 +57,26 @@ class LibraryDbRecoveryService {
   /// * backup יתום (ללא marker) → שאריות; מוחקים אותו.
   Future<RecoveryResult> recoverIfNeeded(String dbPath) async {
     // שאריות עותקים זמניים מגרסאות שגיבו בהעתקה — עשויות לשקול כמו ה-DB.
-    _deleteQuietly('$dbPath.backup.tmp');
-    _deleteQuietly('$dbPath.restore.tmp');
+    await _deleteQuietlyAsync('$dbPath.backup.tmp');
+    await _deleteQuietlyAsync('$dbPath.restore.tmp');
 
     final marker = File(markerPathFor(dbPath));
     final backup = File(backupPathFor(dbPath));
 
-    if (!marker.existsSync()) {
-      if (backup.existsSync()) _deleteWithSidecars(backup.path);
+    if (!await marker.exists()) {
+      if (await backup.exists()) await _deleteWithSidecarsAsync(backup.path);
       return const RecoveryResult(RecoveryAction.none);
     }
 
-    if (!backup.existsSync()) {
+    if (!await backup.exists()) {
       return RecoveryResult(
         RecoveryAction.blockedMissingBackup,
         LibraryUpdaterMessages.current.interruptedUpdateWithoutBackup,
       );
     }
 
-    _restore(backup.path, dbPath);
-    _deleteQuietly(marker.path);
+    await _restore(backup.path, dbPath);
+    await _deleteQuietlyAsync(marker.path);
     return RecoveryResult(
       RecoveryAction.restored,
       LibraryUpdaterMessages.current.interruptedUpdateRestored,
@@ -111,6 +111,8 @@ class LibraryDbRecoveryService {
   /// [createBackup] — `true` במסלול החלפת קובץ (הורדה מלאה): ה-DB חייב להיות
   /// סגור, ואחרי הקריאה הוא כבר אינו ב-dbPath. במסלול patch דלתאי חובה `false`:
   /// ה-apply כותב לתוך ה-DB החי בתוך transaction יחיד, וקריסה מתגלגלת מעצמה.
+  ///
+  /// כל ה-I/O אסינכרוני: נקרא מה-isolate הראשי, ו-`flush` על דיסק איטי חוסם שניות.
   Future<void> beginApply({
     required String dbPath,
     required int fromVersion,
@@ -120,12 +122,12 @@ class LibraryDbRecoveryService {
   }) async {
     // גיבוי ללא DB חי לצדו הוא העותק היחיד ואסור למחקו: ה-rename שאחריו ייכשל,
     // הסימון יישאר, והעלייה הבאה תשחזר ממנו.
-    if (File(dbPath).existsSync()) {
-      _deleteWithSidecars(backupPathFor(dbPath));
+    if (await File(dbPath).exists()) {
+      await _deleteWithSidecarsAsync(backupPathFor(dbPath));
     }
-    _deleteQuietly(markerPathFor(dbPath));
+    await _deleteQuietlyAsync(markerPathFor(dbPath));
 
-    File(markerPathFor(dbPath)).writeAsStringSync(
+    await File(markerPathFor(dbPath)).writeAsString(
       jsonEncode({
         'fromVersion': fromVersion,
         'toVersion': toVersion,
@@ -136,11 +138,13 @@ class LibraryDbRecoveryService {
 
     if (createBackup) {
       try {
-        _renameWithSidecars(dbPath, backupPathFor(dbPath));
+        await _renameWithSidecars(dbPath, backupPathFor(dbPath));
       } catch (_) {
         // רק אם ה-DB לא זז כלל; אחרת הסימון הוא מה שמונע את מחיקת הגיבוי
         // כ"שאריות" בעלייה הבאה.
-        if (File(dbPath).existsSync()) _deleteQuietly(markerPathFor(dbPath));
+        if (await File(dbPath).exists()) {
+          await _deleteQuietlyAsync(markerPathFor(dbPath));
+        }
         rethrow;
       }
     }
@@ -160,27 +164,27 @@ class LibraryDbRecoveryService {
 
   /// נקרא אחרי apply כושל — משחזר את הגיבוי ומנקה.
   Future<void> rollback(String dbPath) async {
-    if (File(backupPathFor(dbPath)).existsSync()) {
-      _restore(backupPathFor(dbPath), dbPath);
+    if (await File(backupPathFor(dbPath)).exists()) {
+      await _restore(backupPathFor(dbPath), dbPath);
     }
-    _deleteQuietly(markerPathFor(dbPath));
+    await _deleteQuietlyAsync(markerPathFor(dbPath));
   }
 
   /// מחזיר את הגיבוי אל [dbPath] ב-rename (אותה תיקייה — אטומי, ללא העתקה).
   /// ה-sidecars שב-[dbPath] נמחקים רק כשיושב שם DB אחר, כדי שה-journal שלו לא
   /// יוחל על המשוחזר; בלעדיו הם sidecars של הגיבוי עצמו (הזזה שנקטעה).
-  void _restore(String backupPath, String dbPath) {
-    if (File(dbPath).existsSync()) _deleteWithSidecars(dbPath);
-    _renameWithSidecars(backupPath, dbPath);
+  Future<void> _restore(String backupPath, String dbPath) async {
+    if (await File(dbPath).exists()) await _deleteWithSidecarsAsync(dbPath);
+    await _renameWithSidecars(backupPath, dbPath);
   }
 
   /// מזיז את הקובץ יחד עם ה-sidecars שלו, כדי ש-hot journal יגולגל על ה-DB
   /// שלו ולא על זה שיישב במקומו.
-  void _renameWithSidecars(String from, String to) {
-    File(from).renameSync(to);
+  Future<void> _renameWithSidecars(String from, String to) async {
+    await File(from).rename(to);
     for (final suffix in _sidecarSuffixes) {
       final sidecar = File('$from$suffix');
-      if (sidecar.existsSync()) sidecar.renameSync('$to$suffix');
+      if (await sidecar.exists()) await sidecar.rename('$to$suffix');
     }
   }
 
@@ -195,6 +199,20 @@ class LibraryDbRecoveryService {
     try {
       final file = File(path);
       if (file.existsSync()) file.deleteSync();
+    } catch (_) {}
+  }
+
+  Future<void> _deleteWithSidecarsAsync(String path) async {
+    await _deleteQuietlyAsync(path);
+    for (final suffix in _sidecarSuffixes) {
+      await _deleteQuietlyAsync('$path$suffix');
+    }
+  }
+
+  Future<void> _deleteQuietlyAsync(String path) async {
+    try {
+      final file = File(path);
+      if (await file.exists()) await file.delete();
     } catch (_) {}
   }
 }

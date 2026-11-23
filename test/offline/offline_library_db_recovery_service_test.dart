@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -18,6 +19,18 @@ void main() {
     File(dbPath).writeAsStringSync('ORIGINAL');
   });
   tearDown(() => tmp.deleteSync(recursive: true));
+
+  test('beginApply אינו חוסם את ה-event loop (#5789)', () async {
+    var timerRan = false;
+    Timer.run(() => timerRan = true);
+    await service.beginApply(
+      dbPath: dbPath,
+      fromVersion: 1,
+      toVersion: 2,
+      timestamp: 't',
+    );
+    expect(timerRan, isTrue);
+  });
 
   test('beginApply כותב סימון בלבד — בלי העתקה של ה-DB', () async {
     await service.beginApply(

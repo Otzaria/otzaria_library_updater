@@ -142,8 +142,14 @@ class OfflineLibraryDbRecoveryService {
     required int toVersion,
     required String timestamp,
   }) async {
-    _deleteLegacyArtifacts(dbPath);
-    File(markerPathFor(dbPath)).writeAsStringSync(
+    // אסינכרוני: נקרא מה-isolate הראשי, ו-`flush` על דיסק איטי חוסם שניות.
+    for (final suffix in _legacySuffixes) {
+      try {
+        final file = File('$dbPath$suffix');
+        if (await file.exists()) await file.delete();
+      } catch (_) {}
+    }
+    await File(markerPathFor(dbPath)).writeAsString(
       jsonEncode({
         'fromVersion': fromVersion,
         'toVersion': toVersion,
